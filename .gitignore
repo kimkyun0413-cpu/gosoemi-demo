@@ -4,6 +4,7 @@
 !.env.example
 credentials.json
 token.json
+.streamlit/secrets.toml
 
 # User data (personal information)
 cases.json

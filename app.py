@@ -4,6 +4,7 @@ import re
 import datetime
 import unicodedata
 import uuid
+import hmac
 from io import BytesIO
 import streamlit as st
 from docx import Document
@@ -533,6 +534,30 @@ def process_question(question, history):
 
 st.set_page_config(page_title="AI 비서", page_icon="✨")
 st.title("✨ AI 비서")
+
+APP_PASSWORD = os.environ.get("APP_PASSWORD")
+
+if not APP_PASSWORD:
+    st.error("APP_PASSWORD 환경변수가 설정되지 않았습니다.")
+    st.stop()
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    password_input = st.text_input("비밀번호", type="password")
+    if st.button("로그인"):
+        if hmac.compare_digest(password_input, APP_PASSWORD):
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("비밀번호가 올바르지 않습니다.")
+    st.stop()
+
+with st.sidebar:
+    if st.button("로그아웃"):
+        del st.session_state["authenticated"]
+        st.rerun()
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
