@@ -1,0 +1,28 @@
+# Secrets / credentials
+.env
+.env.*
+!.env.example
+credentials.json
+token.json
+
+# User data (personal information)
+cases.json
+memory.json
+schedules.json
+case_draft_*.txt
+case_draft_*.docx
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Backup files
+main.before_*.py
+app.before_*.py
+main.backup.py
+requirements.before_*.txt
+
+# macOS
+.DS_Store
