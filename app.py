@@ -532,8 +532,123 @@ def process_question(question, history):
     return response.text
 
 
-st.set_page_config(page_title="AI 비서", page_icon="✨")
-st.title("✨ AI 비서")
+BRAND_CSS = """
+<style>
+:root {
+    --dgo-navy: #0B1F3A;
+    --dgo-navy-light: #13294B;
+    --dgo-blue: #2F80ED;
+    --dgo-blue-light: #EAF2FE;
+    --dgo-muted: #5B6B82;
+}
+
+.dgo-hero {
+    text-align: center;
+    padding: 0.5rem 0 1.25rem 0;
+}
+
+.dgo-hero-title {
+    font-size: 2.1rem;
+    font-weight: 800;
+    color: var(--dgo-navy);
+    letter-spacing: -0.02em;
+}
+
+.dgo-hero-subtitle {
+    margin-top: 0.4rem;
+    font-size: 1.02rem;
+    color: var(--dgo-muted);
+}
+
+.dgo-card {
+    background-color: var(--dgo-blue-light);
+    border: 1px solid #D3E4FB;
+    border-radius: 14px;
+    padding: 1.1rem 0.8rem;
+    text-align: center;
+    font-size: 1.4rem;
+    color: var(--dgo-navy);
+    margin-bottom: 0.75rem;
+}
+
+.dgo-card b {
+    display: block;
+    margin-top: 0.35rem;
+    font-size: 0.95rem;
+    font-weight: 700;
+}
+
+.dgo-footer {
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: 1px solid #E3E8EF;
+    text-align: center;
+    font-size: 0.82rem;
+    color: var(--dgo-muted);
+}
+
+[data-testid="stButton"] button,
+[data-testid="stFormSubmitButton"] button,
+[data-testid="stDownloadButton"] button {
+    background-color: var(--dgo-blue);
+    color: #FFFFFF;
+    border: none;
+    border-radius: 8px;
+    font-weight: 600;
+}
+
+[data-testid="stButton"] button:hover,
+[data-testid="stFormSubmitButton"] button:hover,
+[data-testid="stDownloadButton"] button:hover {
+    background-color: var(--dgo-navy-light);
+    color: #FFFFFF;
+}
+
+@media (max-width: 640px) {
+    .dgo-hero-title {
+        font-size: 1.6rem;
+    }
+    .dgo-hero-subtitle {
+        font-size: 0.92rem;
+    }
+    .dgo-card {
+        font-size: 1.2rem;
+    }
+}
+
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+[data-testid="stToolbar"] {visibility: hidden;}
+[data-testid="stAppDeployButton"] {display: none;}
+</style>
+"""
+
+
+def render_brand_header():
+    st.markdown(
+        '<div class="dgo-hero">'
+        '<div class="dgo-hero-title">⚖️ 고소음이</div>'
+        '<div class="dgo-hero-subtitle">어려운 피해 상황을 정리하고, 고소장 초안 작성을 돕는 AI 법률정보 도우미</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_footer():
+    st.markdown(
+        '<div class="dgo-footer">'
+        '고소음이는 법률정보와 문서 작성을 돕는 서비스이며, 변호사의 법률자문을 대체하지 않습니다.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+st.set_page_config(
+    page_title="고소음이 | AI 법률정보 도우미",
+    page_icon="⚖️",
+    initial_sidebar_state="collapsed",
+)
+st.markdown(BRAND_CSS, unsafe_allow_html=True)
 
 APP_PASSWORD = os.environ.get("APP_PASSWORD")
 
@@ -545,6 +660,7 @@ if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
+    render_brand_header()
     password_input = st.text_input("비밀번호", type="password")
     if st.button("로그인"):
         if hmac.compare_digest(password_input, APP_PASSWORD):
@@ -555,9 +671,20 @@ if not st.session_state.authenticated:
     st.stop()
 
 with st.sidebar:
+    st.markdown("**고소음이 데모**")
     if st.button("로그아웃"):
         del st.session_state["authenticated"]
         st.rerun()
+
+render_brand_header()
+
+card_col1, card_col2, card_col3 = st.columns(3)
+with card_col1:
+    st.markdown('<div class="dgo-card">📝<b>피해 내용 정리</b></div>', unsafe_allow_html=True)
+with card_col2:
+    st.markdown('<div class="dgo-card">📄<b>고소장 초안 생성</b></div>', unsafe_allow_html=True)
+with card_col3:
+    st.markdown('<div class="dgo-card">🗂️<b>사건 저장 및 관리</b></div>', unsafe_allow_html=True)
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -568,10 +695,10 @@ if "case_draft" not in st.session_state:
 if "case_draft_id" not in st.session_state:
     st.session_state.case_draft_id = None
 
-tab_chat, tab_case, tab_case_list = st.tabs(["AI 비서", "고소장 작성", "사건 보관함"])
+tab_chat, tab_case, tab_case_list = st.tabs(["AI 상담", "고소장 작성", "내 사건"])
 
 with tab_chat:
-    st.caption("대화, 장기기억, 일정 관리와 구글 캘린더 연동")
+    st.caption("피해 상황을 편하게 이야기하면 핵심 사실을 정리할 수 있도록 도와드려요.")
 
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
@@ -700,3 +827,5 @@ with tab_case_list:
                         st.rerun()
 
             st.divider()
+
+render_footer()
