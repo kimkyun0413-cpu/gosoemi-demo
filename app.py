@@ -36,6 +36,16 @@ CASE_FIELDS = [
 CASE_LONG_TEXT_FIELDS = {"reporter_info", "suspect_info", "incident_description", "damage_details", "evidence"}
 DRAFT_DISCLAIMER = "이 문서는 참고용 초안이며 제출 전 법률 전문가의 검토가 필요합니다."
 
+SERVICE_IDENTITY_INSTRUCTION = (
+    "- 이 서비스의 이름은 \"고소음이\"이다.\n"
+    "- \"고소음이\"는 소음(noise) 관련 서비스가 아니다. 이름에 \"소음\"이 포함되어 있다고 해서 "
+    "소음 측정, 소음 진단, 층간소음 상담 등 소음 관련 서비스로 오해하거나 그렇게 답변하지 마라.\n"
+    "- \"고소음이\"는 범죄·피해 상황을 사용자가 정리하고, 고소장 참고용 초안을 작성하도록 돕는 "
+    "AI 법률정보 도우미이다.\n"
+    "- \"고소음이\"는 변호사의 법률자문을 대체하지 않는다.\n"
+    "- 사용자가 서비스의 정체성(무엇을 하는 서비스인지 등)을 물으면 위 내용에 맞게 간결하게 설명하라."
+)
+
 DOCX_TITLE = "고소장"
 DOCX_SECTION_HEADERS = [
     "고소인", "피고소인", "고소 취지", "범죄 사실", "고소 이유",
@@ -473,7 +483,7 @@ def handle_schedule_query(question, schedules):
 
 
 def build_system_instruction(memory, schedule_notice):
-    parts = []
+    parts = [SERVICE_IDENTITY_INSTRUCTION]
     if memory:
         lines = "\n".join(f"- {item}" for item in memory)
         parts.append(
@@ -482,8 +492,6 @@ def build_system_instruction(memory, schedule_notice):
         )
     if schedule_notice:
         parts.append(schedule_notice)
-    if not parts:
-        return None
     return "\n\n".join(parts)
 
 
