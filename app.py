@@ -12,6 +12,7 @@ from docx.shared import Mm, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from google import genai
 from google.genai import types
+from supabase import create_client, Client
 from calendar_test import get_calendar_service
 MEMORY_FILE = "memory.json"
 MEMORY_TRIGGERS = [unicodedata.normalize("NFC", t) for t in ["기억해", "저장해"]]
@@ -20,7 +21,7 @@ SCHEDULE_FILE = "schedules.json"
 CANCEL_TRIGGERS = [unicodedata.normalize("NFC", t) for t in ["취소", "삭제"]]
 DATE_WORDS = ["오늘", "내일", "모레", "이번주", "이번 주", "다음주", "다음 주"]
 
-CASE_FILE = "cases.json"
+CASES_TABLE = "cases"
 CASE_FIELDS = [
     ("사건 유형", "case_type"),
     ("신고인 정보", "reporter_info"),
@@ -85,29 +86,36 @@ def save_schedules(schedules):
         json.dump(schedules, f, ensure_ascii=False, indent=2)
 
 
-def load_cases():
-    if os.path.exists(CASE_FILE):
-        with open(CASE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+def get_supabase_client() -> Client:
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_SECRET_KEY")
+    if not supabase_url or not supabase_key:
+        raise RuntimeError("SUPABASE_URL / SUPABASE_SECRET_KEY 환경변수가 설정되지 않았습니다.")
+    return create_client(supabase_url, supabase_key)
 
 
-def save_cases(cases):
-    with open(CASE_FILE, "w", encoding="utf-8") as f:
-        json.dump(cases, f, ensure_ascii=False, indent=2)
+def save_case(case_entry):
+    client = get_supabase_client()
+    client.table(CASES_TABLE).insert(case_entry).execute()
 
 
 def load_cases_safe():
-    if not os.path.exists(CASE_FILE):
-        return [], None
     try:
-        with open(CASE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as error:
+        client = get_supabase_client()
+        response = (
+            client.table(CASES_TABLE)
+            .select("*")
+            .order("created_at", desc=True)
+            .execute()
+        )
+    except Exception as error:
         return [], f"사건 데이터를 불러오는 중 문제가 발생했습니다: {error}"
-    if not isinstance(data, list):
-        return [], "사건 데이터 형식이 올바르지 않습니다."
-    return data, None
+    return response.data or [], None
+
+
+def delete_case(case_id):
+    client = get_supabase_client()
+    client.table(CASES_TABLE).delete().eq("case_id", case_id).execute()
 
 
 def build_draft_prompt(case, today_str):
@@ -728,7 +736,7 @@ with tab_chat:
 
 with tab_case:
     st.caption("사건 정보를 입력하면 고소장 초안을 자동으로 생성합니다.")
-    st.warning("입력하신 사건 정보(개인정보 포함 가능)는 이 프로젝트 폴더의 cases.json 파일에 저장됩니다.")
+    st.warning("입력하신 사건 정보(개인정보 포함 가능)는 Supabase 데이터베이스에 저장됩니다.")
 
     with st.form("case_form"):
         field_values = {}
@@ -757,15 +765,16 @@ with tab_case:
                 "created_at": datetime.datetime.now(kst).isoformat(),
             }
 
-            cases = load_cases()
-            cases.append(case_entry)
-            save_cases(cases)
-
             try:
-                st.session_state.case_draft = generate_case_draft(case_entry)
-                st.session_state.case_draft_id = case_entry["case_id"]
+                save_case(case_entry)
             except Exception as error:
-                st.error(f"초안 생성 중 오류가 발생했습니다: {error}")
+                st.error(f"사건 저장 중 오류가 발생했습니다: {error}")
+            else:
+                try:
+                    st.session_state.case_draft = generate_case_draft(case_entry)
+                    st.session_state.case_draft_id = case_entry["case_id"]
+                except Exception as error:
+                    st.error(f"초안 생성 중 오류가 발생했습니다: {error}")
 
     if st.session_state.case_draft:
         st.subheader("생성된 고소장 초안")
@@ -800,9 +809,7 @@ with tab_case_list:
     elif not cases:
         st.info("저장된 사건이 없습니다.")
     else:
-        sorted_cases = sorted(cases, key=lambda c: c.get("created_at", ""), reverse=True)
-
-        for case in sorted_cases:
+        for case in cases:
             case_id = case.get("case_id", "")
 
             st.markdown(
@@ -825,12 +832,11 @@ with tab_case_list:
                 if not confirm_delete:
                     st.warning("삭제 확인에 체크해 주세요.")
                 else:
-                    current_cases, current_error = load_cases_safe()
-                    if current_error:
-                        st.error(current_error)
+                    try:
+                        delete_case(case_id)
+                    except Exception as error:
+                        st.error(f"사건 삭제 중 오류가 발생했습니다: {error}")
                     else:
-                        remaining_cases = [c for c in current_cases if c.get("case_id") != case_id]
-                        save_cases(remaining_cases)
                         st.success(f"사건(case_id: {case_id})을 삭제했습니다.")
                         st.rerun()
 
