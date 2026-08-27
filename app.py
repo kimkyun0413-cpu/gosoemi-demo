@@ -1,10 +1,10 @@
 import os
 import json
 import re
+import time
 import datetime
 import unicodedata
 import uuid
-import hmac
 from io import BytesIO
 import streamlit as st
 from docx import Document
@@ -13,6 +13,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from google import genai
 from google.genai import types
 from supabase import create_client, Client
+from supabase_auth.errors import AuthApiError
 from calendar_test import get_calendar_service
 MEMORY_FILE = "memory.json"
 MEMORY_TRIGGERS = [unicodedata.normalize("NFC", t) for t in ["기억해", "저장해"]]
@@ -86,22 +87,161 @@ def save_schedules(schedules):
         json.dump(schedules, f, ensure_ascii=False, indent=2)
 
 
-def get_supabase_client() -> Client:
+def get_supabase_anon_client() -> Client:
     supabase_url = os.environ.get("SUPABASE_URL")
-    supabase_key = os.environ.get("SUPABASE_SECRET_KEY")
+    supabase_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY")
     if not supabase_url or not supabase_key:
-        raise RuntimeError("SUPABASE_URL / SUPABASE_SECRET_KEY 환경변수가 설정되지 않았습니다.")
+        raise RuntimeError("SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY 환경변수가 설정되지 않았습니다.")
     return create_client(supabase_url, supabase_key)
 
 
+def get_authed_client() -> Client:
+    session = st.session_state.get("supabase_session")
+    if not session:
+        raise RuntimeError("로그인이 필요합니다.")
+    client = get_supabase_anon_client()
+    client.postgrest.auth(session["access_token"])
+    return client
+
+
+def get_app_base_url():
+    url = os.environ.get("APP_BASE_URL")
+    return url.rstrip("/") if url else None
+
+
+def log_auth_error(error: Exception) -> None:
+    if isinstance(error, AuthApiError):
+        print(f"[auth_error] code={error.code} status={error.status}")
+    else:
+        print(f"[auth_error] unexpected={type(error).__name__}")
+
+
+def map_auth_error(error: Exception) -> str:
+    if isinstance(error, AuthApiError):
+        code = getattr(error, "code", None)
+        status = getattr(error, "status", None)
+        if code == "invalid_credentials":
+            return "이메일 또는 비밀번호가 올바르지 않습니다."
+        if code == "email_not_confirmed":
+            return "이메일 인증이 완료되지 않았습니다. 받은 편지함과 스팸함에서 인증 메일을 확인해 주세요."
+        if code in ("user_already_exists", "email_exists"):
+            return "이미 가입된 이메일입니다. 로그인하시거나 비밀번호를 재설정해 주세요."
+        if code in ("over_email_send_rate_limit", "over_request_rate_limit") or status == 429:
+            return "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요."
+        if code == "weak_password":
+            return "비밀번호가 너무 약합니다. 6자 이상의 다른 비밀번호를 사용해 주세요."
+        if code in ("validation_failed", "email_address_invalid"):
+            return "이메일 형식이 올바르지 않습니다."
+        if code == "otp_expired":
+            return "인증 링크가 만료되었거나 이미 사용되었습니다. 인증 메일을 다시 요청해 주세요."
+        if code in ("session_not_found", "flow_state_not_found", "flow_state_expired"):
+            return "인증 세션이 만료되었습니다. 처음부터 다시 시도해 주세요."
+        if code == "same_password":
+            return "이전과 동일한 비밀번호로는 변경할 수 없습니다."
+        if code == "signup_disabled":
+            return "현재 회원가입이 제한되어 있습니다. 잠시 후 다시 시도해 주세요."
+    return "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+
+
+def set_auth_flash(level, text) -> None:
+    st.session_state.auth_flash = {"level": level, "text": text}
+
+
+def render_auth_flash() -> None:
+    flash = st.session_state.get("auth_flash")
+    if flash:
+        if flash["level"] == "success":
+            st.success(flash["text"])
+        else:
+            st.error(flash["text"])
+        st.session_state.auth_flash = None
+
+
+def session_to_dict(session) -> dict:
+    return {
+        "access_token": session.access_token,
+        "refresh_token": session.refresh_token,
+        "user_id": session.user.id,
+        "email": session.user.email,
+        "expires_at": session.expires_at,
+    }
+
+
+def session_from_auth_response(auth_response) -> dict:
+    return session_to_dict(auth_response.session)
+
+
+def get_session_authed_client(session: dict) -> Client:
+    client = get_supabase_anon_client()
+    set_response = client.auth.set_session(session["access_token"], session["refresh_token"])
+    if not getattr(set_response, "session", None):
+        raise RuntimeError("세션을 설정할 수 없습니다.")
+    return client
+
+
+def ensure_active_session():
+    session = st.session_state.get("supabase_session")
+    if not session:
+        return None
+    expires_at = session.get("expires_at")
+    if expires_at and time.time() < expires_at - 60:
+        return session
+    try:
+        client = get_supabase_anon_client()
+        refreshed = client.auth.refresh_session(session["refresh_token"])
+        if not getattr(refreshed, "session", None) or not getattr(refreshed, "user", None):
+            raise RuntimeError("empty refresh response")
+        new_session = session_from_auth_response(refreshed)
+        st.session_state.supabase_session = new_session
+        return new_session
+    except Exception as error:
+        log_auth_error(error)
+        st.session_state.supabase_session = None
+        st.session_state.auth_view = "login"
+        set_auth_flash("error", "세션이 만료되었습니다. 다시 로그인해 주세요.")
+        return None
+
+
+def handle_auth_query_params() -> None:
+    token_hash = st.query_params.get("token_hash")
+    type_ = st.query_params.get("type")
+    if not token_hash or not type_:
+        return
+
+    st.query_params.clear()
+
+    try:
+        auth_client = get_supabase_anon_client()
+        response = auth_client.auth.verify_otp({"token_hash": token_hash, "type": type_})
+        if not getattr(response, "session", None) or not getattr(response, "user", None):
+            raise RuntimeError("empty verify_otp response")
+
+        if type_ == "recovery":
+            st.session_state.pending_recovery_session = {
+                "access_token": response.session.access_token,
+                "refresh_token": response.session.refresh_token,
+            }
+            st.session_state.auth_view = "recovery_set_password"
+        else:
+            st.session_state.supabase_session = session_from_auth_response(response)
+            st.session_state.auth_view = "login"
+            set_auth_flash("success", "이메일 인증이 완료되어 자동으로 로그인되었습니다.")
+    except Exception as error:
+        log_auth_error(error)
+        st.session_state.auth_view = "login"
+        set_auth_flash("error", map_auth_error(error))
+
+    st.rerun()
+
+
 def save_case(case_entry):
-    client = get_supabase_client()
+    client = get_authed_client()
     client.table(CASES_TABLE).insert(case_entry).execute()
 
 
 def load_cases_safe():
     try:
-        client = get_supabase_client()
+        client = get_authed_client()
         response = (
             client.table(CASES_TABLE)
             .select("*")
@@ -114,7 +254,7 @@ def load_cases_safe():
 
 
 def delete_case(case_id):
-    client = get_supabase_client()
+    client = get_authed_client()
     client.table(CASES_TABLE).delete().eq("case_id", case_id).execute()
 
 
@@ -659,6 +799,140 @@ def render_footer():
     )
 
 
+def render_signup_guide():
+    st.markdown(
+        "**가입 절차**\n\n"
+        "① 이메일 입력 → ② 인증메일 확인(스팸함 포함) → ③ 앱으로 돌아와 로그인"
+    )
+
+
+def render_pending_email_screen(email, resend_key, on_resend, message):
+    st.success(message)
+    st.info("받은 편지함에 메일이 보이지 않으면 **스팸함(정크메일함)**도 확인해 주세요.")
+
+    elapsed = time.time() - (st.session_state.get(resend_key) or 0)
+    remaining = max(0, 60 - int(elapsed))
+
+    if remaining > 0:
+        st.caption(f"{remaining}초 후 다시 보낼 수 있습니다. (화면을 조작하면 남은 시간이 갱신됩니다)")
+        st.button("메일 다시 보내기", disabled=True, key=f"{resend_key}_disabled_btn")
+    else:
+        if st.button("메일 다시 보내기", key=f"{resend_key}_btn"):
+            base_url = get_app_base_url()
+            if not base_url:
+                st.error("앱 주소 설정이 필요합니다. 관리자에게 문의해 주세요.")
+            else:
+                try:
+                    on_resend(email, base_url)
+                    st.session_state[resend_key] = time.time()
+                    st.success("메일을 다시 보냈습니다.")
+                except Exception as error:
+                    log_auth_error(error)
+                    st.error(map_auth_error(error))
+
+    if st.button("로그인 화면으로", key=f"{resend_key}_back_btn"):
+        st.session_state.auth_view = "login"
+        st.rerun()
+
+
+def render_check_email_screen(email, resend_key):
+    def _resend(target_email, base_url):
+        auth_client = get_supabase_anon_client()
+        auth_client.auth.resend({
+            "type": "signup",
+            "email": target_email,
+            "options": {"email_redirect_to": base_url},
+        })
+
+    render_pending_email_screen(
+        email, resend_key, _resend,
+        f"**{email}** 주소로 인증 메일을 보냈습니다. 메일을 확인해 주세요!",
+    )
+
+
+def render_reset_sent_screen():
+    email = st.session_state.get("reset_sent_email") or ""
+
+    def _resend(target_email, base_url):
+        auth_client = get_supabase_anon_client()
+        auth_client.auth.reset_password_for_email(target_email, {"redirect_to": base_url})
+
+    render_pending_email_screen(
+        email, "reset_resend_last_sent_at", _resend,
+        f"**{email}** 주소로 비밀번호 재설정 메일을 보냈습니다.",
+    )
+
+
+def render_forgot_password_form():
+    st.markdown("가입하신 이메일로 비밀번호 재설정 메일을 보내드립니다.")
+
+    with st.form("forgot_password_form"):
+        forgot_email = st.text_input("이메일", key="forgot_password_email")
+        forgot_submitted = st.form_submit_button("재설정 메일 보내기")
+
+    if forgot_submitted:
+        base_url = get_app_base_url()
+        if not base_url:
+            st.error("앱 주소 설정이 필요합니다. 관리자에게 문의해 주세요.")
+        else:
+            try:
+                auth_client = get_supabase_anon_client()
+                auth_client.auth.reset_password_for_email(forgot_email, {"redirect_to": base_url})
+                st.session_state.reset_sent_email = forgot_email
+                st.session_state.reset_resend_last_sent_at = None
+                st.session_state.auth_view = "reset_sent"
+                st.rerun()
+            except Exception as error:
+                log_auth_error(error)
+                st.error(map_auth_error(error))
+
+    if st.button("로그인으로 돌아가기", key="forgot_password_back_btn"):
+        st.session_state.auth_view = "login"
+        st.rerun()
+
+
+def render_recovery_set_password_form():
+    st.markdown("새 비밀번호를 설정해 주세요.")
+
+    with st.form("recovery_set_password_form"):
+        new_password = st.text_input("새 비밀번호 (6자 이상)", type="password", key="recovery_new_password")
+        new_password_confirm = st.text_input("새 비밀번호 확인", type="password", key="recovery_new_password_confirm")
+        recovery_submitted = st.form_submit_button("비밀번호 변경")
+
+    if recovery_submitted:
+        if new_password != new_password_confirm:
+            st.error("비밀번호가 일치하지 않습니다.")
+        else:
+            pending = st.session_state.get("pending_recovery_session")
+            if not pending:
+                st.session_state.auth_view = "login"
+                set_auth_flash("error", "인증 세션이 만료되었습니다. 처음부터 다시 시도해 주세요.")
+                st.rerun()
+            try:
+                client = get_session_authed_client(pending)
+                client.auth.update_user({"password": new_password})
+                refreshed = client.auth.get_session()
+                if not refreshed:
+                    raise RuntimeError("password update 이후 세션을 확인할 수 없습니다.")
+                new_session = session_to_dict(refreshed)
+                st.session_state.supabase_session = new_session
+                st.session_state.pending_recovery_session = None
+                st.session_state.auth_view = "login"
+                set_auth_flash("success", "비밀번호가 변경되었습니다.")
+                st.rerun()
+            except Exception as error:
+                log_auth_error(error)
+                st.session_state.pending_recovery_session = None
+                st.session_state.auth_view = "login"
+                set_auth_flash("error", map_auth_error(error))
+                st.rerun()
+
+    if st.button("취소", key="recovery_cancel_btn"):
+        st.session_state.pending_recovery_session = None
+        st.session_state.auth_view = "login"
+        st.rerun()
+
+
 st.set_page_config(
     page_title="고소음이 | AI 법률정보 도우미",
     page_icon="⚖️",
@@ -666,30 +940,112 @@ st.set_page_config(
 )
 st.markdown(BRAND_CSS, unsafe_allow_html=True)
 
-APP_PASSWORD = os.environ.get("APP_PASSWORD")
+if "supabase_session" not in st.session_state:
+    st.session_state.supabase_session = None
+if "auth_view" not in st.session_state:
+    st.session_state.auth_view = "login"
+if "auth_flash" not in st.session_state:
+    st.session_state.auth_flash = None
+if "signup_sent_email" not in st.session_state:
+    st.session_state.signup_sent_email = ""
+if "signup_resend_last_sent_at" not in st.session_state:
+    st.session_state.signup_resend_last_sent_at = None
+if "reset_sent_email" not in st.session_state:
+    st.session_state.reset_sent_email = ""
+if "reset_resend_last_sent_at" not in st.session_state:
+    st.session_state.reset_resend_last_sent_at = None
+if "pending_recovery_session" not in st.session_state:
+    st.session_state.pending_recovery_session = None
 
-if not APP_PASSWORD:
-    st.error("APP_PASSWORD 환경변수가 설정되지 않았습니다.")
-    st.stop()
+handle_auth_query_params()
 
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
-
-if not st.session_state.authenticated:
+if not st.session_state.supabase_session:
     render_brand_header()
-    password_input = st.text_input("비밀번호", type="password")
-    if st.button("로그인"):
-        if hmac.compare_digest(password_input, APP_PASSWORD):
-            st.session_state.authenticated = True
-            st.rerun()
-        else:
-            st.error("비밀번호가 올바르지 않습니다.")
+    render_auth_flash()
+
+    if st.session_state.auth_view == "recovery_set_password":
+        render_recovery_set_password_form()
+    elif st.session_state.auth_view == "signup_sent":
+        render_check_email_screen(st.session_state.signup_sent_email, "signup_resend_last_sent_at")
+    elif st.session_state.auth_view == "reset_sent":
+        render_reset_sent_screen()
+    elif st.session_state.auth_view == "forgot_password":
+        render_forgot_password_form()
+    else:
+        login_tab, signup_tab = st.tabs(["로그인", "회원가입"])
+
+        with login_tab:
+            with st.form("login_form"):
+                login_email = st.text_input("이메일", key="login_email")
+                login_password = st.text_input("비밀번호", type="password", key="login_password")
+                login_submitted = st.form_submit_button("로그인")
+
+            if login_submitted:
+                try:
+                    auth_client = get_supabase_anon_client()
+                    auth_response = auth_client.auth.sign_in_with_password(
+                        {"email": login_email, "password": login_password}
+                    )
+                    if not getattr(auth_response, "session", None) or not getattr(auth_response, "user", None):
+                        raise RuntimeError("empty sign_in response")
+                    st.session_state.supabase_session = session_from_auth_response(auth_response)
+                    st.rerun()
+                except Exception as error:
+                    log_auth_error(error)
+                    st.error(map_auth_error(error))
+
+            if st.button("비밀번호를 잊으셨나요?", key="forgot_password_link_btn"):
+                st.session_state.auth_view = "forgot_password"
+                st.rerun()
+
+        with signup_tab:
+            render_signup_guide()
+
+            with st.form("signup_form"):
+                signup_email = st.text_input("이메일", key="signup_email")
+                signup_password = st.text_input("비밀번호 (6자 이상)", type="password", key="signup_password")
+                signup_password_confirm = st.text_input("비밀번호 확인", type="password", key="signup_password_confirm")
+                signup_submitted = st.form_submit_button("회원가입")
+
+            if signup_submitted:
+                if signup_password != signup_password_confirm:
+                    st.error("비밀번호가 일치하지 않습니다.")
+                else:
+                    base_url = get_app_base_url()
+                    if not base_url:
+                        st.error("앱 주소 설정이 필요합니다. 관리자에게 문의해 주세요.")
+                    else:
+                        try:
+                            auth_client = get_supabase_anon_client()
+                            auth_client.auth.sign_up({
+                                "email": signup_email,
+                                "password": signup_password,
+                                "options": {"email_redirect_to": base_url},
+                            })
+                            st.session_state.signup_sent_email = signup_email
+                            st.session_state.signup_resend_last_sent_at = None
+                            st.session_state.auth_view = "signup_sent"
+                            st.rerun()
+                        except Exception as error:
+                            log_auth_error(error)
+                            st.error(map_auth_error(error))
+
     st.stop()
+
+if ensure_active_session() is None:
+    st.rerun()
+render_auth_flash()
 
 with st.sidebar:
     st.markdown("**고소음이 데모**")
+    st.caption(st.session_state.supabase_session.get("email") or "")
     if st.button("로그아웃"):
-        del st.session_state["authenticated"]
+        try:
+            get_session_authed_client(st.session_state.supabase_session).auth.sign_out()
+        except Exception as error:
+            log_auth_error(error)
+        st.session_state.supabase_session = None
+        st.session_state.auth_view = "login"
         st.rerun()
 
 render_brand_header()
@@ -760,6 +1116,7 @@ with tab_case:
             kst = datetime.timezone(datetime.timedelta(hours=9))
             case_entry = {
                 "case_id": str(uuid.uuid4()),
+                "user_id": st.session_state.supabase_session["user_id"],
                 "original_request": "Streamlit 고소장 작성 폼에서 제출됨",
                 **{key: field_values[key].strip() for _, key in CASE_FIELDS},
                 "created_at": datetime.datetime.now(kst).isoformat(),
