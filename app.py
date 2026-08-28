@@ -40,6 +40,8 @@ DRAFT_DISCLAIMER = "이 문서는 참고용 초안이며 제출 전 법률 전�
 
 PASSWORD_RESET_ENABLED = False  # 기본 이메일 템플릿(커스텀 SMTP 미설정)에서는 재설정 링크가 동작하지 않음
 
+UNSUPPORTED_ASSISTANT_MESSAGE = "죄송합니다. 현재 고소음이는 일정 관리·메모 기억 기능을 지원하지 않습니다. 법률 상담이나 사건 정리를 도와드릴게요."
+
 SERVICE_IDENTITY_INSTRUCTION = (
     "- 이 서비스의 이름은 \"고소음이\"이다.\n"
     "- \"고소음이\"는 소음(noise) 관련 서비스가 아니다. 이름에 \"소음\"이 포함되어 있다고 해서 "
@@ -647,34 +649,25 @@ def build_system_instruction(memory, schedule_notice):
 
 def process_question(question, history):
     question = unicodedata.normalize("NFC", question)
-    memory = load_memory()
-    schedules = load_schedules()
-    schedule_notice = None
 
     if is_cancel_request(question) and ("일정" in question or has_date_cue(question)):
-        schedule_notice = handle_schedule_cancel(question, schedules)
+        return UNSUPPORTED_ASSISTANT_MESSAGE
 
-    elif is_schedule_add_request(question):
-        schedule_notice = handle_schedule_add(question, schedules)
+    if is_schedule_add_request(question):
+        return UNSUPPORTED_ASSISTANT_MESSAGE
 
-    elif (
+    if (
         ("캘린더" in question)
         or ("구글 일정" in question)
         or (has_date_cue(question) and ("일정" in question or "스케줄" in question))
     ):
-        schedule_notice = get_google_calendar_schedule(question)
+        return UNSUPPORTED_ASSISTANT_MESSAGE
 
-    elif any(trigger in question for trigger in MEMORY_TRIGGERS):
-        memory_text = extract_memory_text(question)
-        if memory_text:
-            memory.append(memory_text)
-            save_memory(memory)
-            return f"기억했습니다: {memory_text}"
-    elif is_schedule_query(question):
-        schedule_notice = handle_schedule_query(question, schedules)
+    if any(trigger in question for trigger in MEMORY_TRIGGERS):
+        return UNSUPPORTED_ASSISTANT_MESSAGE
 
-    if schedule_notice:
-        return schedule_notice
+    if is_schedule_query(question):
+        return UNSUPPORTED_ASSISTANT_MESSAGE
 
     history.append({"role": "user", "parts": [{"text": question}]})
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
@@ -682,7 +675,7 @@ def process_question(question, history):
         model="gemini-3.5-flash-lite",
         contents=history,
         config=types.GenerateContentConfig(
-            system_instruction=build_system_instruction(memory, schedule_notice)
+            system_instruction=build_system_instruction([], None)
         ),
     )
 
