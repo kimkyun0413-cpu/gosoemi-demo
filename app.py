@@ -38,6 +38,8 @@ CASE_FIELDS = [
 CASE_LONG_TEXT_FIELDS = {"reporter_info", "suspect_info", "incident_description", "damage_details", "evidence"}
 DRAFT_DISCLAIMER = "이 문서는 참고용 초안이며 제출 전 법률 전문가의 검토가 필요합니다."
 
+PASSWORD_RESET_ENABLED = False  # 기본 이메일 템플릿(커스텀 SMTP 미설정)에서는 재설정 링크가 동작하지 않음
+
 SERVICE_IDENTITY_INSTRUCTION = (
     "- 이 서비스의 이름은 \"고소음이\"이다.\n"
     "- \"고소음이\"는 소음(noise) 관련 서비스가 아니다. 이름에 \"소음\"이 포함되어 있다고 해서 "
@@ -848,6 +850,7 @@ def render_check_email_screen(email, resend_key):
         email, resend_key, _resend,
         f"**{email}** 주소로 인증 메일을 보냈습니다. 메일을 확인해 주세요!",
     )
+    st.info("인증 메일의 링크를 누른 다음, 이 앱으로 돌아와 로그인해 주세요.")
 
 
 def render_reset_sent_screen():
@@ -967,9 +970,9 @@ if not st.session_state.supabase_session:
         render_recovery_set_password_form()
     elif st.session_state.auth_view == "signup_sent":
         render_check_email_screen(st.session_state.signup_sent_email, "signup_resend_last_sent_at")
-    elif st.session_state.auth_view == "reset_sent":
+    elif PASSWORD_RESET_ENABLED and st.session_state.auth_view == "reset_sent":
         render_reset_sent_screen()
-    elif st.session_state.auth_view == "forgot_password":
+    elif PASSWORD_RESET_ENABLED and st.session_state.auth_view == "forgot_password":
         render_forgot_password_form()
     else:
         login_tab, signup_tab = st.tabs(["로그인", "회원가입"])
@@ -994,9 +997,10 @@ if not st.session_state.supabase_session:
                     log_auth_error(error)
                     st.error(map_auth_error(error))
 
-            if st.button("비밀번호를 잊으셨나요?", key="forgot_password_link_btn"):
-                st.session_state.auth_view = "forgot_password"
-                st.rerun()
+            if PASSWORD_RESET_ENABLED:
+                if st.button("비밀번호를 잊으셨나요?", key="forgot_password_link_btn"):
+                    st.session_state.auth_view = "forgot_password"
+                    st.rerun()
 
         with signup_tab:
             render_signup_guide()
