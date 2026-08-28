@@ -250,8 +250,8 @@ def load_cases_safe():
             .order("created_at", desc=True)
             .execute()
         )
-    except Exception as error:
-        return [], f"사건 데이터를 불러오는 중 문제가 발생했습니다: {error}"
+    except Exception:
+        return [], "사건 데이터를 불러오는 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
     return response.data or [], None
 
 
@@ -1087,8 +1087,8 @@ with tab_chat:
 
         try:
             answer = process_question(prompt, st.session_state.model_history)
-        except Exception as error:
-            answer = f"오류가 발생했습니다: {error}"
+        except Exception:
+            answer = "답변 생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
 
         st.session_state.messages.append({"role": "assistant", "content": answer})
         with st.chat_message("assistant"):
@@ -1128,14 +1128,14 @@ with tab_case:
 
             try:
                 save_case(case_entry)
-            except Exception as error:
-                st.error(f"사건 저장 중 오류가 발생했습니다: {error}")
+            except Exception:
+                st.error("사건 저장 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
             else:
                 try:
                     st.session_state.case_draft = generate_case_draft(case_entry)
                     st.session_state.case_draft_id = case_entry["case_id"]
-                except Exception as error:
-                    st.error(f"초안 생성 중 오류가 발생했습니다: {error}")
+                except Exception:
+                    st.error("고소장 초안 생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
 
     if st.session_state.case_draft:
         st.subheader("생성된 고소장 초안")
@@ -1195,8 +1195,8 @@ with tab_case_list:
                 else:
                     try:
                         delete_case(case_id)
-                    except Exception as error:
-                        st.error(f"사건 삭제 중 오류가 발생했습니다: {error}")
+                    except Exception:
+                        st.error("사건 삭제 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
                     else:
                         st.success(f"사건(case_id: {case_id})을 삭제했습니다.")
                         st.rerun()
