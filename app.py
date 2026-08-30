@@ -42,6 +42,20 @@ PASSWORD_RESET_ENABLED = False  # 기본 이메일 템플릿(커스텀 SMTP 미�
 
 UNSUPPORTED_ASSISTANT_MESSAGE = "죄송합니다. 현재 고소음이는 일정 관리·메모 기억 기능을 지원하지 않습니다. 법률 상담이나 사건 정리를 도와드릴게요."
 
+PRIVACY_POLICY_ENABLED = os.environ.get("PRIVACY_POLICY_ENABLED") == "true"
+PRIVACY_OPERATOR_NAME = os.environ.get("PRIVACY_OPERATOR_NAME")
+PRIVACY_CONTACT_EMAIL = os.environ.get("PRIVACY_CONTACT_EMAIL")
+PRIVACY_POLICY_EFFECTIVE_DATE = os.environ.get("PRIVACY_POLICY_EFFECTIVE_DATE")
+
+
+def privacy_config_ready() -> bool:
+    return bool(
+        PRIVACY_POLICY_ENABLED
+        and PRIVACY_OPERATOR_NAME
+        and PRIVACY_CONTACT_EMAIL
+        and PRIVACY_POLICY_EFFECTIVE_DATE
+    )
+
 SERVICE_IDENTITY_INSTRUCTION = (
     "- 이 서비스의 이름은 \"고소음이\"이다.\n"
     "- \"고소음이\"는 소음(noise) 관련 서비스가 아니다. 이름에 \"소음\"이 포함되어 있다고 해서 "
@@ -775,6 +789,68 @@ footer {visibility: hidden;}
 """
 
 
+# 법률 검토 전 초안 — 실제 배포 전 검토 필요
+def build_privacy_policy_text():
+    return f"""
+### 개인정보처리방침
+
+{PRIVACY_OPERATOR_NAME}(이하 "운영자")는 개인이 운영하는 서비스(사업자등록 전)로서 "고소음이"(이하 "서비스")를 제공하며,
+이용자의 개인정보를 아래와 같이 처리합니다.
+
+**1. 수집하는 개인정보 항목**
+- 회원가입 시: 이메일 주소, 인증을 위한 비밀번호
+- 사건 작성 시: 사건 유형, 신고인 정보, 상대방 정보, 사건 발생 일시, 사건 발생 장소, 사건 경위, 피해 내용, 증거자료, 목격자 유무, 처벌 의사 (총 10개 항목)
+  - 이 중 "상대방 정보"는 이용자 본인이 아닌 제3자에 관한 정보가 포함될 수 있습니다.
+
+**2. 개인정보의 수집·이용 목적**
+- 회원가입, 로그인, 계정 관리
+- 이용자가 입력한 사건 정보의 저장·조회·삭제
+- AI를 이용한 상담 응답 제공 및 고소장 초안 생성
+
+**3. 개인정보의 보유·이용 기간**
+- 회원 정보(이메일, 비밀번호): 회원탈퇴 시까지 보유하며, 탈퇴 확인 후 삭제합니다.
+- 사건 정보: 이용자가 직접 삭제하거나 회원탈퇴를 요청할 때까지 보유합니다.
+
+**4. 개인정보 처리 위탁 및 정보 전송**
+- Supabase — 회원 인증 및 사건 정보 저장. 데이터베이스와 인증 정보는 AWS 서울 리전에 저장되어 주로 처리됩니다.
+  다만 로그·모니터링·이메일 발송 등 부가 처리 과정에서 미국·싱가포르 소재 하위처리자를 거칠 수 있습니다.
+  비밀번호는 Supabase Auth에서 암호화된 인증정보로 처리되며 운영자는 원문을 열람할 수 없습니다.
+- Google Gemini API(유료 API) — 고소장 초안 생성 및 AI 상담 응답 생성을 위해 입력하신 정보가 처리 목적으로 전송됩니다.
+  유료 API 이용 시 입력·응답 내용은 제품 개선(모델 학습 포함)에 사용되지 않으며, 오남용 방지 등을 위한 로그가 기본 최대 55일간 보관될 수 있습니다.
+
+**5. 개인정보의 국외 이전**
+- Supabase의 로그·모니터링·이메일 발송 등 부가 처리는 미국·싱가포르 소재 하위처리자를 거칠 수 있습니다.
+- Google Gemini API로 전송되는 정보는 Google 또는 그 대리인이 시설을 운영하는 국가에서 일시 저장·캐시될 수 있습니다. 구체적인 처리 국가와 계약 법인은 현재 확인되지 않아 확인되는 대로 갱신하겠습니다.
+
+**6. 이용자의 권리**
+- 저장된 사건의 열람·삭제: 서비스 내 "내 사건" 화면에서 직접 삭제할 수 있습니다.
+- 회원탈퇴 및 전체 정보 삭제: 아래 문의처로 이메일을 보내 요청하시면, 확인 후 계정과 저장된 모든 사건 정보를 삭제합니다. 현재는 이메일 요청을 받아 순차적으로 처리하고 있습니다.
+
+**7. 이용 연령 제한**
+본 서비스는 만 14세 이상만 이용할 수 있습니다.
+
+**8. 안전한 정보 입력 안내**
+상대방 등 제3자의 정보는 이용자가 적법하게 제공할 수 있는 범위에서 필요한 최소한만 입력해 주세요.
+주민등록번호, 계좌 비밀번호, 카드번호, 인증번호(OTP), 불필요한 주소·연락처 등은 입력하지 마세요.
+
+**9. 문의처**
+개인정보 관련 문의, 열람·정정·삭제 요청은 아래로 연락해 주세요.
+- 운영자: {PRIVACY_OPERATOR_NAME}
+- 이메일: {PRIVACY_CONTACT_EMAIL}
+
+**10. 시행일**
+이 개인정보처리방침은 {PRIVACY_POLICY_EFFECTIVE_DATE}부터 적용됩니다.
+"""
+
+
+@st.dialog("개인정보처리방침", width="large")
+def render_privacy_policy_dialog():
+    if not privacy_config_ready():
+        st.info("개인정보처리방침을 준비 중입니다. 잠시 후 다시 확인해 주세요.")
+    else:
+        st.markdown(build_privacy_policy_text())
+
+
 def render_brand_header():
     st.markdown(
         '<div class="dgo-hero">'
@@ -968,6 +1044,9 @@ if not st.session_state.supabase_session:
     elif PASSWORD_RESET_ENABLED and st.session_state.auth_view == "forgot_password":
         render_forgot_password_form()
     else:
+        if st.button("개인정보처리방침 보기", key="privacy_policy_view_btn_login"):
+            render_privacy_policy_dialog()
+
         login_tab, signup_tab = st.tabs(["로그인", "회원가입"])
 
         with login_tab:
@@ -997,15 +1076,32 @@ if not st.session_state.supabase_session:
 
         with signup_tab:
             render_signup_guide()
+            st.markdown(
+                "**회원가입 시 수집하는 개인정보**\n"
+                "- 수집 항목: 이메일, 인증을 위한 비밀번호\n"
+                "- 목적: 회원가입·로그인·계정관리\n"
+                "- 보관기간: 회원탈퇴 시까지\n"
+                "- 동의를 거부할 수 있으나, 거부 시 회원가입이 제한됩니다.\n"
+                "- 비밀번호는 Supabase Auth에서 암호화된 인증정보로 처리되며 운영자는 원문을 열람할 수 없습니다."
+            )
 
             with st.form("signup_form"):
                 signup_email = st.text_input("이메일", key="signup_email")
                 signup_password = st.text_input("비밀번호 (6자 이상)", type="password", key="signup_password")
                 signup_password_confirm = st.text_input("비밀번호 확인", type="password", key="signup_password_confirm")
+                signup_privacy_consent = st.checkbox(
+                    "[필수] 위 안내를 확인했으며 개인정보 수집·이용에 동의합니다.",
+                    key="signup_privacy_consent",
+                )
+                signup_age_consent = st.checkbox("[필수] 만 14세 이상입니다.", key="signup_age_consent")
                 signup_submitted = st.form_submit_button("회원가입")
 
             if signup_submitted:
-                if signup_password != signup_password_confirm:
+                if not privacy_config_ready():
+                    st.error("현재 서비스 운영 정보 설정이 진행 중이라 잠시 회원가입을 이용하실 수 없습니다. 잠시 후 다시 시도해 주세요.")
+                elif not (signup_privacy_consent and signup_age_consent):
+                    st.error("회원가입을 진행하려면 개인정보 수집·이용 동의와 만 14세 이상 확인에 모두 체크해 주세요.")
+                elif signup_password != signup_password_confirm:
                     st.error("비밀번호가 일치하지 않습니다.")
                 else:
                     base_url = get_app_base_url()
@@ -1044,6 +1140,14 @@ with st.sidebar:
         st.session_state.supabase_session = None
         st.session_state.auth_view = "login"
         st.rerun()
+
+    if st.button("개인정보처리방침 보기", key="privacy_policy_view_btn_sidebar"):
+        render_privacy_policy_dialog()
+
+    if PRIVACY_CONTACT_EMAIL:
+        st.caption(f"회원탈퇴를 원하시면 {PRIVACY_CONTACT_EMAIL}로 가입하신 이메일을 포함해 요청해 주세요. 확인 후 계정과 저장된 사건을 삭제해 드립니다.")
+    else:
+        st.caption("회원탈퇴 절차를 준비 중입니다.")
 
 render_brand_header()
 
@@ -1089,7 +1193,22 @@ with tab_chat:
 
 with tab_case:
     st.caption("사건 정보를 입력하면 고소장 초안을 자동으로 생성합니다.")
-    st.warning("입력하신 사건 정보(개인정보 포함 가능)는 Supabase 데이터베이스에 저장됩니다.")
+    st.markdown(
+        "**사건 저장 시 수집하는 개인정보**\n"
+        "- 저장 항목: 사건 유형, 신고인 정보, 상대방 정보, 사건 발생 일시, 사건 발생 장소, "
+        "사건 경위, 피해 내용, 증거자료, 목격자 유무, 처벌 의사 (총 10개 항목)\n"
+        "- 목적: 사건 저장·관리, AI 상담 및 고소장 초안 생성\n"
+        "- 보관기간: 이용자가 직접 삭제하거나 회원탈퇴할 때까지\n"
+        "- 동의를 거부할 수 있으나, 거부 시 사건 저장과 고소장 초안 생성이 제한됩니다."
+    )
+    st.warning(
+        "입력하신 사건 정보(신고인·상대방 정보 등 개인정보 포함 가능)는 Supabase 데이터베이스에 저장되고, "
+        "고소장 초안 생성 시 Google Gemini API로 전송되어 처리됩니다."
+    )
+    st.info(
+        "상대방 등 제3자의 정보는 이용자가 적법하게 제공할 수 있는 범위에서 필요한 최소한만 입력해 주세요. "
+        "주민등록번호, 계좌 비밀번호, 카드번호, 인증번호(OTP), 불필요한 주소·연락처는 입력하지 마세요."
+    )
 
     with st.form("case_form"):
         field_values = {}
@@ -1099,36 +1218,45 @@ with tab_case:
             else:
                 field_values[key] = st.text_input(label)
 
+        case_data_consent = st.checkbox(
+            "[필수] 위 안내를 확인했으며 사건 정보 저장·전송에 동의합니다.",
+            key="case_data_consent",
+        )
         submitted = st.form_submit_button("사건 저장 및 고소장 초안 생성")
 
     if submitted:
-        missing_labels = [
-            label for label, key in CASE_FIELDS
-            if not field_values[key].strip()
-        ]
-
-        if missing_labels:
-            st.error("다음 항목을 입력해 주세요: " + ", ".join(missing_labels))
+        if not privacy_config_ready():
+            st.error("현재 서비스 운영 정보 설정이 진행 중이라 잠시 사건을 저장할 수 없습니다. 잠시 후 다시 시도해 주세요.")
+        elif not case_data_consent:
+            st.error("사건을 저장하려면 데이터 저장·전송 안내에 동의해 주세요.")
         else:
-            kst = datetime.timezone(datetime.timedelta(hours=9))
-            case_entry = {
-                "case_id": str(uuid.uuid4()),
-                "user_id": st.session_state.supabase_session["user_id"],
-                "original_request": "Streamlit 고소장 작성 폼에서 제출됨",
-                **{key: field_values[key].strip() for _, key in CASE_FIELDS},
-                "created_at": datetime.datetime.now(kst).isoformat(),
-            }
+            missing_labels = [
+                label for label, key in CASE_FIELDS
+                if not field_values[key].strip()
+            ]
 
-            try:
-                save_case(case_entry)
-            except Exception:
-                st.error("사건 저장 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+            if missing_labels:
+                st.error("다음 항목을 입력해 주세요: " + ", ".join(missing_labels))
             else:
+                kst = datetime.timezone(datetime.timedelta(hours=9))
+                case_entry = {
+                    "case_id": str(uuid.uuid4()),
+                    "user_id": st.session_state.supabase_session["user_id"],
+                    "original_request": "Streamlit 고소장 작성 폼에서 제출됨",
+                    **{key: field_values[key].strip() for _, key in CASE_FIELDS},
+                    "created_at": datetime.datetime.now(kst).isoformat(),
+                }
+
                 try:
-                    st.session_state.case_draft = generate_case_draft(case_entry)
-                    st.session_state.case_draft_id = case_entry["case_id"]
+                    save_case(case_entry)
                 except Exception:
-                    st.error("고소장 초안 생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+                    st.error("사건 저장 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+                else:
+                    try:
+                        st.session_state.case_draft = generate_case_draft(case_entry)
+                        st.session_state.case_draft_id = case_entry["case_id"]
+                    except Exception:
+                        st.error("고소장 초안 생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
 
     if st.session_state.case_draft:
         st.subheader("생성된 고소장 초안")
@@ -1155,6 +1283,7 @@ with tab_case:
 
 with tab_case_list:
     st.caption("저장된 사건을 조회하고 삭제할 수 있습니다.")
+    st.caption("계정과 사건을 모두 삭제(회원탈퇴)하려면 사이드바의 안내를 참고해 주세요.")
 
     cases, load_error = load_cases_safe()
 
