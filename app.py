@@ -222,6 +222,19 @@ def clear_user_session_data() -> None:
     st.session_state.case_workflow_user_id = None
 
 
+def perform_logout() -> None:
+    session = st.session_state.get("supabase_session")
+    if session:
+        try:
+            get_session_authed_client(session).auth.sign_out()
+        except Exception as error:
+            log_auth_error(error)
+    st.session_state.supabase_session = None
+    clear_user_session_data()
+    st.session_state.auth_view = "login"
+    st.rerun()
+
+
 def ensure_active_session():
     session = st.session_state.get("supabase_session")
     if not session:
@@ -854,15 +867,6 @@ BRAND_CSS = """
     [data-testid="stDownloadButton"] button {
         min-height: 44px;
     }
-
-    [data-testid="stSidebarCollapsedControl"],
-    [data-testid="collapsedControl"] {
-        visibility: visible !important;
-        opacity: 1 !important;
-        min-width: 44px !important;
-        min-height: 44px !important;
-        z-index: 999999 !important;
-    }
 }
 
 #MainMenu {visibility: hidden;}
@@ -1224,15 +1228,8 @@ if st.session_state.get("case_workflow_user_id") != current_user_id:
 with st.sidebar:
     st.markdown("**고소음이 데모**")
     st.caption(st.session_state.supabase_session.get("email") or "")
-    if st.button("로그아웃"):
-        try:
-            get_session_authed_client(st.session_state.supabase_session).auth.sign_out()
-        except Exception as error:
-            log_auth_error(error)
-        st.session_state.supabase_session = None
-        clear_user_session_data()
-        st.session_state.auth_view = "login"
-        st.rerun()
+    if st.button("로그아웃", key="logout_btn_sidebar"):
+        perform_logout()
 
     if st.button("개인정보처리방침 보기", key="privacy_policy_view_btn_sidebar"):
         render_privacy_policy_dialog()
@@ -1243,6 +1240,18 @@ with st.sidebar:
         st.caption("회원탈퇴 절차를 준비 중입니다.")
 
 render_brand_header()
+
+with st.expander("계정 및 개인정보 메뉴"):
+    if st.button("개인정보처리방침 보기", key="privacy_policy_view_btn_main"):
+        render_privacy_policy_dialog()
+
+    if PRIVACY_CONTACT_EMAIL:
+        st.caption(f"회원탈퇴를 원하시면 {PRIVACY_CONTACT_EMAIL}로 가입하신 이메일을 포함해 요청해 주세요. 확인 후 계정과 저장된 사건을 삭제해 드립니다.")
+    else:
+        st.caption("회원탈퇴 절차를 준비 중입니다.")
+
+    if st.button("로그아웃", key="logout_btn_main"):
+        perform_logout()
 
 card_col1, card_col2, card_col3 = st.columns(3)
 with card_col1:
