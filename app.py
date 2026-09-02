@@ -37,6 +37,18 @@ CASE_FIELDS = [
     ("처벌 의사", "punishment_intent"),
 ]
 CASE_LONG_TEXT_FIELDS = {"reporter_info", "suspect_info", "incident_description", "damage_details", "evidence"}
+CASE_FIELD_MAX_CHARS = {
+    "case_type": 100,
+    "reporter_info": 1000,
+    "suspect_info": 1000,
+    "incident_datetime": 100,
+    "incident_location": 300,
+    "incident_description": 8000,
+    "damage_details": 4000,
+    "evidence": 4000,
+    "witness": 1000,
+    "punishment_intent": 500,
+}
 DRAFT_DISCLAIMER = "이 문서는 참고용 초안이며 제출 전 법률 전문가의 검토가 필요합니다."
 
 PASSWORD_RESET_ENABLED = False  # 기본 이메일 템플릿(커스텀 SMTP 미설정)에서는 재설정 링크가 동작하지 않음
@@ -717,13 +729,15 @@ def process_question(question, history):
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     response = client.models.generate_content(
         model="gemini-3.5-flash-lite",
-        contents=history,
+        contents=history[-16:],
         config=types.GenerateContentConfig(
             system_instruction=build_system_instruction([], None)
         ),
     )
 
     history.append({"role": "model", "parts": [{"text": response.text}]})
+    if len(history) > 16:
+        history[:] = history[-16:]
     return response.text
 
 
@@ -1116,9 +1130,9 @@ if not st.session_state.supabase_session:
             )
 
             with st.form("signup_form"):
-                signup_email = st.text_input("이메일", key="signup_email")
-                signup_password = st.text_input("비밀번호 (6자 이상)", type="password", key="signup_password")
-                signup_password_confirm = st.text_input("비밀번호 확인", type="password", key="signup_password_confirm")
+                signup_email = st.text_input("이메일", key="signup_email", max_chars=254)
+                signup_password = st.text_input("비밀번호 (6자 이상)", type="password", key="signup_password", max_chars=128)
+                signup_password_confirm = st.text_input("비밀번호 확인", type="password", key="signup_password_confirm", max_chars=128)
                 signup_privacy_consent = st.checkbox(
                     "[필수] 위 안내를 확인했으며 개인정보 수집·이용에 동의합니다.",
                     key="signup_privacy_consent",
@@ -1131,6 +1145,8 @@ if not st.session_state.supabase_session:
                     st.error("현재 서비스 운영 정보 설정이 진행 중이라 잠시 회원가입을 이용하실 수 없습니다. 잠시 후 다시 시도해 주세요.")
                 elif not (signup_privacy_consent and signup_age_consent):
                     st.error("회원가입을 진행하려면 개인정보 수집·이용 동의와 만 14세 이상 확인에 모두 체크해 주세요.")
+                elif len(signup_password) < 6:
+                    st.error("비밀번호는 6자 이상 입력해 주세요.")
                 elif signup_password != signup_password_confirm:
                     st.error("비밀번호가 일치하지 않습니다.")
                 else:
@@ -1204,7 +1220,7 @@ with tab_chat:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    if prompt := st.chat_input("무엇을 도와드릴까요?"):
+    if prompt := st.chat_input("무엇을 도와드릴까요?", max_chars=3000):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -1262,9 +1278,9 @@ with tab_case:
             field_values = {}
             for label, key in CASE_FIELDS:
                 if key in CASE_LONG_TEXT_FIELDS:
-                    field_values[key] = st.text_area(label)
+                    field_values[key] = st.text_area(label, max_chars=CASE_FIELD_MAX_CHARS[key])
                 else:
-                    field_values[key] = st.text_input(label)
+                    field_values[key] = st.text_input(label, max_chars=CASE_FIELD_MAX_CHARS[key])
 
             case_data_consent = st.checkbox(
                 "[필수] 위 안내를 확인했으며 사건 정보 저장·전송에 동의합니다.",
@@ -1282,9 +1298,17 @@ with tab_case:
                     label for label, key in CASE_FIELDS
                     if not field_values[key].strip()
                 ]
+                over_limit_errors = [
+                    f"{label}은 최대 {CASE_FIELD_MAX_CHARS[key]}자까지 입력할 수 있습니다."
+                    for label, key in CASE_FIELDS
+                    if len(field_values[key]) > CASE_FIELD_MAX_CHARS[key]
+                ]
 
                 if missing_labels:
                     st.error("다음 항목을 입력해 주세요: " + ", ".join(missing_labels))
+                elif over_limit_errors:
+                    for message in over_limit_errors:
+                        st.error(message)
                 else:
                     user_id = st.session_state.supabase_session["user_id"]
                     fingerprint = compute_case_fingerprint(user_id, field_values)
