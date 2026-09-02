@@ -825,6 +825,37 @@ BRAND_CSS = """
     }
 }
 
+@media (max-width: 768px) {
+    html, body {
+        -webkit-text-size-adjust: 100%;
+        text-size-adjust: 100%;
+    }
+
+    .dgo-card {
+        padding: 0.6rem 0.7rem;
+        margin-bottom: 0.4rem;
+    }
+
+    [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMarkdownContainer"] li {
+        font-size: 0.9rem;
+        line-height: 1.5;
+    }
+
+    [data-testid="stTextArea"] textarea {
+        height: 120px !important;
+        min-height: 120px !important;
+        resize: vertical;
+    }
+
+    [data-testid="stTextInput"] input,
+    [data-testid="stButton"] button,
+    [data-testid="stFormSubmitButton"] button,
+    [data-testid="stDownloadButton"] button {
+        min-height: 44px;
+    }
+}
+
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 [data-testid="stToolbar"] {visibility: hidden;}
