@@ -854,6 +854,15 @@ BRAND_CSS = """
     [data-testid="stDownloadButton"] button {
         min-height: 44px;
     }
+
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="collapsedControl"] {
+        visibility: visible !important;
+        opacity: 1 !important;
+        min-width: 44px !important;
+        min-height: 44px !important;
+        z-index: 999999 !important;
+    }
 }
 
 #MainMenu {visibility: hidden;}
