@@ -259,10 +259,14 @@ def save_case(case_entry):
 
 def load_cases_safe():
     try:
+        session = st.session_state.get("supabase_session")
+        if not session or not session.get("user_id"):
+            raise RuntimeError("로그인이 필요합니다.")
         client = get_authed_client()
         response = (
             client.table(CASES_TABLE)
             .select("*")
+            .eq("user_id", session["user_id"])
             .order("created_at", desc=True)
             .execute()
         )
@@ -272,8 +276,11 @@ def load_cases_safe():
 
 
 def delete_case(case_id):
+    session = st.session_state.get("supabase_session")
+    if not session or not session.get("user_id"):
+        raise RuntimeError("로그인이 필요합니다.")
     client = get_authed_client()
-    client.table(CASES_TABLE).delete().eq("case_id", case_id).execute()
+    client.table(CASES_TABLE).delete().eq("case_id", case_id).eq("user_id", session["user_id"]).execute()
 
 
 def build_draft_prompt(case, today_str):
