@@ -5,6 +5,7 @@ import time
 import datetime
 import unicodedata
 import uuid
+import hashlib
 from io import BytesIO
 import streamlit as st
 from docx import Document
@@ -197,6 +198,18 @@ def get_session_authed_client(session: dict) -> Client:
     return client
 
 
+def clear_user_session_data() -> None:
+    st.session_state.case_draft = None
+    st.session_state.case_draft_id = None
+    st.session_state.last_saved_case_entry = None
+    st.session_state.last_saved_fingerprint = None
+    st.session_state.last_saved_at = None
+    st.session_state.pending_draft_entry = None
+    st.session_state.messages = []
+    st.session_state.model_history = []
+    st.session_state.case_workflow_user_id = None
+
+
 def ensure_active_session():
     session = st.session_state.get("supabase_session")
     if not session:
@@ -215,6 +228,7 @@ def ensure_active_session():
     except Exception as error:
         log_auth_error(error)
         st.session_state.supabase_session = None
+        clear_user_session_data()
         st.session_state.auth_view = "login"
         set_auth_flash("error", "세션이 만료되었습니다. 다시 로그인해 주세요.")
         return None
@@ -250,6 +264,15 @@ def handle_auth_query_params() -> None:
         set_auth_flash("error", map_auth_error(error))
 
     st.rerun()
+
+
+DUPLICATE_SUBMIT_WINDOW_SECONDS = 10
+
+
+def compute_case_fingerprint(user_id: str, field_values: dict) -> str:
+    normalized = {key: (field_values.get(key) or "").strip() for _, key in CASE_FIELDS}
+    payload = json.dumps({"user_id": user_id, "fields": normalized}, ensure_ascii=True, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def save_case(case_entry):
@@ -1136,6 +1159,11 @@ if ensure_active_session() is None:
     st.rerun()
 render_auth_flash()
 
+current_user_id = st.session_state.supabase_session["user_id"]
+if st.session_state.get("case_workflow_user_id") != current_user_id:
+    clear_user_session_data()
+    st.session_state.case_workflow_user_id = current_user_id
+
 with st.sidebar:
     st.markdown("**고소음이 데모**")
     st.caption(st.session_state.supabase_session.get("email") or "")
@@ -1145,6 +1173,7 @@ with st.sidebar:
         except Exception as error:
             log_auth_error(error)
         st.session_state.supabase_session = None
+        clear_user_session_data()
         st.session_state.auth_view = "login"
         st.rerun()
 
@@ -1165,15 +1194,6 @@ with card_col2:
     st.markdown('<div class="dgo-card">📄<b>고소장 초안 생성</b></div>', unsafe_allow_html=True)
 with card_col3:
     st.markdown('<div class="dgo-card">🗂️<b>사건 저장 및 관리</b></div>', unsafe_allow_html=True)
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "model_history" not in st.session_state:
-    st.session_state.model_history = []
-if "case_draft" not in st.session_state:
-    st.session_state.case_draft = None
-if "case_draft_id" not in st.session_state:
-    st.session_state.case_draft_id = None
 
 tab_chat, tab_case, tab_case_list = st.tabs(["AI 상담", "고소장 작성", "내 사건"])
 
@@ -1217,53 +1237,102 @@ with tab_case:
         "주민등록번호, 계좌 비밀번호, 카드번호, 인증번호(OTP), 불필요한 주소·연락처는 입력하지 마세요."
     )
 
-    with st.form("case_form"):
-        field_values = {}
-        for label, key in CASE_FIELDS:
-            if key in CASE_LONG_TEXT_FIELDS:
-                field_values[key] = st.text_area(label)
-            else:
-                field_values[key] = st.text_input(label)
-
-        case_data_consent = st.checkbox(
-            "[필수] 위 안내를 확인했으며 사건 정보 저장·전송에 동의합니다.",
-            key="case_data_consent",
+    if st.session_state.pending_draft_entry:
+        st.warning(
+            "사건은 저장되었습니다. 다만 고소장 초안 생성에 실패했습니다. "
+            "새 사건을 제출하기 전에 초안을 다시 생성하거나 이 사건을 보류해 주세요."
         )
-        submitted = st.form_submit_button("사건 저장 및 고소장 초안 생성")
-
-    if submitted:
-        if not privacy_config_ready():
-            st.error("현재 서비스 운영 정보 설정이 진행 중이라 잠시 사건을 저장할 수 없습니다. 잠시 후 다시 시도해 주세요.")
-        elif not case_data_consent:
-            st.error("사건을 저장하려면 데이터 저장·전송 안내에 동의해 주세요.")
-        else:
-            missing_labels = [
-                label for label, key in CASE_FIELDS
-                if not field_values[key].strip()
-            ]
-
-            if missing_labels:
-                st.error("다음 항목을 입력해 주세요: " + ", ".join(missing_labels))
-            else:
-                kst = datetime.timezone(datetime.timedelta(hours=9))
-                case_entry = {
-                    "case_id": str(uuid.uuid4()),
-                    "user_id": st.session_state.supabase_session["user_id"],
-                    "original_request": "Streamlit 고소장 작성 폼에서 제출됨",
-                    **{key: field_values[key].strip() for _, key in CASE_FIELDS},
-                    "created_at": datetime.datetime.now(kst).isoformat(),
-                }
-
+        col_retry, col_cancel = st.columns(2)
+        with col_retry:
+            if st.button("초안만 다시 생성", key="retry_draft_button"):
+                entry = st.session_state.pending_draft_entry
                 try:
-                    save_case(case_entry)
+                    st.session_state.case_draft = generate_case_draft(entry)
+                    st.session_state.case_draft_id = entry["case_id"]
+                    st.session_state.pending_draft_entry = None
+                    st.rerun()
                 except Exception:
-                    st.error("사건 저장 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+                    st.error("고소장 초안 생성에 다시 실패했습니다. 잠시 후 다시 시도해 주세요.")
+        with col_cancel:
+            if st.button("이 사건 보류하고 새로 시작", key="cancel_pending_draft_button"):
+                st.session_state.pending_draft_entry = None
+                st.rerun()
+    else:
+        with st.form("case_form"):
+            field_values = {}
+            for label, key in CASE_FIELDS:
+                if key in CASE_LONG_TEXT_FIELDS:
+                    field_values[key] = st.text_area(label)
                 else:
-                    try:
-                        st.session_state.case_draft = generate_case_draft(case_entry)
-                        st.session_state.case_draft_id = case_entry["case_id"]
-                    except Exception:
-                        st.error("고소장 초안 생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+                    field_values[key] = st.text_input(label)
+
+            case_data_consent = st.checkbox(
+                "[필수] 위 안내를 확인했으며 사건 정보 저장·전송에 동의합니다.",
+                key="case_data_consent",
+            )
+            submitted = st.form_submit_button("사건 저장 및 고소장 초안 생성")
+
+        if submitted:
+            if not privacy_config_ready():
+                st.error("현재 서비스 운영 정보 설정이 진행 중이라 잠시 사건을 저장할 수 없습니다. 잠시 후 다시 시도해 주세요.")
+            elif not case_data_consent:
+                st.error("사건을 저장하려면 데이터 저장·전송 안내에 동의해 주세요.")
+            else:
+                missing_labels = [
+                    label for label, key in CASE_FIELDS
+                    if not field_values[key].strip()
+                ]
+
+                if missing_labels:
+                    st.error("다음 항목을 입력해 주세요: " + ", ".join(missing_labels))
+                else:
+                    user_id = st.session_state.supabase_session["user_id"]
+                    fingerprint = compute_case_fingerprint(user_id, field_values)
+
+                    is_duplicate = (
+                        st.session_state.last_saved_fingerprint == fingerprint
+                        and st.session_state.last_saved_at is not None
+                        and (time.time() - st.session_state.last_saved_at) < DUPLICATE_SUBMIT_WINDOW_SECONDS
+                    )
+
+                    case_entry = None
+                    if is_duplicate:
+                        case_entry = st.session_state.last_saved_case_entry
+                        st.info("방금 제출한 동일한 사건이 이미 저장되어 있어 다시 저장하지 않았습니다.")
+                    else:
+                        kst = datetime.timezone(datetime.timedelta(hours=9))
+                        new_entry = {
+                            "case_id": str(uuid.uuid4()),
+                            "user_id": user_id,
+                            "original_request": "Streamlit 고소장 작성 폼에서 제출됨",
+                            **{key: field_values[key].strip() for _, key in CASE_FIELDS},
+                            "created_at": datetime.datetime.now(kst).isoformat(),
+                        }
+
+                        try:
+                            save_case(new_entry)
+                        except Exception:
+                            st.error("사건 저장 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+                        else:
+                            st.session_state.last_saved_case_entry = new_entry
+                            st.session_state.last_saved_fingerprint = fingerprint
+                            st.session_state.last_saved_at = time.time()
+                            st.session_state.case_draft = None
+                            st.session_state.case_draft_id = None
+                            case_entry = new_entry
+
+                    if case_entry is not None:
+                        already_drafted = (
+                            st.session_state.case_draft_id == case_entry["case_id"]
+                            and st.session_state.case_draft
+                        )
+                        if not already_drafted:
+                            try:
+                                st.session_state.case_draft = generate_case_draft(case_entry)
+                                st.session_state.case_draft_id = case_entry["case_id"]
+                            except Exception:
+                                st.session_state.pending_draft_entry = case_entry
+                                st.rerun()
 
     if st.session_state.case_draft:
         st.subheader("생성된 고소장 초안")
