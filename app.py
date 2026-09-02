@@ -1169,6 +1169,7 @@ if not st.session_state.supabase_session:
                             log_auth_error(error)
                             st.error(map_auth_error(error))
 
+    render_footer()
     st.stop()
 
 if ensure_active_session() is None:
