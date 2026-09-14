@@ -144,6 +144,23 @@ def get_authed_client() -> Client:
     return client
 
 
+def has_current_consent(user_id: str) -> bool:
+    try:
+        client = get_authed_client()
+        response = (
+            client.table("consent_records")
+            .select("terms_version")
+            .eq("user_id", user_id)
+            .eq("terms_version", TERMS_EFFECTIVE_DATE)
+            .eq("privacy_version", PRIVACY_POLICY_EFFECTIVE_DATE)
+            .limit(1)
+            .execute()
+        )
+        return bool(response.data)
+    except Exception:
+        return False
+
+
 def get_app_base_url():
     url = os.environ.get("APP_BASE_URL")
     return url.rstrip("/") if url else None
@@ -1301,7 +1318,15 @@ if not st.session_state.supabase_session:
                             auth_client.auth.sign_up({
                                 "email": signup_email,
                                 "password": signup_password,
-                                "options": {"email_redirect_to": base_url},
+                                "options": {
+                                    "email_redirect_to": base_url,
+                                    "data": {
+                                        "terms_version": TERMS_EFFECTIVE_DATE,
+                                        "privacy_version": PRIVACY_POLICY_EFFECTIVE_DATE,
+                                        "terms_consent": True,
+                                        "privacy_consent": True,
+                                    },
+                                },
                             })
                             st.session_state.signup_sent_email = signup_email
                             st.session_state.signup_resend_last_sent_at = None
@@ -1322,6 +1347,30 @@ current_user_id = st.session_state.supabase_session["user_id"]
 if st.session_state.get("case_workflow_user_id") != current_user_id:
     clear_user_session_data()
     st.session_state.case_workflow_user_id = current_user_id
+
+if not has_current_consent(current_user_id):
+    render_brand_header()
+    st.markdown(build_terms_of_service_text())
+    st.markdown(build_privacy_policy_text())
+    reconsent_terms = st.checkbox("[필수] 이용약관에 동의합니다.", key="reconsent_terms")
+    reconsent_privacy = st.checkbox("[필수] 개인정보 수집·이용에 동의합니다.", key="reconsent_privacy")
+    if st.button("동의하고 계속하기", key="reconsent_submit"):
+        if reconsent_terms and reconsent_privacy:
+            try:
+                get_authed_client().rpc(
+                    "record_consent",
+                    {
+                        "p_terms_version": TERMS_EFFECTIVE_DATE,
+                        "p_privacy_version": PRIVACY_POLICY_EFFECTIVE_DATE,
+                    },
+                ).execute()
+                st.rerun()
+            except Exception:
+                st.error("동의 저장 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+        else:
+            st.error("이용약관과 개인정보 수집·이용에 모두 동의해 주세요.")
+    render_footer()
+    st.stop()
 
 with st.sidebar:
     st.markdown("**고소음이 데모**")
