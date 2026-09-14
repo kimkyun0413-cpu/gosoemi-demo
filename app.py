@@ -59,6 +59,7 @@ PRIVACY_POLICY_ENABLED = os.environ.get("PRIVACY_POLICY_ENABLED") == "true"
 PRIVACY_OPERATOR_NAME = os.environ.get("PRIVACY_OPERATOR_NAME")
 PRIVACY_CONTACT_EMAIL = os.environ.get("PRIVACY_CONTACT_EMAIL")
 PRIVACY_POLICY_EFFECTIVE_DATE = os.environ.get("PRIVACY_POLICY_EFFECTIVE_DATE")
+TERMS_EFFECTIVE_DATE = "2026-09-15"
 
 
 def privacy_config_ready() -> bool:
@@ -67,6 +68,14 @@ def privacy_config_ready() -> bool:
         and PRIVACY_OPERATOR_NAME
         and PRIVACY_CONTACT_EMAIL
         and PRIVACY_POLICY_EFFECTIVE_DATE
+    )
+
+
+def terms_config_ready() -> bool:
+    return bool(
+        PRIVACY_OPERATOR_NAME
+        and PRIVACY_CONTACT_EMAIL
+        and TERMS_EFFECTIVE_DATE
     )
 
 SERVICE_IDENTITY_INSTRUCTION = (
@@ -939,6 +948,85 @@ def render_privacy_policy_dialog():
         st.markdown(build_privacy_policy_text())
 
 
+def build_terms_of_service_text():
+    return f"""
+### 이용약관
+
+이 약관은 {PRIVACY_OPERATOR_NAME}(이하 "운영자")가 개인 자격으로 제공하는 "고소음이"(이하 "서비스")의 이용에 관한 조건을 정합니다.
+이 약관은 회원가입 과정에서 이용약관 필수 동의 항목에 체크하고 가입을 완료한 이용자에게 적용됩니다.
+
+**제1조 (목적)**
+이 약관은 운영자가 제공하는 서비스의 이용조건 및 절차, 운영자와 이용자의 권리·의무 및 책임사항을 규정함을 목적으로 합니다.
+
+**제2조 (서비스의 내용과 법률자문 비대체)**
+1. 서비스는 이용자가 입력한 피해 상황을 정리하고, 고소장 등 문서의 참고용 초안을 작성하도록 돕는 법률정보 제공 및 문서작성 보조 서비스입니다.
+2. 서비스는 변호사가 아니며, 서비스가 제공하는 정보와 문서는 변호사의 법률자문이나 소송대리를 대체하지 않습니다. 서비스 이용만으로 특정 법적 결과(고소 성립, 수사 개시, 처벌 등)가 보장되지 않습니다.
+3. 구체적인 법적 판단이 필요한 경우 이용자는 반드시 변호사 등 관련 분야 전문가와 별도로 상담해야 합니다.
+
+**제3조 (AI 생성 결과의 한계와 전문가 검토 안내)**
+1. 서비스가 AI를 통해 생성하는 상담 응답 및 고소장 초안(이하 "AI 생성 결과")은 이용자가 입력한 정보를 바탕으로 자동 생성된 참고 자료이며, 그 정확성·완전성·최신 법령 반영 여부를 보장하지 않습니다.
+2. 이용자는 AI 생성 결과를 실제 문서로 제출하거나 법적 판단의 근거로 사용하기 전에 반드시 그 내용을 직접 확인하고, 필요한 경우 변호사 등 전문가의 검토를 받아야 합니다.
+3. AI 생성 결과를 검토 없이 그대로 사용함에 따라 발생하는 불이익에 대해 운영자는 제9조(책임의 제한)에서 정하는 범위를 초과하여 책임지지 않습니다.
+
+**제4조 (이용 자격)**
+서비스는 만 14세 이상만 이용할 수 있습니다. 만 14세 미만인 경우 회원가입 및 서비스 이용이 제한됩니다.
+
+**제5조 (계정 관리)**
+1. 이용자는 회원가입 시 정확한 정보를 제공해야 하며, 이메일과 비밀번호 등 계정 정보를 스스로의 책임으로 관리해야 합니다.
+2. 이용자는 자신의 계정을 제3자에게 공유·양도·대여할 수 없습니다.
+3. 계정 정보의 도용이나 무단 사용을 인지한 경우 이용자는 지체 없이 운영자에게 통지해야 하며, 통지 전까지 발생한 불이익에 대해 운영자는 책임지지 않습니다. 다만 운영자의 고의 또는 중과실이 있는 경우는 제외합니다.
+
+**제6조 (이용자의 의무와 금지행위)**
+1. 이용자는 사건 정보를 입력할 때 사실에 부합하는 내용을 입력해야 하며, 상대방 등 제3자의 개인정보는 이용자가 적법하게 제공할 수 있는 범위 내에서 필요한 최소한만 입력해야 합니다.
+2. 이용자는 다음 각 호의 행위를 해서는 안 됩니다.
+   - 허위임을 알면서 사건 정보를 입력하거나 무고·협박 등 불법적인 목적으로 이용하는 행위
+   - 타인을 사칭하거나 타인의 명예를 훼손·비방할 목적으로 서비스를 이용하는 행위
+   - 법령을 위반하거나 공서양속에 반하는 목적으로 서비스를 이용하는 행위
+   - 서비스를 무단으로 복제·역설계하거나 자동화된 수단(크롤링 등)으로 접근하는 행위
+   - 서비스의 정상적인 운영을 방해하는 행위
+3. 이용자가 위 의무를 위반해 발생한 결과에 대한 책임은 이용자 본인에게 있습니다.
+
+**제7조 (서비스의 변경 및 중단)**
+1. 서비스는 개인이 운영하는 베타 성격의 서비스로, 운영자는 서비스의 전부 또는 일부를 변경하거나 중단할 수 있습니다.
+2. 운영자는 서비스 내용을 변경하거나 중단하는 경우 사전에 서비스 내 공지 등 합리적인 방법으로 이용자에게 알립니다. 다만 긴급한 장애 대응 등 부득이한 사유가 있는 경우 사후에 알릴 수 있습니다.
+
+**제8조 (지식재산권)**
+1. 이용자는 자신이 입력하는 정보에 대해 서비스에 제공할 적법한 권한을 보유해야 합니다.
+2. 운영자는 서비스 제공(저장, AI 처리, 화면 표시 등) 목적의 범위 내에서만 이용자가 입력한 정보를 사용하며, 이를 초과하는 방식으로 이용하지 않습니다.
+3. 서비스의 명칭, 디자인, 소프트웨어 등 서비스 자체에 관한 권리는 운영자 또는 정당한 권리자에게 있으며, 이용자는 운영자의 사전 동의 없이 이를 복제·배포·상업적으로 이용할 수 없습니다.
+
+**제9조 (책임의 제한)**
+1. 운영자는 천재지변, 불가항력, 이용자의 귀책사유 등 운영자가 통제할 수 없는 사유로 발생한 손해에 대해 책임지지 않습니다.
+2. 운영자는 AI 생성 결과의 내용을 이용자가 검증 없이 그대로 사용함으로써 발생한 손해에 대해, 운영자에게 고의 또는 중과실이 없는 한 책임지지 않습니다.
+3. 이 조는 운영자의 고의 또는 중과실로 인한 책임이나 관련 법령상 제한할 수 없는 책임까지 면제하는 것은 아닙니다.
+
+**제10조 (약관의 변경)**
+1. 운영자는 관련 법령을 위반하지 않는 범위에서 이 약관을 변경할 수 있습니다.
+2. 약관이 변경되는 경우 운영자는 변경 내용, 시행일 및 변경 사유를 서비스 내 공지 등의 방법으로 시행일 이전에 안내합니다.
+3. 관련 법령상 이용자의 별도 동의가 필요한 변경의 경우에는 이용자의 동의를 받습니다.
+
+**제11조 (개인정보 보호)**
+운영자는 관련 법령에 따라 이용자의 개인정보를 보호합니다. 개인정보의 수집 항목, 이용 목적, 보유기간, 제3자 제공 및 국외 이전에 관한 사항은 이 약관이 아닌 별도의 "개인정보처리방침"에 따릅니다.
+
+**제12조 (준거법 및 분쟁 해결)**
+1. 이 약관 및 서비스 이용과 관련하여 운영자와 이용자 사이에 발생한 분쟁에는 대한민국 법을 적용합니다.
+2. 분쟁에 관한 소송이 제기되는 경우 관련 법령에 따른 관할법원에 제기합니다.
+
+**제13조 (운영자·문의처·시행일)**
+- 운영자: {PRIVACY_OPERATOR_NAME}
+- 문의 이메일: {PRIVACY_CONTACT_EMAIL}
+- 이 약관은 {TERMS_EFFECTIVE_DATE}부터 적용됩니다.
+"""
+
+
+@st.dialog("이용약관", width="large")
+def render_terms_of_service_dialog():
+    if not terms_config_ready():
+        st.info("이용약관을 준비 중입니다. 잠시 후 다시 확인해 주세요.")
+    else:
+        st.markdown(build_terms_of_service_text())
+
+
 def render_brand_header():
     st.markdown(
         '<div class="dgo-hero">'
@@ -1135,6 +1223,9 @@ if not st.session_state.supabase_session:
         if st.button("개인정보처리방침 보기", key="privacy_policy_view_btn_login"):
             render_privacy_policy_dialog()
 
+        if st.button("이용약관 보기", key="terms_of_service_view_btn_login"):
+            render_terms_of_service_dialog()
+
         login_tab, signup_tab = st.tabs(["로그인", "회원가입"])
 
         with login_tab:
@@ -1181,14 +1272,21 @@ if not st.session_state.supabase_session:
                     "[필수] 위 안내를 확인했으며 개인정보 수집·이용에 동의합니다.",
                     key="signup_privacy_consent",
                 )
+                signup_terms_consent = st.checkbox(
+                    "[필수] 이용약관에 동의합니다.",
+                    key="signup_terms_consent",
+                )
                 signup_age_consent = st.checkbox("[필수] 만 14세 이상입니다.", key="signup_age_consent")
                 signup_submitted = st.form_submit_button("회원가입")
 
             if signup_submitted:
-                if not privacy_config_ready():
-                    st.error("현재 서비스 운영 정보 설정이 진행 중이라 잠시 회원가입을 이용하실 수 없습니다. 잠시 후 다시 시도해 주세요.")
-                elif not (signup_privacy_consent and signup_age_consent):
-                    st.error("회원가입을 진행하려면 개인정보 수집·이용 동의와 만 14세 이상 확인에 모두 체크해 주세요.")
+                if not privacy_config_ready() or not terms_config_ready():
+                    st.error(
+                        "현재 서비스 운영 정보 설정이 진행 중이라 잠시 회원가입을 "
+                        "이용하실 수 없습니다. 잠시 후 다시 시도해 주세요."
+                    )
+                elif not (signup_privacy_consent and signup_terms_consent and signup_age_consent):
+                    st.error("회원가입을 진행하려면 이용약관 동의, 개인정보 수집·이용 동의, 만 14세 이상 확인에 모두 체크해 주세요.")
                 elif len(signup_password) < 6:
                     st.error("비밀번호는 6자 이상 입력해 주세요.")
                 elif signup_password != signup_password_confirm:
@@ -1234,6 +1332,9 @@ with st.sidebar:
     if st.button("개인정보처리방침 보기", key="privacy_policy_view_btn_sidebar"):
         render_privacy_policy_dialog()
 
+    if st.button("이용약관 보기", key="terms_of_service_view_btn_sidebar"):
+        render_terms_of_service_dialog()
+
     if PRIVACY_CONTACT_EMAIL:
         st.caption(f"회원탈퇴를 원하시면 {PRIVACY_CONTACT_EMAIL}로 가입하신 이메일을 포함해 요청해 주세요. 확인 후 계정과 저장된 사건을 삭제해 드립니다.")
     else:
@@ -1244,6 +1345,9 @@ render_brand_header()
 with st.expander("계정 및 개인정보 메뉴"):
     if st.button("개인정보처리방침 보기", key="privacy_policy_view_btn_main"):
         render_privacy_policy_dialog()
+
+    if st.button("이용약관 보기", key="terms_of_service_view_btn_main"):
+        render_terms_of_service_dialog()
 
     if PRIVACY_CONTACT_EMAIL:
         st.caption(f"회원탈퇴를 원하시면 {PRIVACY_CONTACT_EMAIL}로 가입하신 이메일을 포함해 요청해 주세요. 확인 후 계정과 저장된 사건을 삭제해 드립니다.")
