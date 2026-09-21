@@ -1115,6 +1115,32 @@ def render_check_email_screen(email, resend_key):
     st.info("인증 메일의 링크를 누른 다음, 이 앱으로 돌아와 로그인해 주세요.")
 
 
+def render_magiclink_sent_screen():
+    email = st.session_state.get("magiclink_sent_email") or ""
+
+    def _resend(target_email, base_url):
+        auth_client = get_supabase_anon_client()
+        auth_client.auth.sign_in_with_otp({
+            "email": target_email,
+            "options": {
+                "email_redirect_to": base_url,
+                "should_create_user": True,
+                "data": {
+                    "terms_version": TERMS_EFFECTIVE_DATE,
+                    "privacy_version": PRIVACY_POLICY_EFFECTIVE_DATE,
+                    "terms_consent": True,
+                    "privacy_consent": True,
+                },
+            },
+        })
+
+    render_pending_email_screen(
+        email, "magiclink_resend_last_sent_at", _resend,
+        "입력하신 이메일로 로그인 링크를 보낼 수 있는 경우 안내 메일이 발송됩니다. "
+        "받은편지함과 스팸함을 확인해 주세요.",
+    )
+
+
 def render_reset_sent_screen():
     email = st.session_state.get("reset_sent_email") or ""
 
@@ -1215,6 +1241,10 @@ if "signup_sent_email" not in st.session_state:
     st.session_state.signup_sent_email = ""
 if "signup_resend_last_sent_at" not in st.session_state:
     st.session_state.signup_resend_last_sent_at = None
+if "magiclink_sent_email" not in st.session_state:
+    st.session_state.magiclink_sent_email = ""
+if "magiclink_resend_last_sent_at" not in st.session_state:
+    st.session_state.magiclink_resend_last_sent_at = None
 if "reset_sent_email" not in st.session_state:
     st.session_state.reset_sent_email = ""
 if "reset_resend_last_sent_at" not in st.session_state:
@@ -1232,6 +1262,8 @@ if not st.session_state.supabase_session:
         render_recovery_set_password_form()
     elif st.session_state.auth_view == "signup_sent":
         render_check_email_screen(st.session_state.signup_sent_email, "signup_resend_last_sent_at")
+    elif st.session_state.auth_view == "magiclink_sent":
+        render_magiclink_sent_screen()
     elif PASSWORD_RESET_ENABLED and st.session_state.auth_view == "reset_sent":
         render_reset_sent_screen()
     elif PASSWORD_RESET_ENABLED and st.session_state.auth_view == "forgot_password":
@@ -1269,6 +1301,63 @@ if not st.session_state.supabase_session:
                 if st.button("비밀번호를 잊으셨나요?", key="forgot_password_link_btn"):
                     st.session_state.auth_view = "forgot_password"
                     st.rerun()
+
+            st.divider()
+            st.markdown("**매직 링크로 로그인**")
+            st.markdown(
+                "- 비밀번호 없이 이메일로 받은 링크만 눌러 로그인할 수 있습니다. "
+                "처음 이용하시는 이메일이면 계정이 함께 만들어집니다.\n"
+                "- 수집 항목: 이메일 / 목적: 회원가입·로그인·계정관리 / 보관기간: 회원탈퇴 시까지\n"
+                "- 동의를 거부할 수 있으나, 거부 시 매직 링크 로그인을 이용하실 수 없습니다."
+            )
+            with st.form("magiclink_form"):
+                magiclink_email = st.text_input("이메일", key="magiclink_email", max_chars=254)
+                magiclink_privacy_consent = st.checkbox(
+                    "[필수] 위 안내를 확인했으며 개인정보 수집·이용에 동의합니다.",
+                    key="magiclink_privacy_consent",
+                )
+                magiclink_terms_consent = st.checkbox(
+                    "[필수] 이용약관에 동의합니다.",
+                    key="magiclink_terms_consent",
+                )
+                magiclink_age_consent = st.checkbox("[필수] 만 14세 이상입니다.", key="magiclink_age_consent")
+                magiclink_submitted = st.form_submit_button("매직 링크 보내기")
+
+            if magiclink_submitted:
+                if not privacy_config_ready() or not terms_config_ready():
+                    st.error(
+                        "현재 서비스 운영 정보 설정이 진행 중이라 잠시 매직 링크 로그인을 "
+                        "이용하실 수 없습니다. 잠시 후 다시 시도해 주세요."
+                    )
+                elif not (magiclink_privacy_consent and magiclink_terms_consent and magiclink_age_consent):
+                    st.error("매직 링크를 받으려면 이용약관 동의, 개인정보 수집·이용 동의, 만 14세 이상 확인에 모두 체크해 주세요.")
+                else:
+                    base_url = get_app_base_url()
+                    if not base_url:
+                        st.error("앱 주소 설정이 필요합니다. 관리자에게 문의해 주세요.")
+                    else:
+                        try:
+                            auth_client = get_supabase_anon_client()
+                            auth_client.auth.sign_in_with_otp({
+                                "email": magiclink_email,
+                                "options": {
+                                    "email_redirect_to": base_url,
+                                    "should_create_user": True,
+                                    "data": {
+                                        "terms_version": TERMS_EFFECTIVE_DATE,
+                                        "privacy_version": PRIVACY_POLICY_EFFECTIVE_DATE,
+                                        "terms_consent": True,
+                                        "privacy_consent": True,
+                                    },
+                                },
+                            })
+                            st.session_state.magiclink_sent_email = magiclink_email
+                            st.session_state.magiclink_resend_last_sent_at = None
+                            st.session_state.auth_view = "magiclink_sent"
+                            st.rerun()
+                        except Exception as error:
+                            log_auth_error(error)
+                            st.error(map_auth_error(error))
 
         with signup_tab:
             render_signup_guide()
