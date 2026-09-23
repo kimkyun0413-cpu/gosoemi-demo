@@ -1,4 +1,5 @@
 import os
+import base64
 import json
 import re
 import time
@@ -60,6 +61,19 @@ PRIVACY_OPERATOR_NAME = os.environ.get("PRIVACY_OPERATOR_NAME")
 PRIVACY_CONTACT_EMAIL = os.environ.get("PRIVACY_CONTACT_EMAIL")
 PRIVACY_POLICY_EFFECTIVE_DATE = os.environ.get("PRIVACY_POLICY_EFFECTIVE_DATE")
 TERMS_EFFECTIVE_DATE = "2026-09-15"
+
+NAVER_LOGIN_ENABLED = os.environ.get("NAVER_LOGIN_ENABLED") == "true"
+NAVER_LOGIN_START_URL = os.environ.get("NAVER_LOGIN_START_URL")
+# 개인정보처리방침에 네이버 수집 항목을 반영한 날. 시행일 환경변수가 이 날짜 이상이어야 버튼을 공개한다.
+NAVER_PRIVACY_TEXT_REVISED_DATE = datetime.date(2026, 9, 24)
+NAVER_ERROR_MESSAGES = {
+    "disabled": "네이버 로그인이 현재 준비 중입니다.",
+    "cancelled": "네이버 로그인이 취소되었습니다.",
+    "invalid_state": "로그인 요청이 만료되었거나 올바르지 않습니다. 네이버 로그인을 처음부터 다시 시도해 주세요.",
+    "email_required": "네이버 로그인으로 가입하려면 네이버에서 이메일 제공에 동의해 주세요.",
+    "email_exists": "이미 이메일로 가입된 주소입니다. 이메일과 비밀번호로 로그인해 주세요.",
+    "server_error": "네이버 로그인 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+}
 
 
 def privacy_config_ready() -> bool:
@@ -315,6 +329,65 @@ def handle_auth_query_params() -> None:
         set_auth_flash("error", map_auth_error(error))
 
     st.rerun()
+
+
+def naver_privacy_policy_revised() -> bool:
+    try:
+        effective_date = datetime.date.fromisoformat(PRIVACY_POLICY_EFFECTIVE_DATE or "")
+    except ValueError:
+        return False
+    return effective_date >= NAVER_PRIVACY_TEXT_REVISED_DATE
+
+
+def naver_login_available() -> bool:
+    return bool(
+        NAVER_LOGIN_ENABLED
+        and NAVER_LOGIN_START_URL
+        and privacy_config_ready()
+        and terms_config_ready()
+        and naver_privacy_policy_revised()
+    )
+
+
+def handle_naver_query_params() -> None:
+    naver_token_hash = st.query_params.get("naver_token_hash")
+    naver_error = st.query_params.get("naver_error")
+    if not naver_token_hash and not naver_error:
+        return
+
+    st.query_params.clear()
+    st.session_state.auth_view = "login"
+
+    if naver_error:
+        set_auth_flash("error", NAVER_ERROR_MESSAGES.get(naver_error, NAVER_ERROR_MESSAGES["server_error"]))
+        st.rerun()
+
+    try:
+        auth_client = get_supabase_anon_client()
+        response = auth_client.auth.verify_otp({"token_hash": naver_token_hash, "type": "magiclink"})
+        if not getattr(response, "session", None) or not getattr(response, "user", None):
+            raise RuntimeError("empty verify_otp response")
+        st.session_state.supabase_session = session_from_auth_response(response)
+        set_auth_flash("success", "네이버 계정으로 로그인되었습니다.")
+    except Exception as error:
+        log_auth_error(error)
+        if isinstance(error, AuthApiError) and getattr(error, "code", None) == "otp_expired":
+            set_auth_flash("error", NAVER_ERROR_MESSAGES["invalid_state"])
+        else:
+            set_auth_flash("error", map_auth_error(error))
+
+    st.rerun()
+
+
+def is_naver_session(session: dict) -> bool:
+    # 화면 분기용으로만 사용한다. 실제 권한은 RLS와 RPC가 auth.uid()로 판단한다.
+    try:
+        payload_segment = session["access_token"].split(".")[1]
+        padded = payload_segment + "=" * (-len(payload_segment) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded))
+        return (claims.get("app_metadata") or {}).get("naver_linked") is True
+    except Exception:
+        return False
 
 
 DUPLICATE_SUBMIT_WINDOW_SECONDS = 10
@@ -913,16 +986,19 @@ def build_privacy_policy_text():
 
 **1. 수집하는 개인정보 항목**
 - 회원가입 시: 이메일 주소, 인증을 위한 비밀번호
+- 네이버 로그인 이용 시: 네이버 고유 식별자, 네이버 계정 이메일 (이용자 동의에 따라 네이버로부터 제공받음)
+  - 네이버 로그인 과정에서 발급되는 네이버 접근 토큰은 이용자 확인 직후 폐기하며 저장하지 않습니다.
 - 사건 작성 시: 사건 유형, 신고인 정보, 상대방 정보, 사건 발생 일시, 사건 발생 장소, 사건 경위, 피해 내용, 증거자료, 목격자 유무, 처벌 의사 (총 10개 항목)
   - 이 중 "상대방 정보"는 이용자 본인이 아닌 제3자에 관한 정보가 포함될 수 있습니다.
 
 **2. 개인정보의 수집·이용 목적**
 - 회원가입, 로그인, 계정 관리
+- 네이버 고유 식별자·네이버 계정 이메일: 네이버 로그인을 통한 회원가입·로그인·계정관리
 - 이용자가 입력한 사건 정보의 저장·조회·삭제
 - AI를 이용한 상담 응답 제공 및 고소장 초안 생성
 
 **3. 개인정보의 보유·이용 기간**
-- 회원 정보(이메일, 비밀번호): 회원탈퇴 시까지 보유하며, 탈퇴 확인 후 삭제합니다.
+- 회원 정보(이메일, 비밀번호, 네이버 고유 식별자, 네이버 계정 이메일): 회원탈퇴 시까지 보유하며, 탈퇴 확인 후 삭제합니다.
 - 사건 정보: 이용자가 직접 삭제하거나 회원탈퇴를 요청할 때까지 보유합니다.
 
 **4. 개인정보 처리 위탁 및 정보 전송**
@@ -1068,6 +1144,44 @@ def render_signup_guide():
         "**가입 절차**\n\n"
         "① 이메일 입력 → ② 인증메일 확인(스팸함 포함) → ③ 앱으로 돌아와 로그인"
     )
+
+
+def render_naver_login_section():
+    st.divider()
+    st.markdown(
+        "**네이버 계정으로 로그인**\n"
+        "- 수집 항목: 네이버 고유 식별자, 네이버 계정 이메일\n"
+        "- 목적: 회원가입·로그인·계정관리 / 보관기간: 회원탈퇴 시까지\n"
+        "- 네이버에서 이메일 제공에 동의해야 가입할 수 있습니다.\n"
+        "- 처음 이용하시면 만 14세 이상 확인과 이용약관·개인정보 수집·이용 동의를 마친 뒤 서비스를 이용할 수 있습니다."
+    )
+    st.link_button("네이버로 로그인", NAVER_LOGIN_START_URL)
+
+
+def render_naver_age_gate(status_error: bool):
+    if status_error:
+        st.error("계정 확인 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+    else:
+        st.markdown(
+            "**만 14세 이상 확인**\n\n"
+            "고소음이는 만 14세 이상만 이용할 수 있습니다. "
+            "네이버 계정으로 처음 이용하시는 경우 아래 확인이 필요합니다."
+        )
+        naver_age_consent = st.checkbox("[필수] 만 14세 이상입니다.", key="naver_age_consent")
+        if st.button("확인하고 계속하기", key="naver_age_submit"):
+            if not naver_age_consent:
+                st.error("만 14세 이상인 경우에만 서비스를 이용할 수 있습니다.")
+            else:
+                try:
+                    confirmed = get_authed_client().rpc("naver_confirm_age").execute().data is True
+                except Exception:
+                    confirmed = False
+                if confirmed:
+                    st.rerun()
+                st.error("확인 저장 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+
+    if st.button("로그아웃", key="naver_age_logout_btn"):
+        perform_logout()
 
 
 def render_pending_email_screen(email, resend_key, on_resend, message):
@@ -1223,6 +1337,7 @@ if "pending_recovery_session" not in st.session_state:
     st.session_state.pending_recovery_session = None
 
 handle_auth_query_params()
+handle_naver_query_params()
 
 if not st.session_state.supabase_session:
     render_brand_header()
@@ -1269,6 +1384,9 @@ if not st.session_state.supabase_session:
                 if st.button("비밀번호를 잊으셨나요?", key="forgot_password_link_btn"):
                     st.session_state.auth_view = "forgot_password"
                     st.rerun()
+
+            if naver_login_available():
+                render_naver_login_section()
 
         with signup_tab:
             render_signup_guide()
@@ -1347,6 +1465,18 @@ current_user_id = st.session_state.supabase_session["user_id"]
 if st.session_state.get("case_workflow_user_id") != current_user_id:
     clear_user_session_data()
     st.session_state.case_workflow_user_id = current_user_id
+
+if is_naver_session(st.session_state.supabase_session):
+    try:
+        naver_age_rows = get_authed_client().rpc("naver_age_status").execute().data or []
+        naver_age_confirmed = bool(naver_age_rows and naver_age_rows[0].get("age_confirmed"))
+    except Exception:
+        naver_age_confirmed = None
+    if not naver_age_confirmed:
+        render_brand_header()
+        render_naver_age_gate(status_error=naver_age_confirmed is None)
+        render_footer()
+        st.stop()
 
 if not has_current_consent(current_user_id):
     render_brand_header()
