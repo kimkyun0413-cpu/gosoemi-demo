@@ -7,7 +7,11 @@ import datetime
 import unicodedata
 import uuid
 import hashlib
+import html
+import secrets
+import threading
 from io import BytesIO
+from urllib.parse import urlencode
 import streamlit as st
 from docx import Document
 from docx.shared import Mm, Pt
@@ -74,6 +78,27 @@ NAVER_ERROR_MESSAGES = {
     "email_exists": "이미 이메일로 가입된 주소입니다. 이메일과 비밀번호로 로그인해 주세요.",
     "server_error": "네이버 로그인 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
 }
+
+# Google 로그인은 Supabase OAuth(PKCE)로 처리한다. Client ID/Secret은 Supabase 대시보드에만 둔다.
+GOOGLE_LOGIN_ENABLED = os.environ.get("GOOGLE_LOGIN_ENABLED", "true") != "false"
+GOOGLE_OAUTH_REDIRECT_URL = (
+    os.environ.get("GOOGLE_OAUTH_REDIRECT_URL") or "https://gosoemi-demo-csapxr3rjt2sjg66te9wrt.streamlit.app"
+).rstrip("/")
+# 개인정보처리방침에 Google 수집 항목을 반영한 날. 시행일 환경변수가 이 날짜 이상이어야 버튼을 공개한다.
+GOOGLE_PRIVACY_TEXT_REVISED_DATE = datetime.date(2026, 9, 27)
+GOOGLE_FLOW_TTL_SECONDS = 600
+GOOGLE_FLOW_MAX_PENDING = 2000
+GOOGLE_ERROR_MESSAGES = {
+    "cancelled": "Google 로그인이 취소되었습니다.",
+    "invalid_state": "로그인 요청이 만료되었거나 올바르지 않습니다. Google 로그인을 처음부터 다시 시도해 주세요.",
+    "server_error": "Google 로그인 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+}
+# 소셜 로그인 사용자의 만 14세 이상 확인 시각을 저장하는 user_metadata 키 (Google 전용, 네이버는 별도 테이블 사용)
+SOCIAL_AGE_CONFIRMED_KEY = "age_14_confirmed_at"
+SOCIAL_LOGIN_NOTICE = (
+    "소셜 계정으로 처음 로그인하시면 만 14세 이상 확인과 이용약관·개인정보 수집·이용 동의를 마친 뒤 "
+    "서비스를 이용할 수 있습니다. 제공받는 정보는 개인정보처리방침에서 확인할 수 있습니다."
+)
 
 
 def privacy_config_ready() -> bool:
@@ -270,6 +295,7 @@ def perform_logout() -> None:
         except Exception as error:
             log_auth_error(error)
     st.session_state.supabase_session = None
+    st.session_state.pop("google_login_url", None)
     clear_user_session_data()
     st.session_state.auth_view = "login"
     st.rerun()
@@ -379,15 +405,168 @@ def handle_naver_query_params() -> None:
     st.rerun()
 
 
-def is_naver_session(session: dict) -> bool:
-    # 화면 분기용으로만 사용한다. 실제 권한은 RLS와 RPC가 auth.uid()로 판단한다.
+def decode_access_token_claims(session: dict) -> dict:
+    # 서명 검증 없이 화면 분기용으로만 사용한다. 실제 권한은 RLS와 RPC가 auth.uid()로 판단한다.
     try:
         payload_segment = session["access_token"].split(".")[1]
         padded = payload_segment + "=" * (-len(payload_segment) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(padded))
-        return (claims.get("app_metadata") or {}).get("naver_linked") is True
+        return json.loads(base64.urlsafe_b64decode(padded))
     except Exception:
+        return {}
+
+
+def is_naver_session(session: dict) -> bool:
+    claims = decode_access_token_claims(session)
+    return (claims.get("app_metadata") or {}).get("naver_linked") is True
+
+
+class GoogleFlowStore:
+    """OAuth 시작 시 만든 PKCE code_verifier를 서버 메모리에 잠시 보관한다.
+
+    Google에서 돌아오면 새 Streamlit 세션이 열려 session_state가 비어 있으므로,
+    redirect URL에 넣은 일회용 flow ID(해시로만 저장)로 verifier를 찾는다.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._flows = {}
+
+    @staticmethod
+    def _key(flow_id: str) -> str:
+        return hashlib.sha256(flow_id.encode("utf-8")).hexdigest()
+
+    def put(self, flow_id: str, code_verifier: str) -> None:
+        now = time.time()
+        with self._lock:
+            for key in [k for k, (_, expires_at) in self._flows.items() if expires_at <= now]:
+                del self._flows[key]
+            while len(self._flows) >= GOOGLE_FLOW_MAX_PENDING:
+                del self._flows[min(self._flows, key=lambda k: self._flows[k][1])]
+            self._flows[self._key(flow_id)] = (code_verifier, now + GOOGLE_FLOW_TTL_SECONDS)
+
+    def pop(self, flow_id: str):
+        with self._lock:
+            entry = self._flows.pop(self._key(flow_id), None)
+        if not entry or entry[1] <= time.time():
+            return None
+        return entry[0]
+
+
+@st.cache_resource
+def get_google_flow_store() -> GoogleFlowStore:
+    return GoogleFlowStore()
+
+
+def google_privacy_policy_revised() -> bool:
+    try:
+        effective_date = datetime.date.fromisoformat(PRIVACY_POLICY_EFFECTIVE_DATE or "")
+    except ValueError:
         return False
+    return effective_date >= GOOGLE_PRIVACY_TEXT_REVISED_DATE
+
+
+def google_login_available() -> bool:
+    return bool(
+        GOOGLE_LOGIN_ENABLED
+        and privacy_config_ready()
+        and terms_config_ready()
+        and google_privacy_policy_revised()
+    )
+
+
+def get_google_login_url():
+    # 같은 브라우저 세션에서는 만료 전까지 같은 URL을 재사용해 rerun마다 flow가 쌓이지 않게 한다.
+    cached = st.session_state.get("google_login_url")
+    if cached and time.time() < cached["expires_at"] - 60:
+        return cached["url"]
+
+    try:
+        flow_id = secrets.token_urlsafe(32)
+        redirect_to = f"{GOOGLE_OAUTH_REDIRECT_URL}/?{urlencode({'google_flow': flow_id})}"
+        auth_client = get_supabase_anon_client()
+        response = auth_client.auth.sign_in_with_oauth({
+            "provider": "google",
+            "options": {
+                "redirect_to": redirect_to,
+                "query_params": {"prompt": "select_account"},
+            },
+        })
+        storage = auth_client.auth._storage
+        code_verifier = storage.get_item(f"{auth_client.auth._storage_key}-code-verifier")
+        if not code_verifier or not getattr(response, "url", None):
+            raise RuntimeError("missing pkce verifier")
+    except Exception as error:
+        log_auth_error(error)
+        return None
+
+    get_google_flow_store().put(flow_id, code_verifier)
+    st.session_state.google_login_url = {
+        "url": response.url,
+        "expires_at": time.time() + GOOGLE_FLOW_TTL_SECONDS,
+    }
+    return response.url
+
+
+def handle_google_query_params() -> None:
+    flow_id = st.query_params.get("google_flow")
+    if not flow_id:
+        return
+
+    auth_code = st.query_params.get("code")
+    oauth_error = st.query_params.get("error")
+    # 코드가 URL에 남아 새로고침 시 재사용되지 않도록 먼저 지운다.
+    st.query_params.clear()
+    st.session_state.auth_view = "login"
+    code_verifier = get_google_flow_store().pop(flow_id)
+
+    if oauth_error or not auth_code:
+        print(f"[auth_error] google_oauth error={oauth_error or 'missing_code'}")
+        key = "cancelled" if oauth_error == "access_denied" else "server_error"
+        set_auth_flash("error", GOOGLE_ERROR_MESSAGES[key])
+        st.rerun()
+
+    if not code_verifier:
+        set_auth_flash("error", GOOGLE_ERROR_MESSAGES["invalid_state"])
+        st.rerun()
+
+    try:
+        auth_client = get_supabase_anon_client()
+        response = auth_client.auth.exchange_code_for_session(
+            {"auth_code": auth_code, "code_verifier": code_verifier}
+        )
+        if not getattr(response, "session", None) or not getattr(response, "user", None):
+            raise RuntimeError("empty exchange_code_for_session response")
+        st.session_state.supabase_session = session_from_auth_response(response)
+        st.session_state.pop("google_login_url", None)
+        set_auth_flash("success", "Google 계정으로 로그인되었습니다.")
+    except Exception as error:
+        log_auth_error(error)
+        set_auth_flash("error", map_auth_error(error))
+
+    st.rerun()
+
+
+def is_google_primary_session(session: dict) -> bool:
+    # 이메일로 가입한 뒤 같은 이메일의 Google 계정이 연결된 경우는 provider가 "email"로 남아 제외된다.
+    claims = decode_access_token_claims(session)
+    return (claims.get("app_metadata") or {}).get("provider") == "google"
+
+
+def social_age_confirmed(session: dict) -> bool:
+    claims = decode_access_token_claims(session)
+    return bool((claims.get("user_metadata") or {}).get(SOCIAL_AGE_CONFIRMED_KEY))
+
+
+def confirm_google_age() -> None:
+    client = get_session_authed_client(st.session_state.supabase_session)
+    client.auth.update_user({
+        "data": {SOCIAL_AGE_CONFIRMED_KEY: datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    })
+    # 새 access token에 갱신된 user_metadata가 담기도록 세션을 다시 발급받는다.
+    refreshed = client.auth.refresh_session()
+    if not getattr(refreshed, "session", None) or not getattr(refreshed, "user", None):
+        raise RuntimeError("empty refresh response")
+    st.session_state.supabase_session = session_from_auth_response(refreshed)
 
 
 DUPLICATE_SUBMIT_WINDOW_SECONDS = 10
@@ -968,6 +1147,42 @@ BRAND_CSS = """
     }
 }
 
+.dgo-google-btn,
+.dgo-google-btn:link,
+.dgo-google-btn:visited {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    min-height: 40px;
+    padding: 0 16px;
+    margin: 0.25rem 0 0.5rem 0;
+    background-color: #FFFFFF;
+    border: 1px solid #747775;
+    border-radius: 8px;
+    color: #1F1F1F !important;
+    font-family: "Roboto", Arial, sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    text-decoration: none !important;
+}
+
+.dgo-google-btn:hover {
+    background-color: #F8F9FA;
+    box-shadow: 0 1px 2px rgba(60, 64, 67, 0.3);
+}
+
+.dgo-google-btn:focus-visible {
+    outline: 2px solid var(--dgo-blue);
+    outline-offset: 2px;
+}
+
+@media (max-width: 768px) {
+    .dgo-google-btn {
+        min-height: 44px;
+    }
+}
+
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 [data-testid="stToolbar"] {visibility: hidden;}
@@ -988,17 +1203,19 @@ def build_privacy_policy_text():
 - 회원가입 시: 이메일 주소, 인증을 위한 비밀번호
 - 네이버 로그인 이용 시: 네이버 고유 식별자, 네이버 계정 이메일 (이용자 동의에 따라 네이버로부터 제공받음)
   - 네이버 로그인 과정에서 발급되는 네이버 접근 토큰은 이용자 확인 직후 폐기하며 저장하지 않습니다.
+- Google 로그인 이용 시: Google 고유 식별자, Google 계정 이메일, 이름, 프로필 사진 (이용자 동의에 따라 Google로부터 제공받음)
 - 사건 작성 시: 사건 유형, 신고인 정보, 상대방 정보, 사건 발생 일시, 사건 발생 장소, 사건 경위, 피해 내용, 증거자료, 목격자 유무, 처벌 의사 (총 10개 항목)
   - 이 중 "상대방 정보"는 이용자 본인이 아닌 제3자에 관한 정보가 포함될 수 있습니다.
 
 **2. 개인정보의 수집·이용 목적**
 - 회원가입, 로그인, 계정 관리
 - 네이버 고유 식별자·네이버 계정 이메일: 네이버 로그인을 통한 회원가입·로그인·계정관리
+- Google 고유 식별자·Google 계정 이메일·이름·프로필 사진: Google 로그인을 통한 회원가입·로그인·계정관리
 - 이용자가 입력한 사건 정보의 저장·조회·삭제
 - AI를 이용한 상담 응답 제공 및 고소장 초안 생성
 
 **3. 개인정보의 보유·이용 기간**
-- 회원 정보(이메일, 비밀번호, 네이버 고유 식별자, 네이버 계정 이메일): 회원탈퇴 시까지 보유하며, 탈퇴 확인 후 삭제합니다.
+- 회원 정보(이메일, 비밀번호, 네이버 고유 식별자, 네이버 계정 이메일, Google 고유 식별자, Google 계정 이메일·이름·프로필 사진): 회원탈퇴 시까지 보유하며, 탈퇴 확인 후 삭제합니다.
 - 사건 정보: 이용자가 직접 삭제하거나 회원탈퇴를 요청할 때까지 보유합니다.
 
 **4. 개인정보 처리 위탁 및 정보 전송**
@@ -1146,16 +1363,65 @@ def render_signup_guide():
     )
 
 
-def render_naver_login_section():
-    st.divider()
+GOOGLE_G_LOGO_SVG = (
+    '<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true">'
+    '<path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 '
+    '14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>'
+    '<path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 '
+    '5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>'
+    '<path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19'
+    'C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>'
+    '<path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 '
+    '2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>'
+    '</svg>'
+)
+
+
+def render_google_login_button(url: str) -> None:
     st.markdown(
-        "**네이버 계정으로 로그인**\n"
-        "- 수집 항목: 네이버 고유 식별자, 네이버 계정 이메일\n"
-        "- 목적: 회원가입·로그인·계정관리 / 보관기간: 회원탈퇴 시까지\n"
-        "- 네이버에서 이메일 제공에 동의해야 가입할 수 있습니다.\n"
-        "- 처음 이용하시면 만 14세 이상 확인과 이용약관·개인정보 수집·이용 동의를 마친 뒤 서비스를 이용할 수 있습니다."
+        f'<a class="dgo-google-btn" href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">'
+        f'{GOOGLE_G_LOGO_SVG}<span>Google로 계속하기</span></a>',
+        unsafe_allow_html=True,
     )
-    st.link_button("네이버로 로그인", NAVER_LOGIN_START_URL)
+
+
+def render_social_login_section(key_suffix: str) -> None:
+    google_url = get_google_login_url() if google_login_available() else None
+    show_naver = naver_login_available()
+    if not google_url and not show_naver:
+        return
+
+    st.divider()
+    st.caption(SOCIAL_LOGIN_NOTICE)
+    if google_url:
+        render_google_login_button(google_url)
+    if show_naver:
+        st.link_button("네이버로 로그인", NAVER_LOGIN_START_URL, key=f"naver_login_btn_{key_suffix}")
+
+
+def render_google_age_gate():
+    st.markdown(
+        "**만 14세 이상 확인**\n\n"
+        "고소음이는 만 14세 이상만 이용할 수 있습니다. "
+        "Google 계정으로 처음 이용하시는 경우 아래 확인이 필요합니다."
+    )
+    google_age_consent = st.checkbox("[필수] 만 14세 이상입니다.", key="google_age_consent")
+    if st.button("확인하고 계속하기", key="google_age_submit"):
+        if not google_age_consent:
+            st.error("만 14세 이상인 경우에만 서비스를 이용할 수 있습니다.")
+        else:
+            try:
+                confirm_google_age()
+                confirmed = True
+            except Exception as error:
+                log_auth_error(error)
+                confirmed = False
+            if confirmed:
+                st.rerun()
+            st.error("확인 저장 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+
+    if st.button("로그아웃", key="google_age_logout_btn"):
+        perform_logout()
 
 
 def render_naver_age_gate(status_error: bool):
@@ -1338,6 +1604,7 @@ if "pending_recovery_session" not in st.session_state:
 
 handle_auth_query_params()
 handle_naver_query_params()
+handle_google_query_params()
 
 if not st.session_state.supabase_session:
     render_brand_header()
@@ -1385,8 +1652,7 @@ if not st.session_state.supabase_session:
                     st.session_state.auth_view = "forgot_password"
                     st.rerun()
 
-            if naver_login_available():
-                render_naver_login_section()
+            render_social_login_section("login")
 
         with signup_tab:
             render_signup_guide()
@@ -1454,6 +1720,8 @@ if not st.session_state.supabase_session:
                             log_auth_error(error)
                             st.error(map_auth_error(error))
 
+            render_social_login_section("signup")
+
     render_footer()
     st.stop()
 
@@ -1475,6 +1743,12 @@ if is_naver_session(st.session_state.supabase_session):
     if not naver_age_confirmed:
         render_brand_header()
         render_naver_age_gate(status_error=naver_age_confirmed is None)
+        render_footer()
+        st.stop()
+elif is_google_primary_session(st.session_state.supabase_session):
+    if not social_age_confirmed(st.session_state.supabase_session):
+        render_brand_header()
+        render_google_age_gate()
         render_footer()
         st.stop()
 
