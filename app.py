@@ -364,27 +364,99 @@ def today_kst() -> datetime.date:
     return datetime.datetime.now(KST).date()
 
 
-def privacy_policy_in_effect_for(revised_date: datetime.date) -> bool:
-    """시행일이 해당 수집 항목 반영일 이후이고, 한국 날짜로 시행일 당일 이후인지 확인한다."""
+def parse_privacy_effective_date():
     try:
-        effective_date = datetime.date.fromisoformat(PRIVACY_POLICY_EFFECTIVE_DATE or "")
+        return datetime.date.fromisoformat(PRIVACY_POLICY_EFFECTIVE_DATE or "")
     except ValueError:
-        return False
-    return effective_date >= revised_date and today_kst() >= effective_date
+        return None
 
 
-def naver_privacy_policy_revised() -> bool:
-    return privacy_policy_in_effect_for(NAVER_PRIVACY_TEXT_REVISED_DATE)
+def social_login_gate_checks() -> dict:
+    """소셜 로그인 버튼 표시 조건별 통과 여부. 값 자체가 아니라 true/false만 담는다."""
+    effective_date = parse_privacy_effective_date()
+    return {
+        "privacy_enabled": PRIVACY_POLICY_ENABLED,
+        "operator_name_present": bool(PRIVACY_OPERATOR_NAME),
+        "contact_email_present": bool(PRIVACY_CONTACT_EMAIL),
+        "effective_date_valid": effective_date is not None,
+        "effective_date_reached_kst": effective_date is not None and today_kst() >= effective_date,
+        "naver_policy_date_ok": effective_date is not None and effective_date >= NAVER_PRIVACY_TEXT_REVISED_DATE,
+        "naver_enabled": NAVER_LOGIN_ENABLED,
+        "naver_start_url_present": bool(NAVER_LOGIN_START_URL),
+        "google_policy_date_ok": effective_date is not None and effective_date >= GOOGLE_PRIVACY_TEXT_REVISED_DATE,
+        "google_enabled": GOOGLE_LOGIN_ENABLED,
+    }
+
+
+# (조건 키, 실패 사유 코드). 시행일이 없거나 형식이 잘못되면 날짜 관련 사유는
+# effective_date_missing / effective_date_invalid 하나로 묶는다.
+COMMON_GATE_REASONS = [
+    ("privacy_enabled", "privacy_disabled"),
+    ("operator_name_present", "operator_name_missing"),
+    ("contact_email_present", "contact_email_missing"),
+    ("effective_date_valid", "effective_date_invalid"),
+    ("effective_date_reached_kst", "effective_date_not_reached_kst"),
+]
+NAVER_GATE_REASONS = COMMON_GATE_REASONS + [
+    ("naver_policy_date_ok", "naver_policy_date_before_revision"),
+    ("naver_enabled", "naver_disabled"),
+    ("naver_start_url_present", "naver_start_url_missing"),
+]
+GOOGLE_GATE_REASONS = COMMON_GATE_REASONS + [
+    ("google_policy_date_ok", "google_policy_date_before_revision"),
+    ("google_enabled", "google_disabled"),
+]
+DATE_DEPENDENT_GATES = {"effective_date_reached_kst", "naver_policy_date_ok", "google_policy_date_ok"}
+
+
+def gate_failure_reasons(checks: dict, gates: list) -> list:
+    reasons = []
+    for key, reason in gates:
+        if checks[key]:
+            continue
+        if key in DATE_DEPENDENT_GATES and not checks["effective_date_valid"]:
+            continue
+        if reason == "effective_date_invalid" and not PRIVACY_POLICY_EFFECTIVE_DATE:
+            reason = "effective_date_missing"
+        reasons.append(reason)
+    return reasons
 
 
 def naver_login_available() -> bool:
-    return bool(
-        NAVER_LOGIN_ENABLED
-        and NAVER_LOGIN_START_URL
-        and privacy_config_ready()
-        and terms_config_ready()
-        and naver_privacy_policy_revised()
-    )
+    return not gate_failure_reasons(social_login_gate_checks(), NAVER_GATE_REASONS)
+
+
+def google_login_available() -> bool:
+    return not gate_failure_reasons(social_login_gate_checks(), GOOGLE_GATE_REASONS)
+
+
+def format_auth_gate_debug(checks: dict, google_oauth_url_created: bool, google_oauth_attempted: bool) -> str:
+    fields = {**checks, "google_oauth_url_created": google_oauth_url_created}
+    naver_reasons = gate_failure_reasons(checks, NAVER_GATE_REASONS)
+    google_reasons = gate_failure_reasons(checks, GOOGLE_GATE_REASONS)
+    if google_oauth_attempted and not google_oauth_url_created:
+        google_reasons.append("google_oauth_url_failed")
+    parts = [f"{key}={str(value).lower()}" for key, value in fields.items()]
+    parts.append(f"naver_visible={str(not naver_reasons).lower()}")
+    parts.append(f"naver_hidden_reason={','.join(naver_reasons) or 'none'}")
+    parts.append(f"google_visible={str(not google_reasons).lower()}")
+    parts.append(f"google_hidden_reason={','.join(google_reasons) or 'none'}")
+    return "[auth_gate_debug] " + " ".join(parts)
+
+
+@st.cache_resource
+def get_auth_gate_debug_seen() -> set:
+    # 프로세스당 처음 한 번, 그리고 판정 결과가 바뀔 때만 출력해 rerun마다 로그가 쌓이지 않게 한다.
+    return set()
+
+
+def log_auth_gate_debug(google_oauth_url_created: bool, google_oauth_attempted: bool) -> None:
+    line = format_auth_gate_debug(social_login_gate_checks(), google_oauth_url_created, google_oauth_attempted)
+    seen = get_auth_gate_debug_seen()
+    if line in seen:
+        return
+    seen.add(line)
+    print(line, flush=True)
 
 
 def handle_naver_query_params() -> None:
@@ -467,19 +539,6 @@ class GoogleFlowStore:
 @st.cache_resource
 def get_google_flow_store() -> GoogleFlowStore:
     return GoogleFlowStore()
-
-
-def google_privacy_policy_revised() -> bool:
-    return privacy_policy_in_effect_for(GOOGLE_PRIVACY_TEXT_REVISED_DATE)
-
-
-def google_login_available() -> bool:
-    return bool(
-        GOOGLE_LOGIN_ENABLED
-        and privacy_config_ready()
-        and terms_config_ready()
-        and google_privacy_policy_revised()
-    )
 
 
 def get_google_login_url():
@@ -1394,8 +1453,10 @@ def render_google_login_button(url: str) -> None:
 
 
 def render_social_login_section(key_suffix: str) -> None:
-    google_url = get_google_login_url() if google_login_available() else None
+    google_attempted = google_login_available()
+    google_url = get_google_login_url() if google_attempted else None
     show_naver = naver_login_available()
+    log_auth_gate_debug(bool(google_url), google_attempted)
     if not google_url and not show_naver:
         return
 
