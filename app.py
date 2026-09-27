@@ -2049,8 +2049,18 @@ if not has_current_consent(current_user_id):
                     },
                 ).execute()
                 st.rerun()
-            except Exception:
-                st.error("동의 저장 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+            except Exception as error:
+                error_code = re.sub(
+                    r"[^A-Za-z0-9_.-]",
+                    "",
+                    str(getattr(error, "code", "") or type(error).__name__),
+                )[:80] or "unknown"
+                error_status = getattr(error, "status", None)
+                print(f"[consent_error] code={error_code} status={error_status}")
+                st.error(
+                    "동의 저장 중 문제가 발생했습니다. "
+                    f"관리자 확인용 오류 코드: {error_code}"
+                )
         else:
             st.error("이용약관과 개인정보 수집·이용에 모두 동의해 주세요.")
     render_footer()
