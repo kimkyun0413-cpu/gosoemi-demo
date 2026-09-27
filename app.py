@@ -63,12 +63,12 @@ UNSUPPORTED_ASSISTANT_MESSAGE = "죄송합니다. 현재 고소음이는 일정 
 PRIVACY_POLICY_ENABLED = os.environ.get("PRIVACY_POLICY_ENABLED") == "true"
 PRIVACY_OPERATOR_NAME = os.environ.get("PRIVACY_OPERATOR_NAME")
 PRIVACY_CONTACT_EMAIL = os.environ.get("PRIVACY_CONTACT_EMAIL")
-PRIVACY_POLICY_EFFECTIVE_DATE = os.environ.get("PRIVACY_POLICY_EFFECTIVE_DATE")
+PRIVACY_POLICY_EFFECTIVE_DATE = (os.environ.get("PRIVACY_POLICY_EFFECTIVE_DATE") or "").strip() or None
 TERMS_EFFECTIVE_DATE = "2026-09-15"
 
 NAVER_LOGIN_ENABLED = os.environ.get("NAVER_LOGIN_ENABLED") == "true"
 NAVER_LOGIN_START_URL = os.environ.get("NAVER_LOGIN_START_URL")
-# 개인정보처리방침에 네이버 수집 항목을 반영한 날. 시행일 환경변수가 이 날짜 이상이어야 버튼을 공개한다.
+# 개인정보처리방침에 네이버 수집 항목을 반영한 날. 시행일 환경변수가 이 날짜 이상이고, 한국 날짜로 시행일 당일부터 버튼을 공개한다.
 NAVER_PRIVACY_TEXT_REVISED_DATE = datetime.date(2026, 9, 24)
 NAVER_ERROR_MESSAGES = {
     "disabled": "네이버 로그인이 현재 준비 중입니다.",
@@ -84,7 +84,7 @@ GOOGLE_LOGIN_ENABLED = os.environ.get("GOOGLE_LOGIN_ENABLED", "true") != "false"
 GOOGLE_OAUTH_REDIRECT_URL = (
     os.environ.get("GOOGLE_OAUTH_REDIRECT_URL") or "https://gosoemi-demo-csapxr3rjt2sjg66te9wrt.streamlit.app"
 ).rstrip("/")
-# 개인정보처리방침에 Google 수집 항목을 반영한 날. 시행일 환경변수가 이 날짜 이상이어야 버튼을 공개한다.
+# 개인정보처리방침에 Google 수집 항목을 반영한 날. 시행일 환경변수가 이 날짜 이상이고, 한국 날짜로 시행일 당일부터 버튼을 공개한다.
 GOOGLE_PRIVACY_TEXT_REVISED_DATE = datetime.date(2026, 9, 27)
 GOOGLE_FLOW_TTL_SECONDS = 600
 GOOGLE_FLOW_MAX_PENDING = 2000
@@ -93,6 +93,9 @@ GOOGLE_ERROR_MESSAGES = {
     "invalid_state": "로그인 요청이 만료되었거나 올바르지 않습니다. Google 로그인을 처음부터 다시 시도해 주세요.",
     "server_error": "Google 로그인 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
 }
+# 개인정보처리방침 시행일은 한국 날짜 기준으로 판단한다. 서버(Streamlit Cloud)는 UTC로 동작하므로
+# date.today()를 쓰면 KST 00:00~09:00 사이에 하루 늦게 활성화된다. 한국은 서머타임이 없어 고정 오프셋을 쓴다.
+KST = datetime.timezone(datetime.timedelta(hours=9), "Asia/Seoul")
 # 소셜 로그인 사용자의 만 14세 이상 확인 시각을 저장하는 user_metadata 키 (Google 전용, 네이버는 별도 테이블 사용)
 SOCIAL_AGE_CONFIRMED_KEY = "age_14_confirmed_at"
 SOCIAL_LOGIN_NOTICE = (
@@ -357,12 +360,21 @@ def handle_auth_query_params() -> None:
     st.rerun()
 
 
-def naver_privacy_policy_revised() -> bool:
+def today_kst() -> datetime.date:
+    return datetime.datetime.now(KST).date()
+
+
+def privacy_policy_in_effect_for(revised_date: datetime.date) -> bool:
+    """시행일이 해당 수집 항목 반영일 이후이고, 한국 날짜로 시행일 당일 이후인지 확인한다."""
     try:
         effective_date = datetime.date.fromisoformat(PRIVACY_POLICY_EFFECTIVE_DATE or "")
     except ValueError:
         return False
-    return effective_date >= NAVER_PRIVACY_TEXT_REVISED_DATE
+    return effective_date >= revised_date and today_kst() >= effective_date
+
+
+def naver_privacy_policy_revised() -> bool:
+    return privacy_policy_in_effect_for(NAVER_PRIVACY_TEXT_REVISED_DATE)
 
 
 def naver_login_available() -> bool:
@@ -458,11 +470,7 @@ def get_google_flow_store() -> GoogleFlowStore:
 
 
 def google_privacy_policy_revised() -> bool:
-    try:
-        effective_date = datetime.date.fromisoformat(PRIVACY_POLICY_EFFECTIVE_DATE or "")
-    except ValueError:
-        return False
-    return effective_date >= GOOGLE_PRIVACY_TEXT_REVISED_DATE
+    return privacy_policy_in_effect_for(GOOGLE_PRIVACY_TEXT_REVISED_DATE)
 
 
 def google_login_available() -> bool:
