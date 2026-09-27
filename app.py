@@ -66,6 +66,12 @@ PRIVACY_CONTACT_EMAIL = os.environ.get("PRIVACY_CONTACT_EMAIL")
 PRIVACY_POLICY_EFFECTIVE_DATE = (os.environ.get("PRIVACY_POLICY_EFFECTIVE_DATE") or "").strip() or None
 TERMS_EFFECTIVE_DATE = "2026-09-15"
 
+EVIDENCE_UPLOAD_ENABLED = os.environ.get("EVIDENCE_UPLOAD_ENABLED") == "true"
+EVIDENCE_BUCKET = "case-evidence"
+EVIDENCE_MAX_FILE_BYTES = 10 * 1024 * 1024
+EVIDENCE_MAX_FILES_PER_CASE = 20
+EVIDENCE_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".pdf", ".mp3", ".m4a", ".wav"}
+
 NAVER_LOGIN_ENABLED = os.environ.get("NAVER_LOGIN_ENABLED") == "true"
 NAVER_LOGIN_START_URL = os.environ.get("NAVER_LOGIN_START_URL")
 # 개인정보처리방침에 네이버 수집 항목을 반영한 날. 시행일 환경변수가 이 날짜 이상이고, 한국 날짜로 시행일 당일부터 버튼을 공개한다.
@@ -668,10 +674,107 @@ def load_cases_safe():
     return response.data or [], None
 
 
+def evidence_folder(user_id: str, case_id: str) -> str:
+    return f"{user_id}/{case_id}"
+
+
+def safe_evidence_filename(filename: str) -> str:
+    basename = os.path.basename(filename or "evidence")
+    cleaned = re.sub(r"[^\\w.\\- ]", "_", basename, flags=re.UNICODE).strip(" .")
+    return (cleaned or "evidence")[:120]
+
+
+def evidence_item_value(item, key, default=None):
+    if isinstance(item, dict):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def evidence_display_name(object_name: str) -> str:
+    return object_name.split("__", 1)[1] if "__" in object_name else object_name
+
+
+def list_case_evidence(case_id: str):
+    session = st.session_state.get("supabase_session")
+    if not session or not session.get("user_id"):
+        raise RuntimeError("로그인이 필요합니다.")
+    folder = evidence_folder(session["user_id"], case_id)
+    client = get_authed_client()
+    items = client.storage.from_(EVIDENCE_BUCKET).list(
+        folder,
+        {"limit": EVIDENCE_MAX_FILES_PER_CASE + 1, "sortBy": {"column": "created_at", "order": "desc"}},
+    )
+    files = []
+    for item in items or []:
+        name = evidence_item_value(item, "name")
+        item_id = evidence_item_value(item, "id")
+        if name and item_id:
+            metadata = evidence_item_value(item, "metadata", {}) or {}
+            files.append({
+                "name": name,
+                "display_name": evidence_display_name(name),
+                "size": evidence_item_value(metadata, "size", 0) or 0,
+                "path": f"{folder}/{name}",
+            })
+    return files
+
+
+def validate_evidence_upload(uploaded_file) -> None:
+    extension = os.path.splitext(uploaded_file.name or "")[1].lower()
+    if extension not in EVIDENCE_ALLOWED_EXTENSIONS:
+        raise ValueError("지원하지 않는 파일 형식입니다.")
+    if uploaded_file.size > EVIDENCE_MAX_FILE_BYTES:
+        raise ValueError("파일 한 개의 크기는 10MB 이하여야 합니다.")
+    if uploaded_file.size <= 0:
+        raise ValueError("빈 파일은 올릴 수 없습니다.")
+
+
+def upload_case_evidence(case_id: str, uploaded_file) -> None:
+    validate_evidence_upload(uploaded_file)
+    session = st.session_state.get("supabase_session")
+    if not session or not session.get("user_id"):
+        raise RuntimeError("로그인이 필요합니다.")
+    existing = list_case_evidence(case_id)
+    if len(existing) >= EVIDENCE_MAX_FILES_PER_CASE:
+        raise ValueError("사건 하나에는 증거자료를 최대 20개까지 첨부할 수 있습니다.")
+    safe_name = safe_evidence_filename(uploaded_file.name)
+    object_name = f"{uuid.uuid4().hex}__{safe_name}"
+    object_path = f"{evidence_folder(session['user_id'], case_id)}/{object_name}"
+    client = get_authed_client()
+    client.storage.from_(EVIDENCE_BUCKET).upload(
+        object_path,
+        uploaded_file.getvalue(),
+        {"content-type": uploaded_file.type or "application/octet-stream", "cache-control": "3600", "upsert": "false"},
+    )
+
+
+def download_case_evidence(object_path: str):
+    session = st.session_state.get("supabase_session")
+    if not session or not session.get("user_id") or not object_path.startswith(f"{session['user_id']}/"):
+        raise RuntimeError("접근 권한이 없습니다.")
+    return get_authed_client().storage.from_(EVIDENCE_BUCKET).download(object_path)
+
+
+def delete_case_evidence_file(object_path: str) -> None:
+    session = st.session_state.get("supabase_session")
+    if not session or not session.get("user_id") or not object_path.startswith(f"{session['user_id']}/"):
+        raise RuntimeError("접근 권한이 없습니다.")
+    get_authed_client().storage.from_(EVIDENCE_BUCKET).remove([object_path])
+
+
+def delete_all_case_evidence(case_id: str) -> None:
+    if not EVIDENCE_UPLOAD_ENABLED:
+        return
+    files = list_case_evidence(case_id)
+    if files:
+        get_authed_client().storage.from_(EVIDENCE_BUCKET).remove([item["path"] for item in files])
+
+
 def delete_case(case_id):
     session = st.session_state.get("supabase_session")
     if not session or not session.get("user_id"):
         raise RuntimeError("로그인이 필요합니다.")
+    delete_all_case_evidence(case_id)
     client = get_authed_client()
     client.table(CASES_TABLE).delete().eq("case_id", case_id).eq("user_id", session["user_id"]).execute()
 
@@ -1271,6 +1374,7 @@ def build_privacy_policy_text():
 - 네이버 로그인 이용 시: 네이버 고유 식별자, 네이버 계정 이메일 (이용자 동의에 따라 네이버로부터 제공받음)
   - 네이버 로그인 과정에서 발급되는 네이버 접근 토큰은 이용자 확인 직후 폐기하며 저장하지 않습니다.
 - Google 로그인 이용 시: Google 고유 식별자, Google 계정 이메일, 이름, 프로필 사진 (이용자 동의에 따라 Google로부터 제공받음)
+- 증거자료 첨부 이용 시: 이용자가 직접 선택한 사진, PDF 문서, 녹음파일 및 파일명
 - 사건 작성 시: 사건 유형, 신고인 정보, 상대방 정보, 사건 발생 일시, 사건 발생 장소, 사건 경위, 피해 내용, 증거자료, 목격자 유무, 처벌 의사 (총 10개 항목)
   - 이 중 "상대방 정보"는 이용자 본인이 아닌 제3자에 관한 정보가 포함될 수 있습니다.
 
@@ -1278,15 +1382,15 @@ def build_privacy_policy_text():
 - 회원가입, 로그인, 계정 관리
 - 네이버 고유 식별자·네이버 계정 이메일: 네이버 로그인을 통한 회원가입·로그인·계정관리
 - Google 고유 식별자·Google 계정 이메일·이름·프로필 사진: Google 로그인을 통한 회원가입·로그인·계정관리
-- 이용자가 입력한 사건 정보의 저장·조회·삭제
+- 이용자가 입력한 사건 정보와 첨부한 증거자료의 비공개 저장·조회·다운로드·삭제
 - AI를 이용한 상담 응답 제공 및 고소장 초안 생성
 
 **3. 개인정보의 보유·이용 기간**
 - 회원 정보(이메일, 비밀번호, 네이버 고유 식별자, 네이버 계정 이메일, Google 고유 식별자, Google 계정 이메일·이름·프로필 사진): 회원탈퇴 시까지 보유하며, 탈퇴 확인 후 삭제합니다.
-- 사건 정보: 이용자가 직접 삭제하거나 회원탈퇴를 요청할 때까지 보유합니다.
+- 사건 정보 및 첨부한 증거자료: 이용자가 직접 삭제하거나 회원탈퇴를 요청할 때까지 보유합니다.
 
 **4. 개인정보 처리 위탁 및 정보 전송**
-- Supabase — 회원 인증 및 사건 정보 저장. 데이터베이스와 인증 정보는 AWS 서울 리전에 저장되어 주로 처리됩니다.
+- Supabase — 회원 인증, 사건 정보 및 첨부한 증거자료의 비공개 저장. 데이터베이스와 인증 정보는 AWS 서울 리전에 저장되어 주로 처리됩니다.
   다만 로그·모니터링·이메일 발송 등 부가 처리 과정에서 미국·싱가포르 소재 하위처리자를 거칠 수 있습니다.
   비밀번호는 Supabase Auth에서 암호화된 인증정보로 처리되며 운영자는 원문을 열람할 수 없습니다.
 - Google Gemini API(유료 API) — 고소장 초안 생성 및 AI 상담 응답 생성을 위해 입력하신 정보가 처리 목적으로 전송됩니다.
@@ -1402,6 +1506,98 @@ def render_terms_of_service_dialog():
         st.info("이용약관을 준비 중입니다. 잠시 후 다시 확인해 주세요.")
     else:
         st.markdown(build_terms_of_service_text())
+
+
+def render_case_evidence_manager(case_id: str) -> None:
+    with st.expander("증거자료 첨부·관리"):
+        st.caption(
+            "사진·PDF·녹음파일을 최대 20개까지 첨부할 수 있습니다. "
+            "파일당 최대 10MB이며 본인만 열람할 수 있습니다."
+        )
+        st.warning(
+            "주민등록번호, 계좌 비밀번호, 카드번호, 인증번호 등 불필요한 민감정보는 "
+            "가린 뒤 첨부해 주세요."
+        )
+        uploads = st.file_uploader(
+            "증거자료 선택",
+            type=["jpg", "jpeg", "png", "webp", "heic", "heif", "pdf", "mp3", "m4a", "wav"],
+            accept_multiple_files=True,
+            key=f"evidence_upload_{case_id}",
+        )
+        consent = st.checkbox(
+            "[필수] 선택한 파일의 비공개 저장과 사건 관리 목적 이용에 동의합니다.",
+            key=f"evidence_consent_{case_id}",
+        )
+        if st.button("선택한 파일 첨부", key=f"evidence_upload_btn_{case_id}"):
+            if not uploads:
+                st.warning("첨부할 파일을 선택해 주세요.")
+            elif not consent:
+                st.warning("파일을 첨부하려면 저장·이용에 동의해 주세요.")
+            else:
+                uploaded_count = 0
+                errors = []
+                for uploaded_file in uploads:
+                    try:
+                        upload_case_evidence(case_id, uploaded_file)
+                        uploaded_count += 1
+                    except ValueError as exc:
+                        errors.append(f"{uploaded_file.name}: {exc}")
+                    except Exception:
+                        errors.append(f"{uploaded_file.name}: 업로드에 실패했습니다.")
+                if uploaded_count:
+                    st.success(f"증거자료 {uploaded_count}개를 첨부했습니다.")
+                for error in errors:
+                    st.error(error)
+                if uploaded_count:
+                    st.rerun()
+
+        try:
+            files = list_case_evidence(case_id)
+        except Exception:
+            st.error("증거자료 목록을 불러오지 못했습니다. 저장소 설정을 확인해 주세요.")
+            return
+
+        if not files:
+            st.caption("첨부된 증거자료가 없습니다.")
+            return
+
+        selected = st.selectbox(
+            "첨부된 파일",
+            files,
+            format_func=lambda item: item["display_name"],
+            key=f"evidence_select_{case_id}",
+        )
+        download_key = f"evidence_download_{case_id}"
+        col_prepare, col_remove = st.columns(2)
+        with col_prepare:
+            if st.button("다운로드 준비", key=f"evidence_prepare_{case_id}"):
+                try:
+                    st.session_state[download_key] = {
+                        "path": selected["path"],
+                        "name": selected["display_name"],
+                        "data": download_case_evidence(selected["path"]),
+                    }
+                except Exception:
+                    st.error("파일을 불러오지 못했습니다.")
+        with col_remove:
+            if st.button("선택 파일 삭제", key=f"evidence_delete_{case_id}"):
+                try:
+                    delete_case_evidence_file(selected["path"])
+                except Exception:
+                    st.error("파일 삭제에 실패했습니다.")
+                else:
+                    st.session_state.pop(download_key, None)
+                    st.success("증거자료를 삭제했습니다.")
+                    st.rerun()
+
+        prepared = st.session_state.get(download_key)
+        if prepared and prepared.get("path") == selected["path"]:
+            st.download_button(
+                "파일 다운로드",
+                data=prepared["data"],
+                file_name=prepared["name"],
+                key=f"evidence_download_btn_{case_id}",
+            )
 
 
 def render_brand_header():
@@ -2099,6 +2295,9 @@ with tab_case_list:
                     st.markdown(f"**{label}**: {case.get(key, '확인 필요')}")
                 st.markdown(f"**작성일시**: {case.get('created_at', '확인 필요')}")
                 st.markdown(f"**case_id**: {case_id}")
+
+            if EVIDENCE_UPLOAD_ENABLED:
+                render_case_evidence_manager(case_id)
 
             confirm_delete = st.checkbox("이 사건 삭제", key=f"confirm_delete_{case_id}")
 
