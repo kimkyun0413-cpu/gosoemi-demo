@@ -1443,11 +1443,26 @@ GOOGLE_G_LOGO_SVG = (
     '</svg>'
 )
 
+NAVER_N_LOGO_SVG = (
+    '<svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">'
+    '<rect width="18" height="18" rx="2" fill="#03C75A"/>'
+    '<path fill="#FFFFFF" d="M5 4h3l2.9 4.2V4H14v10h-3l-2.9-4.2V14H5V4z"/>'
+    '</svg>'
+)
+
 
 def render_google_login_button(url: str) -> None:
     st.markdown(
         f'<a class="dgo-google-btn" href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">'
         f'{GOOGLE_G_LOGO_SVG}<span>Google로 계속하기</span></a>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_naver_login_button(url: str) -> None:
+    st.markdown(
+        f'<a class="dgo-google-btn" href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">'
+        f'{NAVER_N_LOGO_SVG}<span>네이버로 로그인</span></a>',
         unsafe_allow_html=True,
     )
 
@@ -1465,7 +1480,7 @@ def render_social_login_section(key_suffix: str) -> None:
     if google_url:
         render_google_login_button(google_url)
     if show_naver:
-        st.link_button("네이버로 로그인", NAVER_LOGIN_START_URL, key=f"naver_login_btn_{key_suffix}")
+        render_naver_login_button(NAVER_LOGIN_START_URL)
 
 
 def render_google_age_gate():
