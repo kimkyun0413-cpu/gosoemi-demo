@@ -1,26 +1,40 @@
--- Keep the consent RPC's accepted privacy-policy version aligned with app.py.
--- This migration deliberately replaces only the previous literal inside the
--- existing function so its security settings and insert logic remain unchanged.
-do $$
+-- Align the authenticated consent RPC with the policy versions used by app.py.
+-- Existing consent rows are preserved.
+create or replace function public.record_consent(
+    p_terms_version text,
+    p_privacy_version text
+)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
 declare
-    v_function_definition text;
+    v_current_terms_version constant text := '2026-09-15';
+    v_current_privacy_version constant text := '2026-09-27';
 begin
-    select pg_get_functiondef(
-        'public.record_consent(text,text)'::regprocedure
-    )
-    into v_function_definition;
-
-    if position('''2026-08-30''' in v_function_definition) = 0 then
-        raise exception
-            'record_consent migration stopped: expected privacy version was not found';
+    if auth.uid() is null then
+        raise exception 'record_consent: unauthenticated';
     end if;
 
-    v_function_definition := replace(
-        v_function_definition,
-        '''2026-08-30''',
-        '''2026-09-27'''
-    );
+    if p_terms_version <> v_current_terms_version
+       or p_privacy_version <> v_current_privacy_version then
+        raise exception 'record_consent: version mismatch';
+    end if;
 
-    execute v_function_definition;
+    insert into public.consent_records (
+        user_id,
+        terms_version,
+        privacy_version
+    )
+    values (
+        auth.uid(),
+        v_current_terms_version,
+        v_current_privacy_version
+    )
+    on conflict (user_id, terms_version, privacy_version) do nothing;
 end;
 $$;
+
+revoke execute on function public.record_consent(text, text) from public, anon;
+grant execute on function public.record_consent(text, text) to authenticated;
