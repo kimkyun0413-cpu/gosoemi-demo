@@ -68,6 +68,40 @@ LEGAL_TERMS = [
 ]
 LEGAL_TERMS_SOURCE = "https://www.spo.go.kr/site/spo/01/10101050200002018112210.jsp"
 
+# 질문과 답변은 일반적인 정보와 기록 방법만 다루며 사건의 성립 여부를 판단하지 않습니다.
+VICTIM_QA = {
+    "사기 피해": {
+        "source": "https://ecrm.police.go.kr/minwon/main",
+        "questions": [
+            ("먼저 무엇을 기록하면 좋나요?", "언제, 어디서, 누구와 어떤 약속을 했고 얼마를 어떤 계좌로 보냈는지 시간 순서로 적어보세요. 상대방 정보가 확실하지 않으면 추측해 채우지 마세요."),
+            ("어떤 자료를 준비하면 좋나요?", "송금·결제 내역, 거래 글이나 계약 내용, 메신저 대화와 연락처 등 이미 가지고 있는 자료를 원본 그대로 보관하세요. 온라인 신고 시에도 이체내역서와 대화내역 등을 첨부할 수 있습니다."),
+            ("온라인으로 신고하면 경찰서에 가지 않아도 되나요?", "온라인 신고 후에도 경찰서 출석과 진술이 필요할 수 있습니다. 출석 여부는 담당 수사기관의 안내를 확인하세요."),
+        ],
+    },
+    "온라인 명예훼손": {
+        "source": "https://www.easylaw.go.kr/CSP/CnpClsMain.laf?ccfNo=3&cciNo=1&cnpClsNo=1&csmSeq=293",
+        "questions": [
+            ("게시물이 지워지기 전에 무엇을 남기면 좋나요?", "게시글의 전체 화면, 주소(URL), 게시 날짜, 작성자 표시, 댓글과 공개된 범위를 확인할 수 있는 자료를 보관해 보세요. 보이는 사실과 본인의 해석은 구분해 적는 것이 좋습니다."),
+            ("모든 비방 글이 명예훼손인가요?", "글의 내용과 게시 상황에 따라 판단이 달라집니다. 고소음이는 특정 글이 범죄에 해당한다고 판정하지 않습니다. 원문과 게시 맥락을 보존해 상담할 때 제시하세요."),
+        ],
+    },
+    "스토킹 피해": {
+        "source": "https://www.easylaw.go.kr/CSP/CnpClsMain.laf?ccfNo=2&cciNo=2&cnpClsNo=1&csmSeq=1661",
+        "questions": [
+            ("지금 위험하다고 느끼면 어떻게 하나요?", "안전한 곳으로 이동하고 긴급한 상황이면 112에 신고하세요. 고소음이에 내용을 입력하는 것만으로 경찰에 신고되지는 않습니다."),
+            ("반복된 연락과 접근은 어떻게 정리하나요?", "날짜·시간·장소·행동을 순서대로 기록하고 문자, 통화기록, 사진 등 보유한 자료를 보관하세요. 자료를 모으기 위해 직접 상대를 만나거나 위험한 장소에 머무르지 마세요."),
+            ("접근을 막아 달라고 요청할 수 있나요?", "스토킹 사건에서는 접근이나 연락을 제한하는 잠정조치가 문제될 수 있습니다. 필요한 보호조치가 있는지 경찰에 현재 상황을 설명하고 안내를 요청하세요."),
+        ],
+    },
+    "학교폭력 피해": {
+        "source": "https://www.easylaw.go.kr/CSP/CnpClsMain.laf?ccfNo=3&cciNo=1&cnpClsNo=1&csmSeq=1408",
+        "questions": [
+            ("어디에 알릴 수 있나요?", "학교의 담임교사나 학교폭력 담당자에게 알릴 수 있고, 117 학교폭력 신고·상담센터에도 상담하거나 신고할 수 있습니다. 즉시 위험하다면 112에 신고하세요."),
+            ("어떤 기록을 준비하면 좋나요?", "발생 날짜·장소·관련된 사람·목격자를 시간 순서대로 정리하고, 문자·채팅·사진·영상 등 이미 가진 자료를 보관하세요. 기억나지 않는 부분은 억지로 채우지 마세요."),
+        ],
+    },
+}
+
 PASSWORD_RESET_ENABLED = False  # 기본 이메일 템플릿(커스텀 SMTP 미설정)에서는 재설정 링크가 동작하지 않음
 
 UNSUPPORTED_ASSISTANT_MESSAGE = "죄송합니다. 현재 고소음이는 일정 관리·메모 기억 기능을 지원하지 않습니다. 법률 상담이나 사건 정리를 도와드릴게요."
@@ -2180,7 +2214,7 @@ with card_col2:
 with card_col3:
     st.markdown('<div class="dgo-card">🗂️<b>사건 저장 및 관리</b></div>', unsafe_allow_html=True)
 
-tab_chat, tab_case, tab_case_list, tab_terms = st.tabs(["AI 상담", "고소장 작성", "내 사건", "법률 용어"])
+tab_chat, tab_case, tab_case_list, tab_terms, tab_qa = st.tabs(["AI 상담", "고소장 작성", "내 사건", "법률 용어", "피해 유형별 Q&A"])
 
 with tab_chat:
     st.caption("피해 상황을 편하게 이야기하면 핵심 사실을 정리할 수 있도록 도와드려요.")
@@ -2411,5 +2445,16 @@ with tab_terms:
         with st.expander(term):
             st.write(explanation)
     st.markdown(f"[설명 근거: 대검찰청 사건처리절차 안내]({LEGAL_TERMS_SOURCE})")
+
+with tab_qa:
+    st.subheader("내 상황에 맞는 질문 살펴보기")
+    st.caption("피해 유형을 고르면 기록할 내용과 자주 묻는 질문을 볼 수 있습니다. 선택하거나 읽은 내용은 사건에 저장되지 않습니다.")
+    selected_qa_type = st.selectbox("피해 유형", list(VICTIM_QA), key="victim_qa_type")
+    selected_qa = VICTIM_QA[selected_qa_type]
+    for question, answer in selected_qa["questions"]:
+        with st.expander(question):
+            st.write(answer)
+    st.markdown(f"[관련 공공기관 안내 보기]({selected_qa['source']})")
+    st.caption("위 내용은 일반 정보입니다. 실제 신고 방법과 보호조치는 담당 기관의 안내를 확인해 주세요.")
 
 render_footer()
