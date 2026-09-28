@@ -1918,6 +1918,15 @@ def render_social_login_section(key_suffix: str) -> None:
         render_google_login_button(google_url)
     if show_naver:
         render_naver_login_button(NAVER_LOGIN_START_URL)
+        separator = "&" if "?" in NAVER_LOGIN_START_URL else "?"
+        switch_url = f"{NAVER_LOGIN_START_URL}{separator}switch=1"
+        st.markdown(
+            f'<a href="{html.escape(switch_url, quote=True)}" target="_blank" rel="noopener noreferrer">'
+            '다른 네이버 계정으로 로그인</a>',
+            unsafe_allow_html=True,
+        )
+
+
 
 
 def render_google_age_gate():
