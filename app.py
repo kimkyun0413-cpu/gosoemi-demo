@@ -56,6 +56,18 @@ CASE_FIELD_MAX_CHARS = {
 }
 DRAFT_DISCLAIMER = "이 문서는 참고용 초안이며 제출 전 법률 전문가의 검토가 필요합니다."
 
+# 쉬운 설명은 형사 절차의 일반적인 뜻만 안내합니다. 사건별 판단은 하지 않습니다.
+LEGAL_TERMS = [
+    ("고소", "범죄 피해자 등 고소할 수 있는 사람이 수사기관에 범죄 사실을 알리고 처벌을 요청하는 것입니다."),
+    ("고발", "고소할 수 있는 사람 외의 제3자가 수사기관에 범죄 사실을 알리고 처벌을 요청하는 것입니다."),
+    ("피의자", "범죄 혐의를 받아 수사 대상이 된 사람입니다. 혐의가 확정됐다는 뜻은 아닙니다."),
+    ("피고인", "검사가 기소해 형사재판을 받는 사람입니다. 유죄가 확정됐다는 뜻은 아닙니다."),
+    ("송치", "수사기관이 사건 기록 등을 검찰로 넘기는 절차입니다. 송치 자체가 기소나 유죄를 뜻하지는 않습니다."),
+    ("기소", "검사가 형사재판을 열어 달라고 법원에 공소를 제기하는 것입니다."),
+    ("불기소", "검사가 해당 사건을 형사재판에 넘기지 않기로 결정하는 것입니다. 이유는 사건마다 다를 수 있습니다."),
+]
+LEGAL_TERMS_SOURCE = "https://www.spo.go.kr/site/spo/01/10101050200002018112210.jsp"
+
 PASSWORD_RESET_ENABLED = False  # 기본 이메일 템플릿(커스텀 SMTP 미설정)에서는 재설정 링크가 동작하지 않음
 
 UNSUPPORTED_ASSISTANT_MESSAGE = "죄송합니다. 현재 고소음이는 일정 관리·메모 기억 기능을 지원하지 않습니다. 법률 상담이나 사건 정리를 도와드릴게요."
@@ -2168,7 +2180,7 @@ with card_col2:
 with card_col3:
     st.markdown('<div class="dgo-card">🗂️<b>사건 저장 및 관리</b></div>', unsafe_allow_html=True)
 
-tab_chat, tab_case, tab_case_list = st.tabs(["AI 상담", "고소장 작성", "내 사건"])
+tab_chat, tab_case, tab_case_list, tab_terms = st.tabs(["AI 상담", "고소장 작성", "내 사건", "법률 용어"])
 
 with tab_chat:
     st.caption("피해 상황을 편하게 이야기하면 핵심 사실을 정리할 수 있도록 도와드려요.")
@@ -2384,5 +2396,20 @@ with tab_case_list:
                         st.rerun()
 
             st.divider()
+
+with tab_terms:
+    st.subheader("어려운 법률 용어, 쉽게 보기")
+    st.caption("형사 사건에서 자주 보이는 말의 일반적인 뜻을 설명합니다. 개별 사건의 결과를 판단하는 내용은 아닙니다.")
+    term_query = st.text_input("용어 검색", placeholder="예: 고소, 피의자, 기소", key="legal_terms_query").strip().casefold()
+    matching_terms = [
+        (term, explanation) for term, explanation in LEGAL_TERMS
+        if term_query in term.casefold() or term_query in explanation.casefold()
+    ]
+    if not matching_terms:
+        st.info("검색 결과가 없습니다. 다른 단어로 검색해 주세요.")
+    for term, explanation in matching_terms:
+        with st.expander(term):
+            st.write(explanation)
+    st.markdown(f"[설명 근거: 대검찰청 사건처리절차 안내]({LEGAL_TERMS_SOURCE})")
 
 render_footer()
