@@ -679,9 +679,13 @@ def evidence_folder(user_id: str, case_id: str) -> str:
 
 
 def safe_evidence_filename(filename: str) -> str:
-    basename = os.path.basename(filename or "evidence")
-    cleaned = re.sub(r"[^\\w.\\- ]", "_", basename, flags=re.UNICODE).strip(" .")
-    return (cleaned or "evidence")[:120]
+    basename = os.path.basename((filename or "").replace("\\", "/"))
+    stem, extension = os.path.splitext(basename)
+    extension = extension.lower() if extension.lower() in EVIDENCE_ALLOWED_EXTENSIONS else ""
+    # Supabase Storage 객체 키는 ASCII 일부 문자만 허용하므로 한글 등은 제거한다.
+    stem = unicodedata.normalize("NFKD", stem).encode("ascii", "ignore").decode("ascii")
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._-")
+    return f"{(stem or 'evidence')[:100]}{extension}"
 
 
 def evidence_item_value(item, key, default=None):
@@ -691,7 +695,62 @@ def evidence_item_value(item, key, default=None):
 
 
 def evidence_display_name(object_name: str) -> str:
-    return object_name.split("__", 1)[1] if "__" in object_name else object_name
+    if "__" in object_name:
+        return object_name.split("__", 1)[1]
+    if re.match(r"^[0-9a-f]{32}_", object_name):
+        return object_name[33:]
+    return object_name
+
+
+def get_storage_authed_client() -> Client:
+    session = ensure_active_session()
+    if not session or not session.get("user_id"):
+        raise RuntimeError("로그인이 필요합니다.")
+    client = get_session_authed_client(session)
+    auth_session = client.auth.get_session()
+    if not auth_session or not auth_session.user or auth_session.user.id != session["user_id"]:
+        raise RuntimeError("세션 사용자 정보가 일치하지 않습니다.")
+    if auth_session.access_token != session["access_token"]:
+        st.session_state.supabase_session = session_to_dict(auth_session)
+    return client
+
+
+def safe_error_message(error: Exception) -> str:
+    message = str(getattr(error, "message", None) or error)
+    message = re.sub(r"eyJ[\w-]+\.[\w-]+\.[\w-]+", "[token]", message)
+    message = re.sub(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "[id]", message)
+    message = re.sub(r"[0-9a-fA-F]{32}", "[id]", message)
+    message = re.sub(r"[\w.+-]+@[\w-]+\.[\w.-]+", "[email]", message)
+    message = re.sub(r"\[id\]/\S+", "[path]", message)
+    return " ".join(message.split())[:200]
+
+
+def log_evidence_upload_error(stage: str, error: Exception) -> None:
+    status = getattr(error, "status", None) or getattr(error, "status_code", None)
+    code = getattr(error, "code", None)
+    print(
+        f"[evidence_upload_error] stage={stage} type={type(error).__name__} "
+        f"status={status} code={code} message={safe_error_message(error)}",
+        flush=True,
+    )
+
+
+def map_evidence_upload_error(error: Exception) -> str:
+    status = str(getattr(error, "status", None) or getattr(error, "status_code", None) or "")
+    message = str(getattr(error, "message", None) or error).lower()
+    if status in ("401", "403") or "row-level security" in message or "unauthorized" in message or "jwt" in message:
+        return "업로드 권한이 확인되지 않았습니다. 로그아웃 후 다시 로그인해 주세요."
+    if status == "413" or "maximum allowed size" in message or "too large" in message:
+        return "파일 크기가 10MB를 초과해 올릴 수 없습니다."
+    if status == "409" or "already exists" in message:
+        return "같은 파일이 이미 있습니다. 잠시 후 다시 시도해 주세요."
+    if "mime" in message or "invalid_mime_type" in message:
+        return "지원하지 않는 파일 형식입니다."
+    if status == "404" or "bucket not found" in message:
+        return "증거자료 저장소를 찾을 수 없습니다. 관리자에게 문의해 주세요."
+    if "로그인" in str(error) or "세션" in str(error):
+        return "로그인이 만료되었습니다. 다시 로그인한 뒤 시도해 주세요."
+    return "업로드에 실패했습니다. 잠시 후 다시 시도해 주세요."
 
 
 def list_case_evidence(case_id: str):
@@ -699,7 +758,7 @@ def list_case_evidence(case_id: str):
     if not session or not session.get("user_id"):
         raise RuntimeError("로그인이 필요합니다.")
     folder = evidence_folder(session["user_id"], case_id)
-    client = get_authed_client()
+    client = get_storage_authed_client()
     items = client.storage.from_(EVIDENCE_BUCKET).list(
         folder,
         {"limit": EVIDENCE_MAX_FILES_PER_CASE + 1, "sortBy": {"column": "created_at", "order": "desc"}},
@@ -731,16 +790,13 @@ def validate_evidence_upload(uploaded_file) -> None:
 
 def upload_case_evidence(case_id: str, uploaded_file) -> None:
     validate_evidence_upload(uploaded_file)
-    session = st.session_state.get("supabase_session")
-    if not session or not session.get("user_id"):
-        raise RuntimeError("로그인이 필요합니다.")
     existing = list_case_evidence(case_id)
     if len(existing) >= EVIDENCE_MAX_FILES_PER_CASE:
         raise ValueError("사건 하나에는 증거자료를 최대 20개까지 첨부할 수 있습니다.")
+    client = get_storage_authed_client()
+    auth_user = client.auth.get_session().user
     safe_name = safe_evidence_filename(uploaded_file.name)
-    object_name = f"{uuid.uuid4().hex}__{safe_name}"
-    object_path = f"{evidence_folder(session['user_id'], case_id)}/{object_name}"
-    client = get_authed_client()
+    object_path = f"{evidence_folder(auth_user.id, case_id)}/{uuid.uuid4().hex}_{safe_name}"
     client.storage.from_(EVIDENCE_BUCKET).upload(
         object_path,
         uploaded_file.getvalue(),
@@ -752,14 +808,14 @@ def download_case_evidence(object_path: str):
     session = st.session_state.get("supabase_session")
     if not session or not session.get("user_id") or not object_path.startswith(f"{session['user_id']}/"):
         raise RuntimeError("접근 권한이 없습니다.")
-    return get_authed_client().storage.from_(EVIDENCE_BUCKET).download(object_path)
+    return get_storage_authed_client().storage.from_(EVIDENCE_BUCKET).download(object_path)
 
 
 def delete_case_evidence_file(object_path: str) -> None:
     session = st.session_state.get("supabase_session")
     if not session or not session.get("user_id") or not object_path.startswith(f"{session['user_id']}/"):
         raise RuntimeError("접근 권한이 없습니다.")
-    get_authed_client().storage.from_(EVIDENCE_BUCKET).remove([object_path])
+    get_storage_authed_client().storage.from_(EVIDENCE_BUCKET).remove([object_path])
 
 
 def delete_all_case_evidence(case_id: str) -> None:
@@ -767,7 +823,7 @@ def delete_all_case_evidence(case_id: str) -> None:
         return
     files = list_case_evidence(case_id)
     if files:
-        get_authed_client().storage.from_(EVIDENCE_BUCKET).remove([item["path"] for item in files])
+        get_storage_authed_client().storage.from_(EVIDENCE_BUCKET).remove([item["path"] for item in files])
 
 
 def delete_case(case_id):
@@ -1542,8 +1598,9 @@ def render_case_evidence_manager(case_id: str) -> None:
                         uploaded_count += 1
                     except ValueError as exc:
                         errors.append(f"{uploaded_file.name}: {exc}")
-                    except Exception:
-                        errors.append(f"{uploaded_file.name}: 업로드에 실패했습니다.")
+                    except Exception as exc:
+                        log_evidence_upload_error("upload", exc)
+                        errors.append(f"{uploaded_file.name}: {map_evidence_upload_error(exc)}")
                 if uploaded_count:
                     st.success(f"증거자료 {uploaded_count}개를 첨부했습니다.")
                 for error in errors:
@@ -1553,8 +1610,9 @@ def render_case_evidence_manager(case_id: str) -> None:
 
         try:
             files = list_case_evidence(case_id)
-        except Exception:
-            st.error("증거자료 목록을 불러오지 못했습니다. 저장소 설정을 확인해 주세요.")
+        except Exception as exc:
+            log_evidence_upload_error("list", exc)
+            st.error("증거자료 목록을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
             return
 
         if not files:
@@ -1577,13 +1635,15 @@ def render_case_evidence_manager(case_id: str) -> None:
                         "name": selected["display_name"],
                         "data": download_case_evidence(selected["path"]),
                     }
-                except Exception:
+                except Exception as exc:
+                    log_evidence_upload_error("download", exc)
                     st.error("파일을 불러오지 못했습니다.")
         with col_remove:
             if st.button("선택 파일 삭제", key=f"evidence_delete_{case_id}"):
                 try:
                     delete_case_evidence_file(selected["path"])
-                except Exception:
+                except Exception as exc:
+                    log_evidence_upload_error("delete", exc)
                     st.error("파일 삭제에 실패했습니다.")
                 else:
                     st.session_state.pop(download_key, None)
