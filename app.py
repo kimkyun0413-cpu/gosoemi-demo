@@ -373,6 +373,85 @@ def session_from_auth_response(auth_response) -> dict:
     return session_to_dict(auth_response.session)
 
 
+# Streamlit Session State is lost on a full browser reload. Store only the
+# Supabase refresh token in this browser (never in the URL or a shared cache).
+# The component runs in the app origin, and removes the token on logout.
+_browser_session_component = st.components.v2.component(
+    "gosoemi_browser_session",
+    js="""
+export default function({data, setStateValue}) {
+  const key = 'gosoemi_login_v1';
+  try {
+    if (data.action === 'clear') {
+      localStorage.removeItem(key);
+      setStateValue('stored', 'cleared');
+    } else if (data.action === 'save') {
+      const raw = localStorage.getItem(key);
+      let old = null;
+      try { old = raw ? JSON.parse(raw) : null; } catch (_) {}
+      if (!old || old.token !== data.token) {
+        localStorage.setItem(key, JSON.stringify({token: data.token,
+          expires: Date.now() + 7 * 24 * 60 * 60 * 1000}));
+      }
+    } else {
+      const raw = localStorage.getItem(key);
+      let saved = raw ? JSON.parse(raw) : null;
+      if (saved && (typeof saved.token !== 'string' ||
+                    !Number.isFinite(saved.expires) || saved.expires < Date.now())) {
+        localStorage.removeItem(key);
+        saved = null;
+      }
+      setStateValue('stored', saved ? saved.token : 'empty');
+    }
+  } catch (_) {
+    setStateValue('stored', 'empty');
+  }
+}
+""",
+)
+
+
+def restore_browser_session() -> None:
+    if st.session_state.get("browser_login_clear"):
+        result = _browser_session_component(
+            key="browser_login_clear_component", data={"action": "clear"}
+        )
+        if result.stored == "cleared":
+            st.session_state.browser_login_clear = False
+            st.rerun()
+        st.info("로그아웃하는 중입니다.")
+        st.stop()
+
+    session = st.session_state.get("supabase_session")
+    if session:
+        _browser_session_component(
+            key="browser_login_save_component",
+            data={"action": "save", "token": session["refresh_token"]},
+        )
+        return
+
+    if st.session_state.get("browser_login_checked"):
+        return
+    result = _browser_session_component(
+        key="browser_login_restore_component", data={"action": "restore"}
+    )
+    token = result.stored
+    if token is None:
+        st.info("로그인 상태를 확인하는 중입니다.")
+        st.stop()
+    st.session_state.browser_login_checked = True
+    if token not in ("empty", "cleared"):
+        try:
+            response = get_supabase_anon_client().auth.refresh_session(token)
+            if response.session and response.user:
+                st.session_state.supabase_session = session_from_auth_response(response)
+                st.rerun()
+        except Exception as error:
+            log_auth_error(error)
+        st.session_state.browser_login_clear = True
+        st.rerun()
+
+
 def get_session_authed_client(session: dict) -> Client:
     client = get_supabase_anon_client()
     set_response = client.auth.set_session(session["access_token"], session["refresh_token"])
@@ -401,6 +480,8 @@ def perform_logout() -> None:
         except Exception as error:
             log_auth_error(error)
     st.session_state.supabase_session = None
+    st.session_state.browser_login_clear = True
+    st.session_state.pop("browser_login_clear_component", None)
     st.session_state.pop("google_login_url", None)
     clear_user_session_data()
     st.session_state.auth_view = "login"
@@ -421,10 +502,13 @@ def ensure_active_session():
             raise RuntimeError("empty refresh response")
         new_session = session_from_auth_response(refreshed)
         st.session_state.supabase_session = new_session
-        return new_session
+        # A refresh token is single-use; write the rotated token to this
+        # browser before continuing with the newly refreshed session.
+        st.rerun()
     except Exception as error:
         log_auth_error(error)
         st.session_state.supabase_session = None
+        st.session_state.browser_login_clear = True
         clear_user_session_data()
         st.session_state.auth_view = "login"
         set_auth_flash("error", "세션이 만료되었습니다. 다시 로그인해 주세요.")
@@ -2042,6 +2126,7 @@ if "pending_recovery_session" not in st.session_state:
 handle_auth_query_params()
 handle_naver_query_params()
 handle_google_query_params()
+restore_browser_session()
 
 if not st.session_state.supabase_session:
     render_brand_header()
