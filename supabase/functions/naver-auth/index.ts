@@ -239,7 +239,7 @@ async function handleCallback(req: Request, appBaseUrl: string): Promise<Respons
   try {
     profile = await fetchProfile(naverAccessToken);
   } finally {
-    await revokeNaverToken(naverAccessToken);
+    // 네이버 연결을 유지합니다.
   }
 
   let userId: string;
