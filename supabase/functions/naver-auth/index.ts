@@ -99,7 +99,7 @@ function appRedirect(appBaseUrl: string, params: Record<string, string>): Respon
   return redirect(url.toString(), CLEAR_STATE_COOKIE);
 }
 
-async function handleStart(): Promise<Response> {
+async function handleStart(req: Request): Promise<Response> {
   const clientId = requireEnv("NAVER_CLIENT_ID");
   const callbackUrl = requireEnv("NAVER_CALLBACK_URL");
 
@@ -114,6 +114,9 @@ async function handleStart(): Promise<Response> {
   authorizeUrl.searchParams.set("client_id", clientId);
   authorizeUrl.searchParams.set("redirect_uri", callbackUrl);
   authorizeUrl.searchParams.set("state", state);
+  if (new URL(req.url).searchParams.get("switch") === "1") {
+  authorizeUrl.searchParams.set("auth_type", "reauthenticate");
+}
 
   return redirect(
     authorizeUrl.toString(),
@@ -282,7 +285,7 @@ Deno.serve(async (req) => {
 
   const path = new URL(req.url).pathname;
   try {
-    if (path.endsWith("/start")) return await handleStart();
+    if (path.endsWith("/start")) return await handleStart(req);
     if (path.endsWith("/callback")) return await handleCallback(req, appBaseUrl);
     return new Response("Not Found", { status: 404 });
   } catch (error) {
