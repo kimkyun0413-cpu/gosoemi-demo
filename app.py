@@ -12,6 +12,8 @@ import secrets
 import threading
 from io import BytesIO
 from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 import streamlit as st
 from docx import Document
 from docx.shared import Mm, Pt
@@ -486,6 +488,56 @@ def perform_logout() -> None:
     clear_user_session_data()
     st.session_state.auth_view = "login"
     st.rerun()
+
+
+def delete_current_account() -> None:
+    session = ensure_active_session()
+    if not session or not session.get("access_token"):
+        raise RuntimeError("로그인이 만료되었습니다. 다시 로그인해 주세요.")
+    supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    if not supabase_url:
+        raise RuntimeError("탈퇴 기능 설정을 확인할 수 없습니다.")
+    request = Request(
+        f"{supabase_url}/functions/v1/delete-account",
+        data=b"{}",
+        headers={
+            "Authorization": f"Bearer {session['access_token']}",
+            "apikey": os.environ.get("SUPABASE_PUBLISHABLE_KEY", ""),
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            if not json.load(response).get("deleted"):
+                raise RuntimeError("탈퇴 완료를 확인할 수 없습니다.")
+    except HTTPError as error:
+        if error.code in (401, 403):
+            raise RuntimeError("로그인이 만료되었습니다. 다시 로그인해 주세요.") from error
+        raise RuntimeError("탈퇴 처리 중 문제가 생겼습니다. 계정 상태를 확인해 주세요.") from error
+    except (URLError, TimeoutError) as error:
+        raise RuntimeError("연결이 끊겼습니다. 다시 로그인해 계정 상태를 확인해 주세요.") from error
+
+    st.session_state.supabase_session = None
+    st.session_state.browser_login_clear = True
+    st.session_state.pop("browser_login_clear_component", None)
+    clear_user_session_data()
+    st.session_state.auth_view = "login"
+    st.session_state.pop("google_login_url", None)
+    st.session_state.account_deleted = True
+    st.rerun()
+
+
+@st.dialog("회원탈퇴")
+def render_delete_account_dialog() -> None:
+    st.warning("탈퇴하면 계정, 저장된 사건과 증거자료를 삭제합니다. 삭제한 내용은 되돌릴 수 없습니다.")
+    confirmed = st.checkbox("계정과 모든 저장 자료의 삭제에 동의합니다.", key="confirm_delete_account")
+    if st.button("탈퇴하기", type="primary", disabled=not confirmed, key="delete_account_final"):
+        try:
+            with st.spinner("계정과 저장된 자료를 삭제하고 있습니다. 잠시 기다려 주세요."):
+                delete_current_account()
+        except Exception as error:
+            st.error(str(error))
 
 
 def ensure_active_session():
@@ -1613,7 +1665,8 @@ def build_privacy_policy_text():
 - Google 로그인 이용 시: Google 고유 식별자, Google 계정 이메일, 이름, 프로필 사진 (이용자 동의에 따라 Google로부터 제공받음)
 - 증거자료 첨부 이용 시: 이용자가 직접 선택한 사진, PDF 문서, 녹음파일 및 파일명
 - 사건 작성 시: 사건 유형, 신고인 정보, 상대방 정보, 사건 발생 일시, 사건 발생 장소, 사건 경위, 피해 내용, 증거자료, 목격자 유무, 처벌 의사 (총 10개 항목)
-  - 이 중 "상대방 정보"는 이용자 본인이 아닌 제3자에 관한 정보가 포함될 수 있습니다. - 로그인 유지 시: 로그인 유지에 필요한 갱신 토큰을 이용자의 브라우저 저장소에 최대 7일 동안 저장합니다. 로그아웃하면 브라우저에서 삭제하며, 같은 브라우저를 함께 사용하는 다른 사람이 접근할 수 있으므로 공용 기기에서는 로그아웃해 주세요.
+  - 이 중 "상대방 정보"는 이용자 본인이 아닌 제3자에 관한 정보가 포함될 수 있습니다.
+- 로그인 유지 시: 로그인 유지에 필요한 갱신 토큰을 이용자의 브라우저 저장소에 최대 7일 동안 저장합니다. 로그아웃하면 브라우저에서 삭제하며, 같은 브라우저를 함께 사용하는 다른 사람이 접근할 수 있으므로 공용 기기에서는 로그아웃해 주세요.
 
 **2. 개인정보의 수집·이용 목적**
 - 회원가입, 로그인, 계정 관리
@@ -1624,7 +1677,7 @@ def build_privacy_policy_text():
 
 **3. 개인정보의 보유·이용 기간**
 - 회원 정보(이메일, 비밀번호, 네이버 고유 식별자, 네이버 계정 이메일, Google 고유 식별자, Google 계정 이메일·이름·프로필 사진): 회원탈퇴 시까지 보유하며, 탈퇴 확인 후 삭제합니다.
-- 사건 정보 및 첨부한 증거자료: 이용자가 직접 삭제하거나 회원탈퇴를 요청할 때까지 보유합니다.
+- 사건 정보 및 첨부한 증거자료: 이용자가 직접 삭제하거나 회원탈퇴할 때까지 보유합니다.
 
 **4. 개인정보 처리 위탁 및 정보 전송**
 - Supabase — 회원 인증, 사건 정보 및 첨부한 증거자료의 비공개 저장. 데이터베이스와 인증 정보는 AWS 서울 리전에 저장되어 주로 처리됩니다.
@@ -1639,7 +1692,7 @@ def build_privacy_policy_text():
 
 **6. 이용자의 권리**
 - 저장된 사건의 열람·삭제: 서비스 내 "내 사건" 화면에서 직접 삭제할 수 있습니다.
-- 회원탈퇴 및 전체 정보 삭제: 아래 문의처로 이메일을 보내 요청하시면, 확인 후 계정과 저장된 모든 사건 정보를 삭제합니다. 현재는 이메일 요청을 받아 순차적으로 처리하고 있습니다.
+- 회원탈퇴 및 전체 정보 삭제: 로그인 후 '계정 및 개인정보 메뉴'의 '회원탈퇴'에서 직접 계정, 저장된 사건과 증거자료를 삭제할 수 있습니다. 처리에 문제가 생기면 아래 문의처로 연락해 주세요.
 
 **7. 이용 연령 제한**
 본 서비스는 만 14세 이상만 이용할 수 있습니다.
@@ -1927,8 +1980,6 @@ def render_social_login_section(key_suffix: str) -> None:
         )
 
 
-
-
 def render_google_age_gate():
     st.markdown(
         "**만 14세 이상 확인**\n\n"
@@ -2139,6 +2190,8 @@ restore_browser_session()
 
 if not st.session_state.supabase_session:
     render_brand_header()
+    if st.session_state.pop("account_deleted", False):
+        st.success("회원탈퇴가 완료되었습니다. 계정과 저장된 자료가 삭제되었습니다.")
     render_auth_flash()
 
     if st.session_state.auth_view == "recovery_set_password":
@@ -2329,10 +2382,8 @@ with st.sidebar:
     if st.button("이용약관 보기", key="terms_of_service_view_btn_sidebar"):
         render_terms_of_service_dialog()
 
-    if PRIVACY_CONTACT_EMAIL:
-        st.caption(f"회원탈퇴를 원하시면 {PRIVACY_CONTACT_EMAIL}로 가입하신 이메일을 포함해 요청해 주세요. 확인 후 계정과 저장된 사건을 삭제해 드립니다.")
-    else:
-        st.caption("회원탈퇴 절차를 준비 중입니다.")
+    if st.button("회원탈퇴", key="delete_account_sidebar"):
+        render_delete_account_dialog()
 
 render_brand_header()
 
@@ -2343,10 +2394,8 @@ with st.expander("계정 및 개인정보 메뉴"):
     if st.button("이용약관 보기", key="terms_of_service_view_btn_main"):
         render_terms_of_service_dialog()
 
-    if PRIVACY_CONTACT_EMAIL:
-        st.caption(f"회원탈퇴를 원하시면 {PRIVACY_CONTACT_EMAIL}로 가입하신 이메일을 포함해 요청해 주세요. 확인 후 계정과 저장된 사건을 삭제해 드립니다.")
-    else:
-        st.caption("회원탈퇴 절차를 준비 중입니다.")
+    if st.button("회원탈퇴", key="delete_account_main"):
+        render_delete_account_dialog()
 
     if st.button("로그아웃", key="logout_btn_main"):
         perform_logout()
