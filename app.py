@@ -2019,6 +2019,11 @@ def render_social_login_section(key_suffix: str) -> None:
             '다른 네이버 계정으로 로그인</a>',
             unsafe_allow_html=True,
         )
+        st.caption(
+            "네이버 로그인은 새 탭에서 열립니다. 로그인한 뒤에는 이전 탭을 닫아 주세요. "
+            "고소음이에서 로그아웃해도 네이버 로그인은 유지되므로, 다른 네이버 계정을 쓰려면 "
+            "'다른 네이버 계정으로 로그인'을 눌러 주세요."
+        )
 
 
 def render_google_age_gate():
