@@ -530,8 +530,23 @@ def delete_current_account() -> None:
 
 @st.dialog("회원탈퇴")
 def render_delete_account_dialog() -> None:
-    st.warning("탈퇴하면 계정, 저장된 사건과 증거자료를 삭제합니다. 삭제한 내용은 되돌릴 수 없습니다.")
-    confirmed = st.checkbox("계정과 모든 저장 자료의 삭제에 동의합니다.", key="confirm_delete_account")
+    session = st.session_state.get("supabase_session") or {}
+    identity, method = current_account_label(session)
+    st.markdown(f"**탈퇴할 계정:** {identity} ({method} 로그인)")
+
+    cases, cases_error = load_cases_safe()
+    try:
+        evidence_count = count_user_evidence_files(session.get("user_id", ""))
+    except Exception:
+        evidence_count = None
+    case_text = "확인하지 못했습니다" if cases_error else f"{len(cases)}건"
+    evidence_text = "확인하지 못했습니다" if evidence_count is None else f"{evidence_count}개"
+    st.markdown(f"**삭제될 자료:** 사건 {case_text}, 증거파일 {evidence_text}")
+    if cases_error or evidence_count is None:
+        st.caption("개수를 확인하지 못해도 탈퇴하면 이 계정의 모든 사건과 증거파일이 삭제됩니다.")
+
+    st.warning("탈퇴하면 위 계정과 저장된 사건, 증거자료를 삭제합니다. 삭제한 내용은 되돌릴 수 없습니다. 탈퇴할 계정이 맞는지 먼저 확인해 주세요.")
+    confirmed = st.checkbox("위 계정과 모든 저장 자료의 삭제에 동의합니다.", key="confirm_delete_account")
     if st.button("탈퇴하기", type="primary", disabled=not confirmed, key="delete_account_final"):
         try:
             with st.spinner("계정과 저장된 자료를 삭제하고 있습니다. 잠시 기다려 주세요."):
@@ -741,6 +756,32 @@ def decode_access_token_claims(session: dict) -> dict:
 def is_naver_session(session: dict) -> bool:
     claims = decode_access_token_claims(session)
     return (claims.get("app_metadata") or {}).get("naver_linked") is True
+
+
+def current_account_label(session: dict) -> tuple[str, str]:
+    # 네이버 로그인은 이름을 받지 않으므로 이메일을, 이메일이 없으면 고소음이 사용자 ID를 보여준다.
+    if is_naver_session(session):
+        method = "네이버"
+    else:
+        provider = (decode_access_token_claims(session).get("app_metadata") or {}).get("provider")
+        method = {"google": "Google", "email": "이메일"}.get(provider, "기타")
+    identity = session.get("email") or f"사용자 ID {session.get('user_id', '')}"
+    # 이메일의 _ 등이 마크다운 서식으로 바뀌지 않도록 이스케이프한다.
+    return re.sub(r"([\\`*_{}\[\]()#+\-.!|~<>])", r"\\\1", identity), method
+
+
+def count_user_evidence_files(user_id: str) -> int:
+    if not user_id:
+        raise RuntimeError("로그인이 필요합니다.")
+    bucket = get_storage_authed_client().storage.from_(EVIDENCE_BUCKET)
+    total = 0
+    for entry in bucket.list(user_id, {"limit": 1000}) or []:
+        if evidence_item_value(entry, "id"):
+            total += 1
+            continue
+        folder = f"{user_id}/{evidence_item_value(entry, 'name')}"
+        total += sum(1 for item in bucket.list(folder, {"limit": 1000}) or [] if evidence_item_value(item, "id"))
+    return total
 
 
 class GoogleFlowStore:
@@ -2388,6 +2429,9 @@ with st.sidebar:
 render_brand_header()
 
 with st.expander("계정 및 개인정보 메뉴"):
+    account_identity, account_method = current_account_label(st.session_state.supabase_session)
+    st.markdown(f"**현재 로그인 계정:** {account_identity} ({account_method} 로그인)")
+
     if st.button("개인정보처리방침 보기", key="privacy_policy_view_btn_main"):
         render_privacy_policy_dialog()
 
