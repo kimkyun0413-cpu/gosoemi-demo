@@ -2580,7 +2580,7 @@ with tab_case:
 
 with tab_case_list:
     st.caption("저장된 사건을 조회하고 삭제할 수 있습니다.")
-    st.caption("계정과 사건을 모두 삭제(회원탈퇴)하려면 사이드바의 안내를 참고해 주세요.")
+    st.caption("회원탈퇴는 화면 위쪽 ‘계정 및 개인정보 메뉴’에서 진행할 수 있습니다.")
 
     cases, load_error = load_cases_safe()
 
