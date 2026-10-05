@@ -15,14 +15,18 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 import streamlit as st
-from docx import Document
-from docx.shared import Mm, Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH
 from google import genai
 from google.genai import types
 from supabase import create_client, Client
 from supabase_auth.errors import AuthApiError
 from calendar_test import get_calendar_service
+from case_guide import (
+    CASE_FIELDS, CASE_LONG_TEXT_FIELDS, CASE_FIELD_MAX_CHARS, DRAFT_DISCLAIMER, DAMAGE_TYPES,
+    FIELD_GUIDES, LEGAL_TERMS, LEGAL_TERMS_SOURCE, OTHER_TYPE, ROUTES,
+    SAFE_DRAFT_INSTRUCTION, SUSPECT_UNKNOWN_GUIDE, build_case_draft_docx, build_draft_prompt,
+    compute_case_fingerprint, damage_type_guide, field_label, field_placeholder, find_unsupported_details,
+    is_missing, missing_info_items, normalize_case_values, validate_case_values,
+)
 MEMORY_FILE = "memory.json"
 MEMORY_TRIGGERS = [unicodedata.normalize("NFC", t) for t in ["기억해", "저장해"]]
 
@@ -31,129 +35,11 @@ CANCEL_TRIGGERS = [unicodedata.normalize("NFC", t) for t in ["취소", "삭제"]
 DATE_WORDS = ["오늘", "내일", "모레", "이번주", "이번 주", "다음주", "다음 주"]
 
 CASES_TABLE = "cases"
-CASE_FIELDS = [
-    ("사건 유형", "case_type"),
-    ("신고인 정보", "reporter_info"),
-    ("상대방 정보", "suspect_info"),
-    ("사건 발생 일시", "incident_datetime"),
-    ("사건 발생 장소", "incident_location"),
-    ("구체적인 사건 경위", "incident_description"),
-    ("피해 내용", "damage_details"),
-    ("증거 자료", "evidence"),
-    ("목격자 유무", "witness"),
-    ("처벌 의사", "punishment_intent"),
-]
-CASE_LONG_TEXT_FIELDS = {"reporter_info", "suspect_info", "incident_description", "damage_details", "evidence"}
-CASE_FIELD_MAX_CHARS = {
-    "case_type": 100,
-    "reporter_info": 1000,
-    "suspect_info": 1000,
-    "incident_datetime": 100,
-    "incident_location": 300,
-    "incident_description": 8000,
-    "damage_details": 4000,
-    "evidence": 4000,
-    "witness": 1000,
-    "punishment_intent": 500,
-}
-DRAFT_DISCLAIMER = "이 문서는 참고용 초안이며 제출 전 법률 전문가의 검토가 필요합니다."
-
-# 쉬운 설명은 형사 절차의 일반적인 뜻만 안내합니다. 사건별 판단은 하지 않습니다.
-LEGAL_TERMS = [
-    ("고소", "범죄 피해자 등 고소할 수 있는 사람이 수사기관에 범죄 사실을 알리고 처벌을 요청하는 것입니다."),
-    ("고발", "고소할 수 있는 사람 외의 제3자가 수사기관에 범죄 사실을 알리고 처벌을 요청하는 것입니다."),
-    ("피의자", "범죄 혐의를 받아 수사 대상이 된 사람입니다. 혐의가 확정됐다는 뜻은 아닙니다."),
-    ("피고인", "검사가 기소해 형사재판을 받는 사람입니다. 유죄가 확정됐다는 뜻은 아닙니다."),
-    ("송치", "수사기관이 사건 기록 등을 검찰로 넘기는 절차입니다. 송치 자체가 기소나 유죄를 뜻하지는 않습니다."),
-    ("기소", "검사가 형사재판을 열어 달라고 법원에 공소를 제기하는 것입니다."),
-    ("불기소", "검사가 해당 사건을 형사재판에 넘기지 않기로 결정하는 것입니다. 이유는 사건마다 다를 수 있습니다."),
-]
-LEGAL_TERMS_SOURCE = "https://www.spo.go.kr/site/spo/01/10101050200002018112210.jsp"
-
-# 질문과 답변은 일반적인 정보와 기록 방법만 다루며 사건의 성립 여부를 판단하지 않습니다.
-VICTIM_QA = {
-    "사기 피해": {
-        "source": "https://ecrm.police.go.kr/minwon/main",
-        "questions": [
-            ("돈을 보냈는데 상대방이 연락을 피합니다. 무엇부터 할까요?", "**먼저 거래 내용을 한 장에 정리해 보세요.** 무엇을 사거나 받기로 했는지, 언제 얼마를 어느 계좌로 보냈는지, 그 뒤 상대방이 어떤 말을 했는지 순서대로 적으시면 됩니다.\n\n예: ‘9월 2일 중고 거래 게시글을 보고 10만 원 송금 → 9월 3일 발송하겠다는 답변 → 9월 5일부터 연락이 닿지 않음.’ 연락이 끊겼다는 사실과 ‘처음부터 속일 생각이었다’는 추측은 구분해 주세요."),
-            ("신고하려면 어떤 자료를 챙겨야 하나요?", "**거래가 어떻게 시작됐고 돈이 어디로 갔는지 보여 주는 자료**를 모아 두세요. 거래 글·상품 사진·상대방 계정이나 연락처, 메신저 대화 전체, 계좌이체 또는 결제 내역이 도움이 됩니다.\n\n화면을 캡처할 때는 날짜와 상대방 표시가 함께 보이게 남기고, 원본 대화나 파일도 삭제하지 마세요. 자료가 일부 없어도 기억나는 내용을 시간 순서대로 적을 수 있습니다."),
-            ("인터넷으로 신고하면 경찰서 방문은 끝인가요?", "**온라인 접수 뒤에도 방문 요청을 받을 수 있습니다.** 경찰의 사이버범죄 신고시스템(ECRM)에서 신고할 수 있고, 가까운 경찰서에 직접 방문해 상담·접수할 수도 있습니다.\n\n온라인 신고를 하실 때는 피해 경위, 이체 내역, 대화 자료를 준비해 주세요. 접수 뒤에는 담당 경찰관이 추가 자료나 출석을 요청하는지 확인하시면 됩니다."),
-        ],
-    },
-    "온라인 명예훼손": {
-        "source": "https://www.easylaw.go.kr/CSP/CnpClsMain.laf?ccfNo=3&cciNo=1&cnpClsNo=1&csmSeq=293",
-        "questions": [
-            ("나에 관한 글을 발견했습니다. 삭제되기 전에 무엇을 해야 하나요?", "**글과 주변 상황을 함께 남겨 주세요.** 게시글 전체 화면, 주소(URL), 작성 날짜, 작성자 표시, 댓글을 캡처하고 가능하면 게시글이 올라온 곳도 기록하세요.\n\n글에서 정확히 어떤 표현이 쓰였는지, 다른 사람들이 볼 수 있었는지도 나중에 확인할 수 있게 남겨 두는 게 좋습니다. 캡처만 하고 원본 주소를 빼놓기 쉬우니 주소도 따로 저장해 주세요."),
-            ("기분 나쁜 글이면 모두 신고할 수 있나요?", "**불쾌한 표현이라는 이유만으로 결과가 정해지지는 않습니다.** 글의 정확한 내용, 누구에 관한 글인지, 어디에 공개됐는지 등 상황을 함께 살펴봐야 합니다.\n\n우선 글의 원문과 주소를 보관하고, 사실로 확인한 내용과 본인의 생각을 나누어 적어 보세요. 고소음이는 해당 글의 위법 여부를 확정하지 않으므로, 판단이 필요하면 원문을 가지고 전문 기관이나 법률 전문가와 상담해 주세요."),
-            ("상담할 때는 사건을 어떻게 설명하면 쉬울까요?", "**‘언제·어디에·어떤 글이 올라왔는지’부터 말씀해 보세요.** 그다음 글을 알게 된 경위, 본인과 글의 관련성, 글이 퍼진 상황을 순서대로 정리하시면 됩니다.\n\n예: ‘9월 4일 공개 게시판에서 제 이름이 적힌 글을 봤고, 댓글 3개가 달려 있었습니다.’ 확인하지 못한 작성자의 의도나 피해 규모를 단정해 적을 필요는 없습니다."),
-        ],
-    },
-    "스토킹 피해": {
-        "source": "https://www.easylaw.go.kr/CSP/CnpClsMain.laf?ccfNo=2&cciNo=2&cnpClsNo=1&csmSeq=1661",
-        "questions": [
-            ("상대방이 지금 집 앞에 있거나 따라옵니다. 어떻게 해야 하나요?", "**지금 위험하다면 안전한 곳으로 이동하고 112에 신고하세요.** 가능하면 주변 사람에게 상황을 알리고 혼자 상대방을 만나 해결하려고 하지 마세요.\n\n신고할 때는 현재 위치, 상대방이 있는 곳, 방금 일어난 일, 즉시 도움이 필요한 이유를 차례대로 말하면 됩니다. 고소음이에 내용을 적는 것은 경찰 신고로 연결되지 않습니다."),
-            ("연락과 접근이 여러 번 있었는데 어떻게 정리하나요?", "**한 번씩 따로 기록해 보세요.** 날짜·시간·장소·어떤 행동이 있었는지, 당시 주변에 누가 있었는지를 시간 순서대로 적으시면 됩니다. 문자와 통화 기록, 이미 찍어 둔 사진이나 영상도 원본 그대로 보관하세요.\n\n예: ‘9월 5일 오후 8시, 집 앞에서 기다림 → 9월 6일 오전 7시, 전화 5회.’ 자료를 얻으려고 상대방을 찾아가거나 위험한 장소에 머무르지 마세요."),
-            ("다시 찾아오지 못하게 도움을 요청할 수 있나요?", "**경찰에 현재 상황과 안전에 대한 걱정을 구체적으로 말해 주세요.** 반복된 연락이나 접근 내용, 다시 찾아올까 두려운 이유를 알리고 어떤 보호조치를 요청할 수 있는지 물어보시면 됩니다.\n\n접근이나 연락을 제한하는 조치가 검토될 수 있지만, 실제 적용 여부는 사건 상황과 담당 기관의 판단에 따라 달라집니다. 당장 위험하면 먼저 112에 신고하세요."),
-        ],
-    },
-    "학교폭력 피해": {
-        "source": "https://www.easylaw.go.kr/CSP/CnpClsMain.laf?ccfNo=3&cciNo=1&cnpClsNo=1&csmSeq=1408",
-        "questions": [
-            ("학교에서 괴롭힘을 당하고 있습니다. 누구에게 먼저 말하나요?", "**혼자 해결하려고 버티지 마시고 믿을 수 있는 어른에게 알려 주세요.** 담임교사나 학교폭력 담당 교사에게 언제 어디서 어떤 일이 있었는지 말씀할 수 있습니다. 보호자와 함께 이야기해도 됩니다.\n\n학교에 바로 말하기 어렵다면 **117 학교폭력 신고·상담센터**에 상담하거나 신고할 수 있습니다. 지금 폭행이나 위협을 받고 있다면 안전한 곳으로 이동하고 112에 신고하세요."),
-            ("말로 설명하기 어려운데 무엇을 적어 가면 될까요?", "**기억나는 사건 하나씩 적어 가면 됩니다.** 날짜와 장소, 누가 무엇을 했는지, 곁에서 본 사람이 있었는지를 짧게 써 보세요.\n\n메신저 대화, 사진·영상, 이미 받은 진료 기록 등이 있다면 함께 보관하세요. 정확한 날짜가 생각나지 않으면 ‘9월 첫째 주쯤’처럼 기억나는 범위만 쓰고, 모르는 내용을 억지로 채우지 마세요."),
-            ("알린 뒤에도 계속 마주쳐야 해서 걱정됩니다.", "**신고하거나 상담할 때 그 걱정을 함께 이야기해 주세요.** ‘복도에서 매일 마주친다’, ‘다시 연락이 올까 두렵다’처럼 지금 불안한 상황을 구체적으로 설명하면 담당자가 필요한 보호 방안을 함께 살펴볼 수 있습니다.\n\n학교에 알린 날짜와 받은 안내도 따로 적어 두세요. 당장 위험한 상황이라면 보호 방안 안내를 기다리지 말고 112에 신고하세요."),
-        ],
-    },
-    "보이스피싱·문자 사기": {
-        "source": "https://www.police.go.kr/www/security/cyber/cyber01.jsp",
-        "questions": [
-            ("방금 돈을 보냈습니다. 무엇부터 해야 하나요?", "**즉시 112에 전화해 보이스피싱 피해 사실을 알리세요.** 송금한 은행에도 바로 연락해 지급정지 등 가능한 조치를 문의하세요. 시간이 중요한 상황이므로 고소음이에 기록을 남기는 일보다 먼저 연락하는 게 좋습니다.\n\n전화할 때 송금 시각, 금액, 보낸 계좌와 받는 계좌를 확인할 수 있으면 도움이 됩니다. 모르는 정보가 있어도 신고를 미루지 마세요."),
-            ("전화나 문자를 지워도 될까요?", "**문자와 통화 기록을 우선 남겨 두세요.** 상대방 전화번호, 받은 링크, 대화 내용과 송금 내역을 보관하고 어떤 말을 듣고 송금했는지 시간 순서대로 적어 보세요.\n\n의심스러운 링크를 다시 누르거나 상대방에게 추가로 돈을 보내지는 마세요. 받은 안내가 진짜 기관 연락인지 헷갈리면 해당 기관의 공식 번호로 직접 확인하세요."),
-        ],
-    },
-    "폭행·협박 피해": {
-        "source": "https://www.police.go.kr/",
-        "questions": [
-            ("지금 위협을 받고 있으면 어떻게 해야 하나요?", "**먼저 안전한 곳으로 이동하고 긴급하면 112에 신고하세요.** 다쳤다면 필요한 진료를 받으시고, 직접 상대방을 만나 해결하려고 위험한 장소로 돌아가지 마세요.\n\n신고할 때 현재 위치, 누가 어떤 행동을 했는지, 부상 여부를 있는 그대로 설명하시면 됩니다."),
-            ("나중에 상황을 설명하려면 무엇을 남겨야 하나요?", "**사건이 일어난 순서를 짧게 적어 두세요.** 언제·어디서·누가 무엇을 했는지와 현장에서 본 사람이 있는지를 기록하고, 사진·문자·통화 기록·진료 자료 등 이미 가진 자료를 보관하세요.\n\n기억나지 않는 말을 새로 만들어 적지 말고, 직접 겪은 일과 다른 사람에게 들은 이야기를 구분해 주세요."),
-        ],
-    },
-    "교제·가정폭력 피해": {
-        "source": "https://www.mogef.go.kr/cc/wcc/cc_wcc_f001.do",
-        "questions": [
-            ("가까운 사람에게 위협받고 있습니다. 어디에 도움을 요청하나요?", "**지금 위험하다면 안전한 장소로 이동하고 112에 신고하세요.** 상담이나 긴급 보호가 필요하면 **1366**에도 연락할 수 있습니다. 가족이나 연인 사이의 일이라도 혼자 감당할 필요는 없습니다.\n\n안전하게 통화하기 어렵다면 믿을 수 있는 사람에게 대신 도움을 요청하는 방법도 생각해 보세요."),
-            ("상황을 어떻게 정리하면 좋을까요?", "**반복된 일을 날짜별로 나누어 적어 보세요.** 폭언·위협·신체 접촉 등 실제 있었던 행동과 당시 장소, 주변에 있었던 사람을 적고, 보유한 대화·사진·진료 자료를 보관하세요.\n\n상대방에게 들킬 위험이 있다면 기록을 남기는 방법보다 본인의 안전을 먼저 생각하고 112 또는 1366에 상황을 설명해 주세요."),
-        ],
-    },
-    "불법촬영·영상 유포 피해": {
-        "source": "https://d4u.stop.or.kr/ko/support/content/guide",
-        "questions": [
-            ("사진이나 영상이 퍼질까 봐 두렵습니다. 어디에 연락하나요?", "**중앙디지털성범죄피해자지원센터에 상담을 요청할 수 있습니다.** 상담 후 상황에 따라 삭제지원과 유포 모니터링 등에 대한 안내를 받을 수 있습니다. **1366**에서도 상담할 수 있고, 긴급한 위협을 받고 있다면 112에 신고하세요.\n\n피해를 확인하려고 영상을 다른 사람에게 보내거나 공개 게시판에 올리지 마세요."),
-            ("유포된 게시물을 발견하면 무엇을 남기나요?", "**게시물의 주소(URL), 발견 시각, 게시자 표시를 기록하세요.** 이미 가진 대화나 유포 협박 메시지도 보관해 두시면 상담할 때 설명하기 쉽습니다.\n\n스스로 계속 검색하면서 위험한 자료를 수집해야 하는 것은 아닙니다. 삭제지원이 필요한지 센터와 먼저 상담해 주세요."),
-        ],
-    },
-    "직장 내 괴롭힘": {
-        "source": "https://labor.moel.go.kr/minwonApply/minwonFormat.do?searchVal=SN001",
-        "questions": [
-            ("직장에서 반복적으로 괴롭힘을 당합니다. 어떻게 정리하나요?", "**일어난 일마다 날짜·장소·행동을 적어 보세요.** 누가 어떤 말을 했는지, 업무와 어떤 관련이 있었는지, 주변에 누가 있었는지를 사실 중심으로 남기면 도움이 됩니다.\n\n이미 받은 메시지나 업무 지시, 상담 기록도 보관하세요. 단순히 ‘괴롭힘이다’라고 결론짓기보다 구체적인 행동을 적는 게 상황을 설명하기 쉽습니다."),
-            ("어디에 상담하거나 알릴 수 있나요?", "**직장 내 신고 창구를 확인하고, 고용노동부 노동포털의 진정 안내도 살펴보세요.** 누구에게 언제 알렸는지, 어떤 답을 받았는지도 기록해 두시면 좋습니다.\n\n직장 내 괴롭힘에 해당하는지는 실제 상황과 사업장 요건 등에 따라 판단이 달라질 수 있으므로 담당 기관에 구체적인 내용을 설명해 보세요."),
-        ],
-    },
-    "임금·퇴직금 미지급": {
-        "source": "https://labor.moel.go.kr/minwonSysInfo/wagesolway.do",
-        "questions": [
-            ("월급이나 퇴직금을 못 받았습니다. 무엇부터 확인하나요?", "**원래 받기로 한 돈과 실제 받은 돈을 나란히 적어 보세요.** 근무 기간, 월급날, 약속한 금액과 입금된 금액을 정리하고 근로계약서·급여명세서·입금 내역·근무 기록을 보관하세요.\n\n정확한 금액을 아직 모르더라도, 현재 확인되는 내역부터 적어 두시면 상담할 때 도움이 됩니다."),
-            ("어디에 신고하거나 상담할 수 있나요?", "**고용노동부 노동포털에서 임금체불 진정을 신청하거나 관할 고용노동관서를 방문해 상담할 수 있습니다.** 임금이 지급되지 않은 날짜와 금액, 사업장 정보와 보유한 자료를 준비해 보세요.\n\n진정 뒤 조사나 출석 안내가 올 수 있으니 담당 기관에서 보낸 연락을 확인해 주세요."),
-        ],
-    },
-    "개인정보 유출·도용": {
-        "source": "https://www.privacy.go.kr/front/contents/cntntsView.do?contsNo=45",
-        "questions": [
-            ("내 정보가 유출됐거나 도용된 것 같습니다. 먼저 뭘 하나요?", "**어디에서 어떤 정보가 노출됐는지 확인되는 범위만 적어 두세요.** 유출 안내 문자나 메일, 내 이름으로 온 낯선 가입·결제 알림, 관련 화면을 보관하고 해당 서비스의 공식 고객센터에 계정 보호 방법을 문의해 보세요.\n\n의심스러운 링크에 개인정보를 다시 입력하지 마세요. 실제 금전 피해가 진행 중이라면 112에도 바로 알리세요."),
-            ("개인정보 침해는 어디에 문의하나요?", "**개인정보침해신고센터에 118로 상담하거나 온라인으로 신고할 수 있습니다.** 어떤 서비스에서 무슨 일이 있었는지, 언제 알게 됐는지와 관련 자료를 함께 정리해 두시면 됩니다.\n\n유출 사실이 아직 확인되지 않았다면 ‘유출됐다’고 단정하기보다 발견한 알림과 이상 징후를 그대로 설명해 주세요."),
-        ],
-    },
-}
+# 사건 작성·초안·증거 화면의 위젯 상태 키 접두어. 계정이 바뀌면 모두 지운다.
+CASE_UI_STATE_PREFIXES = (
+    "case_field_", "case_type_", "case_draft_editor", "case_data_consent",
+    "list_draft_", "evidence_", "confirm_delete_",
+)
 
 PASSWORD_RESET_ENABLED = False  # 기본 이메일 템플릿(커스텀 SMTP 미설정)에서는 재설정 링크가 동작하지 않음
 
@@ -176,12 +62,12 @@ NAVER_LOGIN_START_URL = os.environ.get("NAVER_LOGIN_START_URL")
 # 개인정보처리방침에 네이버 수집 항목을 반영한 날. 시행일 환경변수가 이 날짜 이상이고, 한국 날짜로 시행일 당일부터 버튼을 공개한다.
 NAVER_PRIVACY_TEXT_REVISED_DATE = datetime.date(2026, 9, 24)
 NAVER_ERROR_MESSAGES = {
-    "disabled": "네이버 로그인이 현재 준비 중입니다.",
-    "cancelled": "네이버 로그인이 취소되었습니다.",
+    "disabled": "네이버 로그인은 아직 준비 중입니다. 이메일로 로그인해 주세요.",
+    "cancelled": "네이버 로그인을 취소하셨습니다. 다시 시도하려면 네이버 로그인 버튼을 눌러 주세요.",
     "invalid_state": "로그인 요청이 만료되었거나 올바르지 않습니다. 네이버 로그인을 처음부터 다시 시도해 주세요.",
     "email_required": "네이버 로그인으로 가입하려면 네이버에서 이메일 제공에 동의해 주세요.",
     "email_exists": "이미 이메일로 가입된 주소입니다. 이메일과 비밀번호로 로그인해 주세요.",
-    "server_error": "네이버 로그인 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+    "server_error": "네이버 로그인 중 일시적인 문제가 생겼습니다. 이 탭을 새로고침한 뒤 네이버 로그인을 다시 눌러 주세요.",
 }
 
 # Google 로그인은 Supabase OAuth(PKCE)로 처리한다. Client ID/Secret은 Supabase 대시보드에만 둔다.
@@ -194,9 +80,9 @@ GOOGLE_PRIVACY_TEXT_REVISED_DATE = datetime.date(2026, 9, 27)
 GOOGLE_FLOW_TTL_SECONDS = 600
 GOOGLE_FLOW_MAX_PENDING = 2000
 GOOGLE_ERROR_MESSAGES = {
-    "cancelled": "Google 로그인이 취소되었습니다.",
+    "cancelled": "Google 로그인을 취소하셨습니다. 다시 시도하려면 Google 버튼을 눌러 주세요.",
     "invalid_state": "로그인 요청이 만료되었거나 올바르지 않습니다. Google 로그인을 처음부터 다시 시도해 주세요.",
-    "server_error": "Google 로그인 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
+    "server_error": "Google 로그인 중 일시적인 문제가 생겼습니다. 이 탭을 새로고침한 뒤 다시 시도해 주세요.",
 }
 # 개인정보처리방침 시행일은 한국 날짜 기준으로 판단한다. 서버(Streamlit Cloud)는 UTC로 동작하므로
 # date.today()를 쓰면 KST 00:00~09:00 사이에 하루 늦게 활성화된다. 한국은 서머타임이 없어 고정 오프셋을 쓴다.
@@ -234,12 +120,6 @@ SERVICE_IDENTITY_INSTRUCTION = (
     "- \"고소음이\"는 변호사의 법률자문을 대체하지 않는다.\n"
     "- 사용자가 서비스의 정체성(무엇을 하는 서비스인지 등)을 물으면 위 내용에 맞게 간결하게 설명하라."
 )
-
-DOCX_TITLE = "고소장"
-DOCX_SECTION_HEADERS = [
-    "고소인", "피고소인", "고소 취지", "범죄 사실", "고소 이유",
-    "증거자료", "목격자", "처벌 의사", "작성일",
-]
 
 
 def load_memory():
@@ -327,15 +207,15 @@ def map_auth_error(error: Exception) -> str:
         if code == "invalid_credentials":
             return "이메일 또는 비밀번호가 올바르지 않습니다."
         if code == "email_not_confirmed":
-            return "이메일 인증이 완료되지 않았습니다. 받은 편지함과 스팸함에서 인증 메일을 확인해 주세요."
+            return "아직 이메일 인증을 마치지 않으셨습니다. 받은 편지함과 스팸함에서 인증 메일을 찾아 링크를 눌러 주세요."
         if code in ("user_already_exists", "email_exists"):
-            return "이미 가입된 이메일입니다. 로그인하시거나 비밀번호를 재설정해 주세요."
+            return "이미 가입된 이메일입니다. 로그인 탭에서 로그인해 주세요. 네이버·Google로 가입하셨다면 그 버튼으로 로그인해 주세요."
         if code in ("over_email_send_rate_limit", "over_request_rate_limit") or status == 429:
             return "요청이 너무 많습니다. 잠시 후 다시 시도해 주세요."
         if code == "weak_password":
-            return "비밀번호가 너무 약합니다. 6자 이상의 다른 비밀번호를 사용해 주세요."
+            return "비밀번호가 너무 쉽습니다. 영문·숫자를 섞어 6자 이상의 다른 비밀번호를 써 주세요."
         if code in ("validation_failed", "email_address_invalid"):
-            return "이메일 형식이 올바르지 않습니다."
+            return "이메일 주소 형식이 맞지 않습니다. 예: name@example.com"
         if code == "otp_expired":
             return "인증 링크가 만료되었거나 이미 사용되었습니다. 인증 메일을 다시 요청해 주세요."
         if code in ("session_not_found", "flow_state_not_found", "flow_state_expired"):
@@ -344,7 +224,7 @@ def map_auth_error(error: Exception) -> str:
             return "이전과 동일한 비밀번호로는 변경할 수 없습니다."
         if code == "signup_disabled":
             return "현재 회원가입이 제한되어 있습니다. 잠시 후 다시 시도해 주세요."
-    return "일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+    return "일시적인 문제로 처리하지 못했습니다. 인터넷 연결을 확인하고 잠시 후 다시 시도해 주세요."
 
 
 def set_auth_flash(level, text) -> None:
@@ -356,48 +236,89 @@ def render_auth_flash() -> None:
     if flash:
         if flash["level"] == "success":
             st.success(flash["text"])
+        elif flash["level"] == "info":
+            st.info(flash["text"])
         else:
             st.error(flash["text"])
         st.session_state.auth_flash = None
 
 
-def session_to_dict(session) -> dict:
+def session_to_dict(session, previous: dict | None = None) -> dict:
+    # login_nonce는 "이 탭에서 이번에 로그인한 것"을 구분하는 임의값이다. 토큰 갱신 때는 이전 값을 이어 쓴다.
     return {
         "access_token": session.access_token,
         "refresh_token": session.refresh_token,
         "user_id": session.user.id,
         "email": session.user.email,
         "expires_at": session.expires_at,
+        "login_nonce": (previous or {}).get("login_nonce") or secrets.token_urlsafe(16),
     }
 
 
-def session_from_auth_response(auth_response) -> dict:
-    return session_to_dict(auth_response.session)
+def session_from_auth_response(auth_response, previous: dict | None = None) -> dict:
+    return session_to_dict(auth_response.session, previous)
 
 
 # Streamlit Session State is lost on a full browser reload. Store only the
 # Supabase refresh token in this browser (never in the URL or a shared cache).
 # The component runs in the app origin, and removes the token on logout.
+#
+# 여러 탭 보호: 탭마다 sessionStorage에 이번 로그인의 nonce를 적어 둔다. 다른 탭이
+# 다른 계정으로 로그인하거나 로그아웃해 localStorage가 바뀌면 storage 이벤트로 바로
+# 알아채고, 이 탭의 로그인을 해제해 계정이 섞이지 않게 한다.
 _browser_session_component = st.components.v2.component(
     "gosoemi_browser_session",
     js="""
 export default function({data, setStateValue}) {
   const key = 'gosoemi_login_v1';
+  const tabKey = 'gosoemi_tab_login_v1';
+  const ttl = 7 * 24 * 60 * 60 * 1000;
+  const readSaved = () => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) {
+      return null;
+    }
+  };
   try {
     if (data.action === 'clear') {
       localStorage.removeItem(key);
+      try { sessionStorage.removeItem(tabKey); } catch (_) {}
       setStateValue('stored', 'cleared');
     } else if (data.action === 'save') {
-      const raw = localStorage.getItem(key);
-      let old = null;
-      try { old = raw ? JSON.parse(raw) : null; } catch (_) {}
-      if (!old || old.token !== data.token) {
-        localStorage.setItem(key, JSON.stringify({token: data.token,
-          expires: Date.now() + 7 * 24 * 60 * 60 * 1000}));
-      }
+      const write = () => localStorage.setItem(key, JSON.stringify({
+        token: data.token, user: data.user, nonce: data.nonce, expires: Date.now() + ttl}));
+      const check = () => {
+        const saved = readSaved();
+        let tabNonce = null;
+        try { tabNonce = sessionStorage.getItem(tabKey); } catch (_) {}
+        if (tabNonce !== data.nonce) {
+          // 이 탭에서 방금 로그인했다: 이 계정을 브라우저에 저장한다.
+          write();
+          try { sessionStorage.setItem(tabKey, data.nonce); } catch (_) {}
+          return;
+        }
+        if (!saved || typeof saved.token !== 'string') {
+          setStateValue('sync', 'signed_out');
+        } else if (saved.nonce !== data.nonce) {
+          if (saved.user && saved.user !== data.user) setStateValue('sync', 'other_account');
+        } else if (saved.token !== data.token) {
+          write();
+        }
+      };
+      check();
+      const onStorage = (event) => { if (event.key === key || event.key === null) check(); };
+      window.addEventListener('storage', onStorage);
+      return () => window.removeEventListener('storage', onStorage);
+    } else if (data.action === 'watch') {
+      const onStorage = (event) => {
+        if (event.key === key && event.newValue) setStateValue('elsewhere', 'logged_in');
+      };
+      window.addEventListener('storage', onStorage);
+      return () => window.removeEventListener('storage', onStorage);
     } else {
-      const raw = localStorage.getItem(key);
-      let saved = raw ? JSON.parse(raw) : null;
+      let saved = readSaved();
       if (saved && (typeof saved.token !== 'string' ||
                     !Number.isFinite(saved.expires) || saved.expires < Date.now())) {
         localStorage.removeItem(key);
@@ -412,6 +333,25 @@ export default function({data, setStateValue}) {
 """,
 )
 
+BROWSER_SYNC_MESSAGES = {
+    "other_account": (
+        "다른 탭에서 다른 계정으로 로그인해서, 계정이 섞이지 않도록 이 탭의 로그인을 해제했습니다. "
+        "방금 로그인한 탭을 이용해 주세요. 이 탭은 닫으셔도 됩니다."
+    ),
+    "signed_out": (
+        "다른 탭에서 로그아웃(또는 회원탈퇴)해서 이 탭의 로그인도 해제했습니다. "
+        "계속 이용하시려면 다시 로그인해 주세요."
+    ),
+}
+
+
+def drop_local_session() -> None:
+    """서버 로그아웃이나 브라우저 저장소 삭제 없이 이 탭의 로그인 상태만 지운다."""
+    st.session_state.supabase_session = None
+    st.session_state.pop("google_login_url", None)
+    clear_user_session_data()
+    st.session_state.auth_view = "login"
+
 
 def restore_browser_session() -> None:
     if st.session_state.get("browser_login_clear"):
@@ -421,25 +361,44 @@ def restore_browser_session() -> None:
         if result.stored == "cleared":
             st.session_state.browser_login_clear = False
             st.rerun()
-        st.info("로그아웃하는 중입니다.")
+        st.info("로그아웃하고 있습니다. 잠시만 기다려 주세요.")
         st.stop()
 
     session = st.session_state.get("supabase_session")
     if session:
-        _browser_session_component(
-            key="browser_login_save_component",
-            data={"action": "save", "token": session["refresh_token"]},
+        if not session.get("login_nonce"):
+            session["login_nonce"] = secrets.token_urlsafe(16)
+        result = _browser_session_component(
+            key=f"browser_login_save_{session['login_nonce']}",
+            data={
+                "action": "save",
+                "token": session["refresh_token"],
+                # 계정 비교에만 쓰므로 사용자 ID 원문 대신 해시 일부만 브라우저에 둔다.
+                "user": hashlib.sha256(session["user_id"].encode("utf-8")).hexdigest()[:16],
+                "nonce": session["login_nonce"],
+            },
         )
+        sync = getattr(result, "sync", None)
+        if sync in BROWSER_SYNC_MESSAGES:
+            drop_local_session()
+            st.session_state.browser_login_checked = True
+            set_auth_flash("info", BROWSER_SYNC_MESSAGES[sync])
+            st.rerun()
         return
 
     if st.session_state.get("browser_login_checked"):
+        watch = _browser_session_component(key="browser_login_watch", data={"action": "watch"})
+        if getattr(watch, "elsewhere", None) == "logged_in":
+            st.info(
+                "다른 탭에서 로그인이 완료되었습니다. 로그인한 탭을 이용해 주시고, 이 탭은 닫으셔도 됩니다."
+            )
         return
     result = _browser_session_component(
         key="browser_login_restore_component", data={"action": "restore"}
     )
     token = result.stored
     if token is None:
-        st.info("로그인 상태를 확인하는 중입니다.")
+        st.info("로그인 상태를 확인하고 있습니다. 잠시만 기다려 주세요.")
         st.stop()
     st.session_state.browser_login_checked = True
     if token not in ("empty", "cleared"):
@@ -469,9 +428,16 @@ def clear_user_session_data() -> None:
     st.session_state.last_saved_fingerprint = None
     st.session_state.last_saved_at = None
     st.session_state.pending_draft_entry = None
+    st.session_state.case_review = None
+    st.session_state.case_notice = None
+    st.session_state.case_draft_case = None
     st.session_state.messages = []
     st.session_state.model_history = []
     st.session_state.case_workflow_user_id = None
+    # 이전 계정이 입력하던 사건 내용·초안·다운로드 준비 파일이 다음 계정 화면에 남지 않게 지운다.
+    for key in list(st.session_state.keys()):
+        if key.startswith(CASE_UI_STATE_PREFIXES):
+            del st.session_state[key]
 
 
 def perform_logout() -> None:
@@ -484,9 +450,11 @@ def perform_logout() -> None:
     st.session_state.supabase_session = None
     st.session_state.browser_login_clear = True
     st.session_state.pop("browser_login_clear_component", None)
+    st.session_state.pop("browser_login_watch", None)
     st.session_state.pop("google_login_url", None)
     clear_user_session_data()
     st.session_state.auth_view = "login"
+    set_auth_flash("success", "로그아웃했습니다. 이 브라우저에 저장된 로그인 정보도 지웠습니다.")
     st.rerun()
 
 
@@ -567,7 +535,7 @@ def ensure_active_session():
         refreshed = client.auth.refresh_session(session["refresh_token"])
         if not getattr(refreshed, "session", None) or not getattr(refreshed, "user", None):
             raise RuntimeError("empty refresh response")
-        new_session = session_from_auth_response(refreshed)
+        new_session = session_from_auth_response(refreshed, session)
         st.session_state.supabase_session = new_session
         # A refresh token is single-use; write the rotated token to this
         # browser before continuing with the newly refreshed session.
@@ -578,7 +546,7 @@ def ensure_active_session():
         st.session_state.browser_login_clear = True
         clear_user_session_data()
         st.session_state.auth_view = "login"
-        set_auth_flash("error", "세션이 만료되었습니다. 다시 로그인해 주세요.")
+        set_auth_flash("error", "로그인 유지 시간이 지나 자동으로 로그아웃되었습니다. 다시 로그인해 주세요.")
         return None
 
 
@@ -913,21 +881,79 @@ def confirm_google_age() -> None:
     refreshed = client.auth.refresh_session()
     if not getattr(refreshed, "session", None) or not getattr(refreshed, "user", None):
         raise RuntimeError("empty refresh response")
-    st.session_state.supabase_session = session_from_auth_response(refreshed)
+    st.session_state.supabase_session = session_from_auth_response(
+        refreshed, st.session_state.supabase_session
+    )
 
 
 DUPLICATE_SUBMIT_WINDOW_SECONDS = 10
 
 
-def compute_case_fingerprint(user_id: str, field_values: dict) -> str:
-    normalized = {key: (field_values.get(key) or "").strip() for _, key in CASE_FIELDS}
-    payload = json.dumps({"user_id": user_id, "fields": normalized}, ensure_ascii=True, sort_keys=True)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+def case_exists(case_id: str) -> bool:
+    session = st.session_state.get("supabase_session") or {}
+    response = (
+        get_authed_client()
+        .table(CASES_TABLE)
+        .select("case_id")
+        .eq("case_id", case_id)
+        .eq("user_id", session.get("user_id", ""))
+        .limit(1)
+        .execute()
+    )
+    return bool(response.data)
+
+
+class CaseSaveGuard:
+    """버튼을 연달아 누르면 Streamlit 실행이 겹쳐 같은 사건을 동시에 저장하려 할 수 있다.
+
+    case_id마다 잠금을 두어 한 번에 하나만 저장하고, 저장을 마친 case_id는 잠시 기억한다.
+    """
+
+    TTL_SECONDS = 3600
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._locks = {}
+        self._saved = {}
+
+    def lock_for(self, case_id: str) -> threading.Lock:
+        now = time.time()
+        with self._lock:
+            for key in [k for k, saved_at in self._saved.items() if saved_at < now - self.TTL_SECONDS]:
+                self._saved.pop(key, None)
+                self._locks.pop(key, None)
+            return self._locks.setdefault(case_id, threading.Lock())
+
+    def is_saved(self, case_id: str) -> bool:
+        with self._lock:
+            return case_id in self._saved
+
+    def mark_saved(self, case_id: str) -> None:
+        with self._lock:
+            self._saved[case_id] = time.time()
+
+
+@st.cache_resource
+def get_case_save_guard() -> CaseSaveGuard:
+    return CaseSaveGuard()
 
 
 def save_case(case_entry):
-    client = get_authed_client()
-    client.table(CASES_TABLE).insert(case_entry).execute()
+    """같은 case_id로 두 번 저장되지 않게 한다. 버튼을 연달아 눌러 실행이 겹쳐도 한 건만 남는다."""
+    case_id = case_entry["case_id"]
+    guard = get_case_save_guard()
+    with guard.lock_for(case_id):
+        if guard.is_saved(case_id) or case_exists(case_id):
+            guard.mark_saved(case_id)
+            return
+        client = get_authed_client()
+        try:
+            client.table(CASES_TABLE).insert(case_entry).execute()
+        except Exception:
+            # 저장은 됐는데 응답만 실패한 경우를 확인한다.
+            if not case_exists(case_id):
+                raise
+        guard.mark_saved(case_id)
 
 
 def load_cases_safe():
@@ -944,7 +970,7 @@ def load_cases_safe():
             .execute()
         )
     except Exception:
-        return [], "사건 데이터를 불러오는 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
+        return [], "저장된 사건을 불러오지 못했습니다. 화면을 새로고침해 보시고, 계속 안 되면 로그아웃 후 다시 로그인해 주세요."
     return response.data or [], None
 
 
@@ -985,7 +1011,7 @@ def get_storage_authed_client() -> Client:
     if not auth_session or not auth_session.user or auth_session.user.id != session["user_id"]:
         raise RuntimeError("세션 사용자 정보가 일치하지 않습니다.")
     if auth_session.access_token != session["access_token"]:
-        st.session_state.supabase_session = session_to_dict(auth_session)
+        st.session_state.supabase_session = session_to_dict(auth_session, session)
     return client
 
 
@@ -1013,18 +1039,18 @@ def map_evidence_upload_error(error: Exception) -> str:
     status = str(getattr(error, "status", None) or getattr(error, "status_code", None) or "")
     message = str(getattr(error, "message", None) or error).lower()
     if status in ("401", "403") or "row-level security" in message or "unauthorized" in message or "jwt" in message:
-        return "업로드 권한이 확인되지 않았습니다. 로그아웃 후 다시 로그인해 주세요."
+        return "업로드 권한을 확인하지 못했습니다. 로그아웃한 뒤 다시 로그인하고 시도해 주세요."
     if status == "413" or "maximum allowed size" in message or "too large" in message:
-        return "파일 크기가 10MB를 초과해 올릴 수 없습니다."
+        return "파일이 10MB보다 커서 올릴 수 없습니다. 사진은 크기를 줄이고, 긴 녹음은 나누어 올려 주세요."
     if status == "409" or "already exists" in message:
-        return "같은 파일이 이미 있습니다. 잠시 후 다시 시도해 주세요."
+        return "같은 이름의 파일이 이미 올라가 있습니다. 잠시 후 다시 시도해 주세요."
     if "mime" in message or "invalid_mime_type" in message:
-        return "지원하지 않는 파일 형식입니다."
+        return "올릴 수 없는 파일 형식입니다. 사진(JPG·PNG·WEBP·HEIC), PDF, 녹음(MP3·M4A·WAV)만 올릴 수 있습니다."
     if status == "404" or "bucket not found" in message:
-        return "증거자료 저장소를 찾을 수 없습니다. 관리자에게 문의해 주세요."
+        return "증거자료 저장소에 연결하지 못했습니다. 잠시 후 다시 시도하시고, 계속되면 운영자 문의처로 알려 주세요."
     if "로그인" in str(error) or "세션" in str(error):
         return "로그인이 만료되었습니다. 다시 로그인한 뒤 시도해 주세요."
-    return "업로드에 실패했습니다. 잠시 후 다시 시도해 주세요."
+    return "업로드하지 못했습니다. 인터넷 연결을 확인하고 잠시 후 다시 시도해 주세요."
 
 
 def list_case_evidence(case_id: str):
@@ -1055,18 +1081,18 @@ def list_case_evidence(case_id: str):
 def validate_evidence_upload(uploaded_file) -> None:
     extension = os.path.splitext(uploaded_file.name or "")[1].lower()
     if extension not in EVIDENCE_ALLOWED_EXTENSIONS:
-        raise ValueError("지원하지 않는 파일 형식입니다.")
+        raise ValueError("올릴 수 없는 파일 형식입니다. 사진(JPG·PNG·WEBP·HEIC), PDF, 녹음(MP3·M4A·WAV)만 올릴 수 있습니다.")
     if uploaded_file.size > EVIDENCE_MAX_FILE_BYTES:
-        raise ValueError("파일 한 개의 크기는 10MB 이하여야 합니다.")
+        raise ValueError("파일 한 개는 10MB까지 올릴 수 있습니다. 크기를 줄이거나 나누어 올려 주세요.")
     if uploaded_file.size <= 0:
-        raise ValueError("빈 파일은 올릴 수 없습니다.")
+        raise ValueError("내용이 없는(0바이트) 파일은 올릴 수 없습니다. 파일을 다시 확인해 주세요.")
 
 
 def upload_case_evidence(case_id: str, uploaded_file) -> None:
     validate_evidence_upload(uploaded_file)
     existing = list_case_evidence(case_id)
     if len(existing) >= EVIDENCE_MAX_FILES_PER_CASE:
-        raise ValueError("사건 하나에는 증거자료를 최대 20개까지 첨부할 수 있습니다.")
+        raise ValueError("사건 하나에는 파일을 20개까지 첨부할 수 있습니다. 필요 없는 파일을 지운 뒤 다시 시도해 주세요.")
     client = get_storage_authed_client()
     auth_user = client.auth.get_session().user
     safe_name = safe_evidence_filename(uploaded_file.name)
@@ -1109,28 +1135,6 @@ def delete_case(case_id):
     client.table(CASES_TABLE).delete().eq("case_id", case_id).eq("user_id", session["user_id"]).execute()
 
 
-def build_draft_prompt(case, today_str):
-    fields_text = "\n".join(
-        f"- {label}: {case.get(key) or '(입력 안 됨)'}"
-        for label, key in CASE_FIELDS
-    )
-
-    return (
-        "아래는 사용자가 실제로 입력한 사건 정보입니다. 이 정보만 근거로 고소장 초안을 작성하세요.\n"
-        "규칙:\n"
-        "1. 사용자가 입력한 객관적인 사실과 사용자의 주장만 작성하세요. 사용자가 제공하지 않은 내용을 추측하거나 새로 만들어내지 마세요.\n"
-        "2. 확인되지 않은 범죄 고의, 기망 의도, 불법영득 의사, 범죄 성립 여부를 확정적으로 표현하지 마세요.\n"
-        "3. 필요한 경우 \"고소인은 ~라고 판단합니다\", \"~한 것으로 의심됩니다\", \"수사를 통해 확인해 주시기 바랍니다\"와 같이 고소인의 주장·의심임을 분명히 하는 표현을 사용하세요.\n"
-        "4. 사용자가 직접 말하지 않은 법조문, 범행 동기, 고의, 추가 피해 내용을 만들어내지 마세요.\n"
-        "5. 특정 항목에 필요한 정보가 제공되지 않았거나 불충분하면 반드시 '확인 필요'라고만 표시하세요.\n"
-        "6. \"고소 취지\"와 \"범죄 사실\" 항목은 법원의 확정판결처럼 단정하지 말고, 고소인의 주장 형식으로 작성하세요.\n"
-        "7. 다음 10개 항목을 정확히 이 순서로, 각 항목을 소제목으로 구분해 작성하세요:\n"
-        "   문서 제목 / 고소인 / 피고소인 / 고소 취지 / 범죄 사실 / 고소 이유 / 증거자료 / 목격자 / 처벌 의사 / 작성일\n"
-        f"8. 작성일은 반드시 {today_str}로 표기하세요.\n\n"
-        f"[입력된 사건 정보]\n{fields_text}"
-    )
-
-
 def generate_case_draft(case):
     kst = datetime.timezone(datetime.timedelta(hours=9))
     today_str = datetime.datetime.now(kst).date().isoformat()
@@ -1143,56 +1147,6 @@ def generate_case_draft(case):
     )
 
     return f"{response.text}\n\n{DRAFT_DISCLAIMER}"
-
-
-def build_case_draft_docx(draft_text):
-    document = Document()
-
-    section = document.sections[0]
-    section.page_height = Mm(297)
-    section.page_width = Mm(210)
-    section.top_margin = Mm(20)
-    section.bottom_margin = Mm(20)
-    section.left_margin = Mm(20)
-    section.right_margin = Mm(20)
-
-    normal_style = document.styles["Normal"]
-    normal_style.font.size = Pt(11)
-    normal_style.paragraph_format.line_spacing = 1.5
-
-    title_paragraph = document.add_paragraph()
-    title_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    title_run = title_paragraph.add_run(DOCX_TITLE)
-    title_run.bold = True
-    title_run.font.size = Pt(20)
-
-    document.add_paragraph()
-
-    skip_next_line = False
-    for raw_line in draft_text.splitlines():
-        line = raw_line.strip()
-
-        if not line:
-            continue
-        if line == "문서 제목":
-            skip_next_line = True
-            continue
-        if skip_next_line:
-            skip_next_line = False
-            continue
-
-        if line in DOCX_SECTION_HEADERS:
-            heading_paragraph = document.add_paragraph()
-            heading_run = heading_paragraph.add_run(line)
-            heading_run.bold = True
-            heading_run.font.size = Pt(13)
-        else:
-            document.add_paragraph(line)
-
-    buffer = BytesIO()
-    document.save(buffer)
-    buffer.seek(0)
-    return buffer
 
 
 def get_google_calendar_schedule(question):
@@ -1482,7 +1436,7 @@ def handle_schedule_query(question, schedules):
 
 
 def build_system_instruction(memory, schedule_notice):
-    parts = [SERVICE_IDENTITY_INSTRUCTION]
+    parts = [SERVICE_IDENTITY_INSTRUCTION, SAFE_DRAFT_INSTRUCTION]
     if memory:
         lines = "\n".join(f"- {item}" for item in memory)
         parts.append(
@@ -1644,6 +1598,44 @@ BRAND_CSS = """
     [data-testid="stFormSubmitButton"] button,
     [data-testid="stDownloadButton"] button {
         min-height: 44px;
+    }
+
+    /* 휴대폰에서 버튼을 손가락으로 누르기 쉽게 가로 전체로 넓힌다. */
+    [data-testid="stButton"] button,
+    [data-testid="stFormSubmitButton"] button,
+    [data-testid="stDownloadButton"] button {
+        width: 100%;
+    }
+
+    /* iOS는 16px보다 작은 입력칸에 초점이 가면 화면을 확대하므로 글자 크기를 맞춘다. */
+    [data-testid="stTextInput"] input,
+    [data-testid="stTextArea"] textarea,
+    [data-testid="stChatInput"] textarea {
+        font-size: 16px !important;
+    }
+
+    /* 초안 편집칸은 긴 문서이므로 위의 120px 제한보다 크게 보여 준다. */
+    [class*="st-key-case_draft_editor"] textarea,
+    [class*="st-key-list_draft_editor_"] textarea {
+        height: 360px !important;
+        min-height: 360px !important;
+    }
+
+    /* 탭이 많아도 가로로 밀어서 볼 수 있게 한다. */
+    [data-baseweb="tab-list"] {
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+    [data-baseweb="tab"] {
+        flex-shrink: 0;
+        padding-left: 0.6rem;
+        padding-right: 0.6rem;
+    }
+
+    /* 휴대폰에서는 단계 카드를 숨겨 입력칸이 먼저 보이게 한다. 같은 단계는 탭 안의 안내 문구로 보여 준다. */
+    .dgo-card,
+    [data-testid="stHorizontalBlock"]:has(.dgo-card) {
+        display: none;
     }
 }
 
@@ -1839,96 +1831,114 @@ def render_terms_of_service_dialog():
         st.markdown(build_terms_of_service_text())
 
 
+def format_file_size(size: int) -> str:
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f}MB"
+    return f"{max(1, round(size / 1024))}KB"
+
+
 def render_case_evidence_manager(case_id: str) -> None:
-    with st.expander("증거자료 첨부·관리"):
+    with st.expander("증거파일 첨부·관리"):
         st.caption(
-            "사진·PDF·녹음파일을 최대 20개까지 첨부할 수 있습니다. "
-            "파일당 최대 10MB이며 본인만 열람할 수 있습니다."
+            "올릴 수 있는 파일: 사진(JPG·PNG·WEBP·HEIC), PDF, 녹음(MP3·M4A·WAV) · "
+            "파일 한 개 10MB까지 · 사건 하나에 20개까지 · 나만 볼 수 있게 비공개로 저장됩니다."
         )
         st.warning(
-            "주민등록번호, 계좌 비밀번호, 카드번호, 인증번호 등 불필요한 민감정보는 "
-            "가린 뒤 첨부해 주세요."
+            "주민등록번호, 계좌 비밀번호, 카드번호, 인증번호처럼 사건과 관계없는 민감한 정보는 "
+            "가린 뒤 올려 주세요."
         )
         uploads = st.file_uploader(
-            "증거자료 선택",
+            "올릴 파일 고르기",
             type=["jpg", "jpeg", "png", "webp", "heic", "heif", "pdf", "mp3", "m4a", "wav"],
             accept_multiple_files=True,
             key=f"evidence_upload_{case_id}",
+            help="여러 개를 한 번에 고를 수 있습니다. 10MB보다 큰 파일은 크기를 줄이거나 나누어 올려 주세요.",
         )
         consent = st.checkbox(
-            "[필수] 선택한 파일의 비공개 저장과 사건 관리 목적 이용에 동의합니다.",
+            "[필수] 고른 파일을 비공개로 저장하고 사건 관리에 쓰는 데 동의합니다.",
             key=f"evidence_consent_{case_id}",
         )
-        if st.button("선택한 파일 첨부", key=f"evidence_upload_btn_{case_id}"):
+        if st.button("고른 파일 올리기", key=f"evidence_upload_btn_{case_id}"):
             if not uploads:
-                st.warning("첨부할 파일을 선택해 주세요.")
+                st.warning("먼저 위에서 올릴 파일을 골라 주세요.")
             elif not consent:
-                st.warning("파일을 첨부하려면 저장·이용에 동의해 주세요.")
+                st.warning("파일을 올리려면 저장·이용 동의에 체크해 주세요.")
             else:
                 uploaded_count = 0
                 errors = []
-                for uploaded_file in uploads:
-                    try:
-                        upload_case_evidence(case_id, uploaded_file)
-                        uploaded_count += 1
-                    except ValueError as exc:
-                        errors.append(f"{uploaded_file.name}: {exc}")
-                    except Exception as exc:
-                        log_evidence_upload_error("upload", exc)
-                        errors.append(f"{uploaded_file.name}: {map_evidence_upload_error(exc)}")
+                with st.spinner("파일을 올리고 있습니다. 창을 닫지 말고 기다려 주세요."):
+                    for uploaded_file in uploads:
+                        try:
+                            upload_case_evidence(case_id, uploaded_file)
+                            uploaded_count += 1
+                        except ValueError as exc:
+                            errors.append(f"{uploaded_file.name}: {exc}")
+                        except Exception as exc:
+                            log_evidence_upload_error("upload", exc)
+                            errors.append(f"{uploaded_file.name}: {map_evidence_upload_error(exc)}")
                 if uploaded_count:
-                    st.success(f"증거자료 {uploaded_count}개를 첨부했습니다.")
+                    st.session_state[f"evidence_notice_{case_id}"] = f"파일 {uploaded_count}개를 올렸습니다."
                 for error in errors:
                     st.error(error)
-                if uploaded_count:
+                if errors and uploaded_count:
+                    st.info(f"나머지 파일 {uploaded_count}개는 정상적으로 올라갔습니다. 위 파일만 다시 확인해 주세요.")
+                if uploaded_count and not errors:
                     st.rerun()
+
+        notice = st.session_state.pop(f"evidence_notice_{case_id}", None)
+        if notice:
+            st.success(notice)
 
         try:
             files = list_case_evidence(case_id)
         except Exception as exc:
             log_evidence_upload_error("list", exc)
-            st.error("증거자료 목록을 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+            st.error("첨부한 파일 목록을 불러오지 못했습니다. 새로고침한 뒤 다시 열어 주세요.")
             return
 
         if not files:
-            st.caption("첨부된 증거자료가 없습니다.")
+            st.caption("아직 첨부한 파일이 없습니다. 위에서 파일을 골라 올려 보세요.")
             return
 
+        st.caption(f"첨부한 파일 {len(files)}개 / 최대 {EVIDENCE_MAX_FILES_PER_CASE}개")
         selected = st.selectbox(
-            "첨부된 파일",
+            "첨부한 파일",
             files,
-            format_func=lambda item: item["display_name"],
+            format_func=lambda item: f"{item['display_name']} ({format_file_size(item['size'])})",
             key=f"evidence_select_{case_id}",
         )
         download_key = f"evidence_download_{case_id}"
         col_prepare, col_remove = st.columns(2)
         with col_prepare:
-            if st.button("다운로드 준비", key=f"evidence_prepare_{case_id}"):
+            if st.button("내려받기 준비", key=f"evidence_prepare_{case_id}"):
                 try:
-                    st.session_state[download_key] = {
-                        "path": selected["path"],
-                        "name": selected["display_name"],
-                        "data": download_case_evidence(selected["path"]),
-                    }
+                    with st.spinner("파일을 불러오고 있습니다."):
+                        st.session_state[download_key] = {
+                            "path": selected["path"],
+                            "name": selected["display_name"],
+                            "data": download_case_evidence(selected["path"]),
+                        }
                 except Exception as exc:
                     log_evidence_upload_error("download", exc)
-                    st.error("파일을 불러오지 못했습니다.")
+                    st.error("파일을 불러오지 못했습니다. 새로고침한 뒤 다시 시도해 주세요.")
         with col_remove:
-            if st.button("선택 파일 삭제", key=f"evidence_delete_{case_id}"):
+            confirm_remove = st.checkbox("이 파일 삭제 확인", key=f"evidence_delete_confirm_{case_id}")
+            if st.button("고른 파일 삭제", key=f"evidence_delete_{case_id}", disabled=not confirm_remove):
                 try:
                     delete_case_evidence_file(selected["path"])
                 except Exception as exc:
                     log_evidence_upload_error("delete", exc)
-                    st.error("파일 삭제에 실패했습니다.")
+                    st.error("파일을 삭제하지 못했습니다. 새로고침한 뒤 다시 시도해 주세요.")
                 else:
                     st.session_state.pop(download_key, None)
-                    st.success("증거자료를 삭제했습니다.")
+                    st.session_state.pop(f"evidence_delete_confirm_{case_id}", None)
+                    st.session_state[f"evidence_notice_{case_id}"] = "파일을 삭제했습니다."
                     st.rerun()
 
         prepared = st.session_state.get(download_key)
         if prepared and prepared.get("path") == selected["path"]:
             st.download_button(
-                "파일 다운로드",
+                "파일 내려받기",
                 data=prepared["data"],
                 file_name=prepared["name"],
                 key=f"evidence_download_btn_{case_id}",
@@ -1945,12 +1955,158 @@ def render_brand_header():
     )
 
 
+def contact_hint() -> str:
+    """운영자가 설정한 문의 이메일이 있을 때만 안내 문구를 만든다. 연락처를 임의로 만들지 않는다."""
+    if PRIVACY_CONTACT_EMAIL:
+        return f" 문제가 계속되면 {PRIVACY_CONTACT_EMAIL} 로 알려 주세요."
+    return ""
+
+
 def render_footer():
+    contact = ""
+    if PRIVACY_CONTACT_EMAIL:
+        email = html.escape(PRIVACY_CONTACT_EMAIL, quote=True)
+        contact = f'<br>문의: <a href="mailto:{email}">{email}</a>'
     st.markdown(
         '<div class="dgo-footer">'
         '고소음이는 법률정보와 문서 작성을 돕는 서비스이며, 변호사의 법률자문을 대체하지 않습니다.'
+        '<br>지금 위험하거나 급한 상황이라면 112에 먼저 신고하세요.'
+        f'{contact}'
         '</div>',
         unsafe_allow_html=True,
+    )
+
+
+def md_escape(text) -> str:
+    # 사용자가 적은 *, _, # 등이 마크다운 서식으로 바뀌지 않게 하고 줄바꿈은 유지한다.
+    escaped = re.sub(r"([\\`*_{}\[\]()#+\-.!|~<>])", r"\\\1", str(text or ""))
+    return escaped.replace("\n", "  \n")
+
+
+def format_created_at(value) -> str:
+    try:
+        created = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return "날짜 확인 필요"
+    if created.tzinfo:
+        created = created.astimezone(KST)
+    return created.strftime("%Y-%m-%d %H:%M")
+
+
+def render_damage_type_guide(case_type: str, show_qa: bool) -> None:
+    guide = damage_type_guide(case_type)
+    route = ROUTES.get(guide.get("route"))
+    if guide.get("urgent"):
+        st.error("🚨 " + guide["urgent"])
+    if route:
+        message = f"**{route['label']}**  \n{route['note']}"
+        if guide.get("route_detail"):
+            message += f"  \n{guide['route_detail']}"
+        if guide["route"] == "criminal":
+            st.info(message)
+        else:
+            st.warning(message)
+    if guide.get("summary"):
+        st.caption(f"이런 경우: {guide['summary']}")
+
+    with st.expander("이 유형에서 함께 적으면 좋은 내용 · 준비할 자료", expanded=show_qa):
+        st.markdown("**사건 경위에 함께 적어 주세요**\n" + "\n".join(f"- {item}" for item in guide["checklist"]))
+        st.markdown("**모아 두면 좋은 자료**\n" + "\n".join(f"- {item}" for item in guide["evidence_tips"]))
+        st.caption("자료는 원본을 지우지 말고 보관하세요. 자료를 얻으려고 위험한 행동을 하지는 마세요.")
+
+    if guide.get("qa"):
+        if show_qa:
+            st.markdown("**자주 묻는 질문**")
+            for question, answer in guide["qa"]:
+                with st.expander(question):
+                    st.markdown(answer)
+        else:
+            with st.expander(f"이 유형의 자주 묻는 질문 ({len(guide['qa'])}개)"):
+                for question, answer in guide["qa"]:
+                    st.markdown(f"**Q. {question}**\n\n{answer}")
+
+    if guide.get("sources"):
+        links = " · ".join(f"[{label}]({url})" for label, url in guide["sources"])
+        st.markdown(f"공식 안내: {links}")
+
+
+def show_new_draft(case_entry: dict, draft_text: str) -> None:
+    st.session_state.case_draft = draft_text
+    st.session_state.case_draft_id = case_entry["case_id"]
+    st.session_state.case_draft_case = case_entry
+    st.session_state.pop("case_draft_editor", None)
+
+
+def reset_case_form() -> None:
+    for key in list(st.session_state.keys()):
+        if key.startswith(("case_field_", "case_type_", "case_draft_editor", "case_data_consent")):
+            del st.session_state[key]
+    st.session_state.case_draft = None
+    st.session_state.case_draft_id = None
+    st.session_state.case_draft_case = None
+    st.session_state.case_review = None
+    st.session_state.case_notice = None
+
+
+def restore_original_draft(editor_key: str, original: str) -> None:
+    st.session_state[editor_key] = original
+
+
+def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str) -> None:
+    st.markdown("#### 고소장 초안")
+    st.caption(
+        "AI가 입력하신 내용만으로 만든 참고용 초안입니다. 꼭 직접 읽고 고쳐 주세요. "
+        "고친 내용은 칸 바깥을 한 번 누르거나 Ctrl+Enter(맥은 ⌘+Enter)를 누르면 내려받기 파일에 반영됩니다."
+    )
+    if editor_key not in st.session_state:
+        st.session_state[editor_key] = original
+
+    missing = missing_info_items(case)
+    if missing:
+        st.warning(
+            "제출 전에 확인할 항목입니다. 초안의 '[확인 필요]' 부분을 채우거나 지워 주세요.\n\n"
+            + "\n".join(f"- {item}" for item in missing)
+        )
+
+    edited = st.text_area("초안 내용 (직접 고칠 수 있어요)", key=editor_key, height=420)
+
+    unsupported = find_unsupported_details(edited, case, datetime.datetime.now(KST).date().isoformat())
+    if unsupported:
+        st.warning(
+            "입력하신 내용에 없던 정보가 초안에 들어갔을 수 있습니다. 아래 부분을 꼭 확인해 주세요.\n\n"
+            + "\n".join(f"- {item}" for item in unsupported)
+        )
+    if edited != original:
+        st.caption("✏️ 직접 고친 내용이 TXT·Word 내려받기에 그대로 반영됩니다.")
+
+    file_stem = f"case_draft_{case_id}"
+    col_txt_download, col_docx_download = st.columns(2)
+    with col_txt_download:
+        st.download_button(
+            "TXT로 내려받기",
+            data=edited,
+            file_name=f"{file_stem}.txt",
+            mime="text/plain",
+            key=f"{editor_key}_txt",
+        )
+    with col_docx_download:
+        st.download_button(
+            "Word로 내려받기",
+            data=build_case_draft_docx(edited),
+            file_name=f"{file_stem}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            key=f"{editor_key}_docx",
+        )
+    if edited != original:
+        st.button(
+            "처음 만든 초안으로 되돌리기",
+            key=f"{editor_key}_restore",
+            on_click=restore_original_draft,
+            args=(editor_key, original),
+        )
+    st.caption(
+        "초안은 서버에 저장되지 않습니다. 필요하면 내려받아 보관하세요. "
+        "저장한 사건 내용으로 '내 사건' 탭에서 언제든 다시 만들 수 있습니다."
     )
 
 
@@ -2045,7 +2201,7 @@ def render_google_age_gate():
                 confirmed = False
             if confirmed:
                 st.rerun()
-            st.error("확인 저장 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+            st.error("확인 내용을 저장하지 못했습니다. 잠시 후 다시 눌러 주세요." + contact_hint())
 
     if st.button("로그아웃", key="google_age_logout_btn"):
         perform_logout()
@@ -2053,7 +2209,7 @@ def render_google_age_gate():
 
 def render_naver_age_gate(status_error: bool):
     if status_error:
-        st.error("계정 확인 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+        st.error("계정 정보를 확인하지 못했습니다. 새로고침해 보시고, 계속되면 로그아웃 후 다시 로그인해 주세요.")
     else:
         st.markdown(
             "**만 14세 이상 확인**\n\n"
@@ -2071,7 +2227,7 @@ def render_naver_age_gate(status_error: bool):
                     confirmed = False
                 if confirmed:
                     st.rerun()
-                st.error("확인 저장 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+                st.error("확인 내용을 저장하지 못했습니다. 잠시 후 다시 눌러 주세요." + contact_hint())
 
     if st.button("로그아웃", key="naver_age_logout_btn"):
         perform_logout()
@@ -2091,7 +2247,7 @@ def render_pending_email_screen(email, resend_key, on_resend, message):
         if st.button("메일 다시 보내기", key=f"{resend_key}_btn"):
             base_url = get_app_base_url()
             if not base_url:
-                st.error("앱 주소 설정이 필요합니다. 관리자에게 문의해 주세요.")
+                st.error("서비스 주소 설정이 아직 끝나지 않아 메일을 보낼 수 없습니다. 잠시 후 다시 시도해 주세요." + contact_hint())
             else:
                 try:
                     on_resend(email, base_url)
@@ -2145,7 +2301,7 @@ def render_forgot_password_form():
     if forgot_submitted:
         base_url = get_app_base_url()
         if not base_url:
-            st.error("앱 주소 설정이 필요합니다. 관리자에게 문의해 주세요.")
+            st.error("서비스 주소 설정이 아직 끝나지 않아 메일을 보낼 수 없습니다. 잠시 후 다시 시도해 주세요." + contact_hint())
         else:
             try:
                 auth_client = get_supabase_anon_client()
@@ -2258,12 +2414,15 @@ if not st.session_state.supabase_session:
         login_tab, signup_tab = st.tabs(["로그인", "회원가입"])
 
         with login_tab:
+            st.caption("가입할 때 쓴 방법(이메일·네이버·Google)으로 로그인해 주세요. 로그인하면 이 브라우저에서 최대 7일 동안 로그인이 유지됩니다.")
             with st.form("login_form"):
                 login_email = st.text_input("이메일", key="login_email")
                 login_password = st.text_input("비밀번호", type="password", key="login_password")
                 login_submitted = st.form_submit_button("로그인")
 
-            if login_submitted:
+            if login_submitted and not (login_email.strip() and login_password):
+                st.error("이메일과 비밀번호를 모두 입력해 주세요.")
+            elif login_submitted:
                 try:
                     auth_client = get_supabase_anon_client()
                     auth_response = auth_client.auth.sign_in_with_password(
@@ -2325,7 +2484,7 @@ if not st.session_state.supabase_session:
                 else:
                     base_url = get_app_base_url()
                     if not base_url:
-                        st.error("앱 주소 설정이 필요합니다. 관리자에게 문의해 주세요.")
+                        st.error("서비스 주소 설정이 아직 끝나지 않아 메일을 보낼 수 없습니다. 잠시 후 다시 시도해 주세요." + contact_hint())
                     else:
                         try:
                             auth_client = get_supabase_anon_client()
@@ -2384,6 +2543,11 @@ elif is_google_primary_session(st.session_state.supabase_session):
 
 if not has_current_consent(current_user_id):
     render_brand_header()
+    consent_identity, consent_method = current_account_label(st.session_state.supabase_session)
+    st.info(
+        f"{consent_identity} ({consent_method} 로그인) 계정으로 이용하시려면 아래 약관과 개인정보처리방침을 "
+        "읽고 동의해 주세요. 처음 이용하시거나 내용이 바뀐 경우에 한 번 표시됩니다."
+    )
     st.markdown(build_terms_of_service_text())
     st.markdown(build_privacy_policy_text())
     reconsent_terms = st.checkbox("[필수] 이용약관에 동의합니다.", key="reconsent_terms")
@@ -2408,17 +2572,21 @@ if not has_current_consent(current_user_id):
                 error_status = getattr(error, "status", None)
                 print(f"[consent_error] code={error_code} status={error_status}")
                 st.error(
-                    "동의 저장 중 문제가 발생했습니다. "
-                    f"관리자 확인용 오류 코드: {error_code}"
+                    "동의 내용을 저장하지 못했습니다. 잠시 후 다시 눌러 주세요. "
+                    f"계속되면 운영자에게 이 오류 코드를 알려 주세요: {error_code}" + contact_hint()
                 )
         else:
-            st.error("이용약관과 개인정보 수집·이용에 모두 동의해 주세요.")
+            st.error("계속하려면 이용약관과 개인정보 수집·이용 두 곳에 모두 체크해 주세요.")
+    if st.button("동의하지 않고 로그아웃", key="reconsent_logout_btn"):
+        perform_logout()
     render_footer()
     st.stop()
 
 with st.sidebar:
-    st.markdown("**고소음이 데모**")
-    st.caption(st.session_state.supabase_session.get("email") or "")
+    st.markdown("**고소음이**")
+    sidebar_identity, sidebar_method = current_account_label(st.session_state.supabase_session)
+    st.caption(f"{sidebar_method} 로그인")
+    st.markdown(sidebar_identity)
     if st.button("로그아웃", key="logout_btn_sidebar"):
         perform_logout()
 
@@ -2433,9 +2601,18 @@ with st.sidebar:
 
 render_brand_header()
 
+account_identity, account_method = current_account_label(st.session_state.supabase_session)
+st.caption(f"로그인한 계정: {account_identity} ({account_method})")
+
 with st.expander("계정 및 개인정보 메뉴"):
-    account_identity, account_method = current_account_label(st.session_state.supabase_session)
     st.markdown(f"**현재 로그인 계정:** {account_identity} ({account_method} 로그인)")
+    st.caption(
+        "다른 계정으로 바꾸려면 로그아웃한 뒤 다시 로그인해 주세요. 네이버는 고소음이에서 로그아웃해도 "
+        "네이버 로그인이 유지되므로, 로그인 화면의 '다른 네이버 계정으로 로그인'을 눌러 주세요. "
+        "공용 기기라면 사용 후 꼭 로그아웃해 주세요."
+    )
+    if PRIVACY_CONTACT_EMAIL:
+        st.markdown(f"**문의:** {md_escape(PRIVACY_CONTACT_EMAIL)} (서비스 이용·개인정보 관련)")
 
     if st.button("개인정보처리방침 보기", key="privacy_policy_view_btn_main"):
         render_privacy_policy_dialog()
@@ -2451,253 +2628,363 @@ with st.expander("계정 및 개인정보 메뉴"):
 
 card_col1, card_col2, card_col3 = st.columns(3)
 with card_col1:
-    st.markdown('<div class="dgo-card">📝<b>피해 내용 정리</b></div>', unsafe_allow_html=True)
+    st.markdown('<div class="dgo-card">📝<b>① 피해 내용 적기</b></div>', unsafe_allow_html=True)
 with card_col2:
-    st.markdown('<div class="dgo-card">📄<b>고소장 초안 생성</b></div>', unsafe_allow_html=True)
+    st.markdown('<div class="dgo-card">📄<b>② 초안 확인·수정</b></div>', unsafe_allow_html=True)
 with card_col3:
-    st.markdown('<div class="dgo-card">🗂️<b>사건 저장 및 관리</b></div>', unsafe_allow_html=True)
+    st.markdown('<div class="dgo-card">🗂️<b>③ 저장·내려받기</b></div>', unsafe_allow_html=True)
 
-tab_chat, tab_case, tab_case_list, tab_terms, tab_qa = st.tabs(["AI 상담", "고소장 작성", "내 사건", "법률 용어", "피해 유형별 Q&A"])
-
-with tab_chat:
-    st.caption("피해 상황을 편하게 이야기하면 핵심 사실을 정리할 수 있도록 도와드려요.")
-
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    if prompt := st.chat_input("무엇을 도와드릴까요?", max_chars=3000):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        try:
-            answer = process_question(prompt, st.session_state.model_history)
-        except Exception:
-            answer = "답변 생성 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요."
-
-        st.session_state.messages.append({"role": "assistant", "content": answer})
-        with st.chat_message("assistant"):
-            st.markdown(answer)
+tab_case, tab_case_list, tab_qa, tab_terms, tab_chat = st.tabs(
+    ["고소장 작성", "내 사건", "피해 유형별 안내", "법률 용어", "AI 상담"]
+)
 
 with tab_case:
-    st.caption("사건 정보를 입력하면 고소장 초안을 자동으로 생성합니다.")
-    st.markdown(
-        "**사건 저장 시 수집하는 개인정보**\n"
-        "- 저장 항목: 사건 유형, 신고인 정보, 상대방 정보, 사건 발생 일시, 사건 발생 장소, "
-        "사건 경위, 피해 내용, 증거자료, 목격자 유무, 처벌 의사 (총 10개 항목)\n"
-        "- 목적: 사건 저장·관리, AI 상담 및 고소장 초안 생성\n"
-        "- 보관기간: 이용자가 직접 삭제하거나 회원탈퇴할 때까지\n"
-        "- 동의를 거부할 수 있으나, 거부 시 사건 저장과 고소장 초안 생성이 제한됩니다."
-    )
-    st.warning(
-        "입력하신 사건 정보(신고인·상대방 정보 등 개인정보 포함 가능)는 Supabase 데이터베이스에 저장되고, "
-        "고소장 초안 생성 시 Google Gemini API로 전송되어 처리됩니다."
-    )
-    st.info(
-        "상대방 등 제3자의 정보는 이용자가 적법하게 제공할 수 있는 범위에서 필요한 최소한만 입력해 주세요. "
-        "주민등록번호, 계좌 비밀번호, 카드번호, 인증번호(OTP), 불필요한 주소·연락처는 입력하지 마세요."
-    )
+    st.caption("① 피해 유형 고르기 → ② 아는 내용 적기 → ③ 입력 내용 확인 → ④ 초안 확인·수정 → ⑤ 내려받기")
+    with st.container(border=True):
+        st.markdown(
+            "**사건 저장 시 수집하는 개인정보**\n"
+            "- 저장 항목: 사건 유형, 신고인 정보, 상대방 정보, 사건 발생 일시, 사건 발생 장소, "
+            "사건 경위, 피해 내용, 증거자료, 목격자 유무, 처벌 의사 (총 10개 항목)\n"
+            "- 목적: 사건 저장·관리, AI 상담 및 고소장 초안 생성\n"
+            "- 보관기간: 이용자가 직접 삭제하거나 회원탈퇴할 때까지\n"
+            "- 동의를 거부할 수 있으나, 거부 시 사건 저장과 고소장 초안 생성이 제한됩니다."
+        )
+        st.caption(
+            "입력하신 사건 정보(신고인·상대방 정보 등 개인정보 포함 가능)는 Supabase 데이터베이스에 저장되고, "
+            "고소장 초안을 만들 때 Google Gemini API로 전송되어 처리됩니다. "
+            "상대방 등 제3자의 정보는 필요한 최소한만 적어 주시고, 주민등록번호·계좌 비밀번호·카드번호·"
+            "인증번호(OTP)는 적지 마세요."
+        )
+
+    case_notice = st.session_state.get("case_notice")
+    if case_notice:
+        st.success(case_notice)
 
     if st.session_state.pending_draft_entry:
         st.warning(
-            "사건은 저장되었습니다. 다만 고소장 초안 생성에 실패했습니다. "
-            "새 사건을 제출하기 전에 초안을 다시 생성하거나 이 사건을 보류해 주세요."
+            "사건은 저장했지만 고소장 초안을 만들지 못했습니다. 잠시 후 '초안 다시 만들기'를 눌러 주세요. "
+            "계속 안 되면 '내 사건' 탭에서 같은 사건으로 초안을 다시 만들 수도 있습니다."
         )
         col_retry, col_cancel = st.columns(2)
         with col_retry:
-            if st.button("초안만 다시 생성", key="retry_draft_button"):
+            if st.button("초안 다시 만들기", key="retry_draft_button", type="primary"):
                 entry = st.session_state.pending_draft_entry
                 try:
-                    st.session_state.case_draft = generate_case_draft(entry)
-                    st.session_state.case_draft_id = entry["case_id"]
+                    with st.spinner("고소장 초안을 만들고 있습니다. 보통 10~30초 걸립니다."):
+                        draft_text = generate_case_draft(entry)
+                except Exception:
+                    st.error("초안을 또 만들지 못했습니다. 1~2분 뒤에 다시 시도해 주세요." + contact_hint())
+                else:
+                    show_new_draft(entry, draft_text)
                     st.session_state.pending_draft_entry = None
                     st.rerun()
-                except Exception:
-                    st.error("고소장 초안 생성에 다시 실패했습니다. 잠시 후 다시 시도해 주세요.")
         with col_cancel:
-            if st.button("이 사건 보류하고 새로 시작", key="cancel_pending_draft_button"):
+            if st.button("나중에 하고 새 사건 쓰기", key="cancel_pending_draft_button"):
                 st.session_state.pending_draft_entry = None
                 st.rerun()
     else:
+        type_options = list(DAMAGE_TYPES) + [OTHER_TYPE]
+        case_type_choice = st.selectbox(
+            "① 어떤 피해를 입으셨나요?",
+            type_options,
+            index=None,
+            placeholder="피해 유형을 골라 주세요",
+            key="case_type_choice",
+            help="고르시면 그 유형에 맞는 작성 예시와 준비할 자료를 보여 드립니다. 맞는 유형이 없으면 '기타'를 골라 주세요.",
+        )
+        case_type_custom = ""
+        if case_type_choice == OTHER_TYPE:
+            case_type_custom = st.text_input(
+                "피해 유형 직접 적기",
+                max_chars=CASE_FIELD_MAX_CHARS["case_type"],
+                placeholder="예: 렌터카 보증금 미반환",
+                key="case_type_custom",
+            )
+        if case_type_choice:
+            render_damage_type_guide(case_type_choice, show_qa=False)
+        else:
+            st.info("먼저 피해 유형을 골라 주세요. 유형에 맞는 작성 예시가 아래 입력칸에 나타납니다.")
+
+        guide_type = case_type_choice or ""
         with st.form("case_form"):
+            st.markdown("**② 아는 내용을 적어 주세요** (* 표시는 꼭 적어야 하는 칸, 나머지는 모르면 비워 두셔도 됩니다)")
             field_values = {}
-            for label, key in CASE_FIELDS:
-                if key in CASE_LONG_TEXT_FIELDS:
-                    field_values[key] = st.text_area(label, max_chars=CASE_FIELD_MAX_CHARS[key])
-                else:
-                    field_values[key] = st.text_input(label, max_chars=CASE_FIELD_MAX_CHARS[key])
+            for _, key in CASE_FIELDS:
+                if key == "case_type":
+                    continue
+                label = field_label(key) + (" *" if key in ("reporter_info", "incident_description") else "")
+                widget = st.text_area if key in CASE_LONG_TEXT_FIELDS else st.text_input
+                field_values[key] = widget(
+                    label,
+                    max_chars=CASE_FIELD_MAX_CHARS[key],
+                    placeholder=field_placeholder(key, guide_type),
+                    help=FIELD_GUIDES[key]["help"],
+                    key=f"case_field_{key}",
+                )
+                if key == "suspect_info":
+                    with st.expander("상대방 이름이나 주소를 모르면?"):
+                        st.markdown(SUSPECT_UNKNOWN_GUIDE)
 
             case_data_consent = st.checkbox(
                 "[필수] 위 안내를 확인했으며 사건 정보 저장·전송에 동의합니다.",
                 key="case_data_consent",
             )
-            submitted = st.form_submit_button("사건 저장 및 고소장 초안 생성")
+            submitted = st.form_submit_button("③ 입력 내용 확인하기", type="primary")
 
         if submitted:
+            field_values["case_type"] = (
+                case_type_custom.strip() if case_type_choice == OTHER_TYPE else (case_type_choice or "")
+            )
+            errors = []
+            if not case_type_choice:
+                errors.append("맨 위에서 피해 유형을 골라 주세요.")
+            elif case_type_choice == OTHER_TYPE and not field_values["case_type"]:
+                errors.append("'피해 유형 직접 적기' 칸에 피해 유형을 적어 주세요.")
+            # 피해 유형 누락은 위에서 더 구체적으로 안내했으므로 나머지 항목만 검사한다.
+            errors += validate_case_values({**field_values, "case_type": field_values["case_type"] or "-"})
             if not privacy_config_ready():
-                st.error("현재 서비스 운영 정보 설정이 진행 중이라 잠시 사건을 저장할 수 없습니다. 잠시 후 다시 시도해 주세요.")
+                st.error("지금은 서비스 운영 정보를 설정하는 중이라 사건을 저장할 수 없습니다. 잠시 후 다시 시도해 주세요." + contact_hint())
             elif not case_data_consent:
-                st.error("사건을 저장하려면 데이터 저장·전송 안내에 동의해 주세요.")
+                st.error("사건을 저장하려면 입력칸 아래의 저장·전송 동의에 체크해 주세요.")
+            elif errors:
+                for message in dict.fromkeys(errors):
+                    st.error(message)
             else:
-                missing_labels = [
-                    label for label, key in CASE_FIELDS
-                    if not field_values[key].strip()
-                ]
-                over_limit_errors = [
-                    f"{label}은 최대 {CASE_FIELD_MAX_CHARS[key]}자까지 입력할 수 있습니다."
-                    for label, key in CASE_FIELDS
-                    if len(field_values[key]) > CASE_FIELD_MAX_CHARS[key]
-                ]
+                st.session_state.case_review = {
+                    "case_id": str(uuid.uuid4()),
+                    "values": normalize_case_values(field_values),
+                }
+                st.session_state.case_notice = None
 
-                if missing_labels:
-                    st.error("다음 항목을 입력해 주세요: " + ", ".join(missing_labels))
-                elif over_limit_errors:
-                    for message in over_limit_errors:
-                        st.error(message)
-                else:
-                    user_id = st.session_state.supabase_session["user_id"]
-                    fingerprint = compute_case_fingerprint(user_id, field_values)
-
-                    is_duplicate = (
-                        st.session_state.last_saved_fingerprint == fingerprint
-                        and st.session_state.last_saved_at is not None
-                        and (time.time() - st.session_state.last_saved_at) < DUPLICATE_SUBMIT_WINDOW_SECONDS
+        review = st.session_state.get("case_review")
+        if review:
+            with st.container(border=True):
+                st.markdown("**③ 입력 내용 확인**")
+                st.caption(
+                    "아래 내용으로 사건을 저장하고 초안을 만듭니다. 고칠 부분이 있으면 위 입력칸을 고친 뒤 "
+                    "'입력 내용 확인하기'를 다시 눌러 주세요."
+                )
+                for label, key in CASE_FIELDS:
+                    value = review["values"][key]
+                    shown = "_확인 필요 (입력하지 않음)_" if is_missing(value) else md_escape(value)
+                    st.markdown(f"**{label}**  \n{shown}")
+                review_missing = missing_info_items(review["values"])
+                if review_missing:
+                    st.warning(
+                        "아래 항목은 초안에 '[확인 필요]'로 표시됩니다. 지금 채우거나, 초안을 받은 뒤 직접 고쳐도 됩니다.\n\n"
+                        + "\n".join(f"- {item}" for item in review_missing)
                     )
+                col_confirm, col_back = st.columns(2)
+                with col_confirm:
+                    confirm_clicked = st.button("④ 이대로 저장하고 초안 만들기", key="case_review_confirm", type="primary")
+                with col_back:
+                    if st.button("취소하고 다시 고치기", key="case_review_cancel"):
+                        st.session_state.case_review = None
+                        st.rerun()
 
-                    case_entry = None
-                    if is_duplicate:
-                        case_entry = st.session_state.last_saved_case_entry
-                        st.info("방금 제출한 동일한 사건이 이미 저장되어 있어 다시 저장하지 않았습니다.")
-                    else:
-                        kst = datetime.timezone(datetime.timedelta(hours=9))
-                        new_entry = {
-                            "case_id": str(uuid.uuid4()),
-                            "user_id": user_id,
-                            "original_request": "Streamlit 고소장 작성 폼에서 제출됨",
-                            **{key: field_values[key].strip() for _, key in CASE_FIELDS},
-                            "created_at": datetime.datetime.now(kst).isoformat(),
-                        }
+            if confirm_clicked:
+                user_id = st.session_state.supabase_session["user_id"]
+                values = review["values"]
+                fingerprint = compute_case_fingerprint(user_id, values)
+                last_entry = st.session_state.last_saved_case_entry
+                is_duplicate = (
+                    st.session_state.last_saved_fingerprint == fingerprint
+                    and st.session_state.last_saved_at is not None
+                    and (time.time() - st.session_state.last_saved_at) < DUPLICATE_SUBMIT_WINDOW_SECONDS
+                ) or bool(last_entry and last_entry.get("case_id") == review["case_id"])
 
-                        try:
+                case_entry = None
+                if is_duplicate and last_entry:
+                    case_entry = last_entry
+                    st.session_state.case_notice = "방금 저장한 사건과 같은 내용이라 다시 저장하지 않았습니다. 아래 초안을 확인해 주세요."
+                else:
+                    kst = datetime.timezone(datetime.timedelta(hours=9))
+                    new_entry = {
+                        "case_id": review["case_id"],
+                        "user_id": user_id,
+                        "original_request": "Streamlit 고소장 작성 폼에서 제출됨",
+                        **values,
+                        "created_at": datetime.datetime.now(kst).isoformat(),
+                    }
+                    try:
+                        with st.spinner("사건을 저장하고 있습니다."):
                             save_case(new_entry)
-                        except Exception:
-                            st.error("사건 저장 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
-                        else:
-                            st.session_state.last_saved_case_entry = new_entry
-                            st.session_state.last_saved_fingerprint = fingerprint
-                            st.session_state.last_saved_at = time.time()
-                            st.session_state.case_draft = None
-                            st.session_state.case_draft_id = None
-                            case_entry = new_entry
-
-                    if case_entry is not None:
-                        already_drafted = (
-                            st.session_state.case_draft_id == case_entry["case_id"]
-                            and st.session_state.case_draft
+                    except Exception:
+                        st.error(
+                            "사건을 저장하지 못했습니다. 입력한 내용은 그대로 남아 있으니, 인터넷 연결을 확인하고 "
+                            "'이대로 저장하고 초안 만들기'를 다시 눌러 주세요. 다시 눌러도 같은 사건이 두 번 저장되지는 않습니다."
+                            + contact_hint()
                         )
-                        if not already_drafted:
-                            try:
-                                st.session_state.case_draft = generate_case_draft(case_entry)
-                                st.session_state.case_draft_id = case_entry["case_id"]
-                            except Exception:
-                                st.session_state.pending_draft_entry = case_entry
-                                st.rerun()
+                    else:
+                        st.session_state.last_saved_case_entry = new_entry
+                        st.session_state.last_saved_fingerprint = fingerprint
+                        st.session_state.last_saved_at = time.time()
+                        case_entry = new_entry
 
-    if st.session_state.case_draft:
-        st.subheader("생성된 고소장 초안")
-        st.text_area("초안 내용", st.session_state.case_draft, height=400)
+                if case_entry is not None:
+                    st.session_state.case_review = None
+                    already_drafted = (
+                        st.session_state.case_draft_id == case_entry["case_id"] and st.session_state.case_draft
+                    )
+                    if not already_drafted:
+                        try:
+                            with st.spinner("사건을 저장했습니다. 고소장 초안을 만들고 있습니다. 보통 10~30초 걸립니다."):
+                                draft_text = generate_case_draft(case_entry)
+                        except Exception:
+                            st.session_state.pending_draft_entry = case_entry
+                        else:
+                            show_new_draft(case_entry, draft_text)
+                            st.session_state.case_notice = "사건을 저장했습니다. 아래 초안을 읽고 필요한 부분을 고쳐 주세요. '내 사건' 탭에서 다시 볼 수 있습니다."
+                    st.rerun()
 
-        col_txt_download, col_docx_download = st.columns(2)
-
-        with col_txt_download:
-            st.download_button(
-                "TXT 다운로드",
-                data=st.session_state.case_draft,
-                file_name=f"case_draft_{st.session_state.case_draft_id}.txt",
-                mime="text/plain",
-            )
-
-        with col_docx_download:
-            docx_buffer = build_case_draft_docx(st.session_state.case_draft)
-            st.download_button(
-                "Word 다운로드",
-                data=docx_buffer,
-                file_name=f"case_draft_{st.session_state.case_draft_id}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )
+    if st.session_state.case_draft and not st.session_state.pending_draft_entry:
+        render_draft_panel(
+            "case_draft_editor",
+            st.session_state.case_draft,
+            st.session_state.get("case_draft_case") or {},
+            st.session_state.case_draft_id,
+        )
+        st.button("새 사건 작성하기", key="case_new_button", on_click=reset_case_form)
 
 with tab_case_list:
-    st.caption("저장된 사건을 조회하고 삭제할 수 있습니다.")
-    st.caption("회원탈퇴는 화면 위쪽 ‘계정 및 개인정보 메뉴’에서 진행할 수 있습니다.")
+    st.caption("저장한 사건을 다시 보고, 초안을 다시 만들거나 증거파일을 첨부·삭제할 수 있습니다.")
+
+    list_notice = st.session_state.pop("case_list_notice", None)
+    if list_notice:
+        st.success(list_notice)
 
     cases, load_error = load_cases_safe()
 
     if load_error:
-        st.error(load_error)
+        st.error(load_error + contact_hint())
+        if st.button("다시 불러오기", key="reload_cases_button"):
+            st.rerun()
     elif not cases:
-        st.info("저장된 사건이 없습니다.")
+        st.info(
+            "아직 저장한 사건이 없습니다. '고소장 작성' 탭에서 피해 내용을 적고 저장하면 여기에 모입니다."
+        )
     else:
+        st.caption(f"저장한 사건 {len(cases)}건 · 회원탈퇴는 화면 위쪽 '계정 및 개인정보 메뉴'에서 할 수 있습니다.")
+        shown_case_ids = set()
         for case in cases:
             case_id = case.get("case_id", "")
+            if case_id in shown_case_ids:
+                continue
+            shown_case_ids.add(case_id)
+            with st.container(border=True):
+                st.markdown(
+                    f"**{md_escape(case.get('case_type') or '유형 미입력')}** · "
+                    f"{format_created_at(case.get('created_at'))} 저장"
+                )
+                summary = (case.get("incident_description") or "").strip()
+                if summary and not is_missing(summary):
+                    st.caption(md_escape(summary[:80] + ("…" if len(summary) > 80 else "")))
 
-            st.markdown(
-                f"**사건 유형**: {case.get('case_type', '확인 필요')} | "
-                f"**신고인**: {case.get('reporter_info', '확인 필요')} | "
-                f"**상대방**: {case.get('suspect_info', '확인 필요')} | "
-                f"**작성일시**: {case.get('created_at', '확인 필요')} | "
-                f"**case_id**: {case_id}"
-            )
+                with st.expander("입력한 내용 보기"):
+                    for label, key in CASE_FIELDS:
+                        value = case.get(key)
+                        shown = "_확인 필요 (입력하지 않음)_" if is_missing(value) else md_escape(value)
+                        st.markdown(f"**{label}**  \n{shown}")
+                    st.caption(f"사건 번호: {case_id}")
 
-            with st.expander("자세히 보기"):
-                for label, key in CASE_FIELDS:
-                    st.markdown(f"**{label}**: {case.get(key, '확인 필요')}")
-                st.markdown(f"**작성일시**: {case.get('created_at', '확인 필요')}")
-                st.markdown(f"**case_id**: {case_id}")
+                with st.expander("이 사건으로 초안 다시 만들기"):
+                    st.caption("저장한 내용으로 초안을 새로 만듭니다. 초안은 서버에 저장되지 않으니 필요하면 내려받아 주세요.")
+                    list_draft_key = f"list_draft_{case_id}"
+                    if st.button("초안 만들기", key=f"list_draft_btn_{case_id}"):
+                        try:
+                            with st.spinner("고소장 초안을 만들고 있습니다. 보통 10~30초 걸립니다."):
+                                st.session_state[list_draft_key] = generate_case_draft(case)
+                            st.session_state.pop(f"list_draft_editor_{case_id}", None)
+                        except Exception:
+                            st.error("초안을 만들지 못했습니다. 1~2분 뒤에 다시 눌러 주세요." + contact_hint())
+                    if st.session_state.get(list_draft_key):
+                        render_draft_panel(
+                            f"list_draft_editor_{case_id}", st.session_state[list_draft_key], case, case_id
+                        )
 
-            if EVIDENCE_UPLOAD_ENABLED:
-                render_case_evidence_manager(case_id)
+                if EVIDENCE_UPLOAD_ENABLED:
+                    render_case_evidence_manager(case_id)
 
-            confirm_delete = st.checkbox("이 사건 삭제", key=f"confirm_delete_{case_id}")
-
-            if st.button("삭제하기", key=f"delete_button_{case_id}"):
-                if not confirm_delete:
-                    st.warning("삭제 확인에 체크해 주세요.")
-                else:
+                confirm_delete = st.checkbox(
+                    "이 사건과 첨부한 증거파일을 모두 삭제합니다 (되돌릴 수 없음)",
+                    key=f"confirm_delete_{case_id}",
+                )
+                if st.button("사건 삭제", key=f"delete_button_{case_id}", disabled=not confirm_delete):
                     try:
-                        delete_case(case_id)
+                        with st.spinner("사건과 첨부파일을 삭제하고 있습니다."):
+                            delete_case(case_id)
                     except Exception:
-                        st.error("사건 삭제 중 문제가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+                        st.error(
+                            "사건을 삭제하지 못했습니다. 새로고침한 뒤 다시 시도해 주세요. "
+                            "첨부파일 일부가 먼저 지워졌을 수 있으니 목록을 확인해 주세요." + contact_hint()
+                        )
                     else:
-                        st.success(f"사건(case_id: {case_id})을 삭제했습니다.")
+                        st.session_state.case_list_notice = "사건과 첨부파일을 삭제했습니다."
                         st.rerun()
 
-            st.divider()
+with tab_qa:
+    st.subheader("내 상황에 맞는 안내 보기")
+    st.caption(
+        "피해 유형을 고르면 먼저 해 볼 일, 준비할 자료, 자주 묻는 질문, 공식 안내 링크를 보여 드립니다. "
+        "여기서 고르거나 읽은 내용은 저장되지 않습니다."
+    )
+    qa_options = list(DAMAGE_TYPES)
+    default_type = st.session_state.get("case_type_choice")
+    selected_qa_type = st.selectbox(
+        "피해 유형",
+        qa_options,
+        index=qa_options.index(default_type) if default_type in qa_options else 0,
+        key="victim_qa_type",
+    )
+    render_damage_type_guide(selected_qa_type, show_qa=True)
+    st.caption("위 내용은 일반 정보입니다. 실제 신고 방법과 보호조치는 담당 기관의 안내를 확인해 주세요.")
 
 with tab_terms:
     st.subheader("어려운 법률 용어, 쉽게 보기")
     st.caption("형사 사건에서 자주 보이는 말의 일반적인 뜻을 설명합니다. 개별 사건의 결과를 판단하는 내용은 아닙니다.")
-    term_query = st.text_input("용어 검색", placeholder="예: 고소, 피의자, 기소", key="legal_terms_query").strip().casefold()
+    term_query = st.text_input("용어 검색", placeholder="예: 고소, 피고소인, 기소", key="legal_terms_query").strip().casefold()
     matching_terms = [
         (term, explanation) for term, explanation in LEGAL_TERMS
         if term_query in term.casefold() or term_query in explanation.casefold()
     ]
     if not matching_terms:
-        st.info("검색 결과가 없습니다. 다른 단어로 검색해 주세요.")
+        st.info("찾는 용어가 없습니다. 다른 단어로 검색하시거나 검색칸을 비우면 전체 목록을 볼 수 있습니다.")
     for term, explanation in matching_terms:
         with st.expander(term):
             st.write(explanation)
     st.markdown(f"[설명 근거: 대검찰청 사건처리절차 안내]({LEGAL_TERMS_SOURCE})")
 
-with tab_qa:
-    st.subheader("내 상황에 맞는 질문 살펴보기")
-    st.caption("상황을 고르면 지금 해볼 일과 준비할 자료를 쉬운 말로 알려드립니다. 여기서 고르거나 읽은 내용은 사건에 저장되지 않습니다.")
-    selected_qa_type = st.selectbox("피해 유형", list(VICTIM_QA), key="victim_qa_type")
-    selected_qa = VICTIM_QA[selected_qa_type]
-    for question, answer in selected_qa["questions"]:
-        with st.expander(question):
+with tab_chat:
+    st.caption(
+        "피해 상황을 편하게 이야기하면 핵심 사실을 정리하도록 도와드려요. 대화 내용은 저장되지 않고, "
+        "새로고침하거나 로그아웃하면 사라집니다. 답변은 일반 정보이며 법률 자문이 아닙니다."
+    )
+
+    if not st.session_state.messages:
+        st.info(
+            "이렇게 물어보세요:\n\n"
+            "- 중고거래로 돈을 보냈는데 연락이 끊겼어요. 무엇부터 정리할까요?\n"
+            "- 고소장에 상대방 이름을 모르면 어떻게 쓰나요?\n"
+            "- 증거로 어떤 자료를 모아 두면 좋을까요?"
+        )
+
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if prompt := st.chat_input("궁금한 점이나 상황을 적어 주세요", max_chars=3000):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        try:
+            with st.spinner("답변을 만들고 있습니다."):
+                answer = process_question(prompt, st.session_state.model_history)
+        except Exception:
+            answer = "답변을 만들지 못했습니다. 잠시 후 다시 질문해 주세요." + contact_hint()
+
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+        with st.chat_message("assistant"):
             st.markdown(answer)
-    st.markdown(f"[자세한 공식 안내 확인하기]({selected_qa['source']})")
-    st.caption("위 내용은 일반 정보입니다. 실제 신고 방법과 보호조치는 담당 기관의 안내를 확인해 주세요.")
 
 render_footer()
