@@ -1,0 +1,33 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Overview
+
+고소음이(gosoemi) is a Streamlit web app that helps crime/damage victims organize what happened and produce a reference draft of a criminal complaint (고소장). It is deployed on Streamlit Community Cloud and uses Supabase (auth, Postgres with RLS, Storage) and the Google Gemini API.
+
+- [app.py](app.py) — the whole Streamlit app: auth (email, Naver, Google), consent/age gates, case writing, drafts, evidence files, account deletion.
+- [case_guide.py](case_guide.py) — Streamlit-free data and helpers: damage types and official source links, field guides, draft prompt, draft checks, Word export.
+- [policy_text.py](policy_text.py) — privacy policy text per version. Never edit a version users already consented to; add a new version instead.
+- [supabase/](supabase/) — migrations, rollbacks, deployed Edge Function sources (`naver-auth`, `delete-account`), and access tests.
+- `main.py`, `calendar_test.py` — an old personal CLI assistant, not used by the app.
+
+## Running and testing
+
+```bash
+pip install -r requirements.txt
+python3 -m unittest discover -s tests
+streamlit run app.py
+```
+
+The app reads all secrets and feature flags from environment variables (Streamlit secrets in production): `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `GEMINI_API_KEY`, `APP_BASE_URL`, `PRIVACY_*`, `EVIDENCE_UPLOAD_ENABLED`, `DRAFT_SAVE_ENABLED`, `NAVER_*`, `GOOGLE_*`, `AI_CALLS_PER_HOUR`. Never hardcode keys.
+
+`supabase/tests/local_case_drafts_test.py` checks the `case_drafts` migration and RLS against a local throwaway Postgres only. It refuses to run against a Supabase host.
+
+## Rules that matter
+
+- Real user data in production must not be read, changed or deleted while developing.
+- Do not change Supabase policies, schema, deployed Edge Functions, or Naver/Google console settings without the owner's explicit approval. Prepare SQL in `supabase/migrations/` with a matching file in `supabase/rollbacks/`.
+- Legal guidance shown to users must come from verified official sources (link them). Do not invent statutes, deadlines, precedents or overseas-transfer facts.
+- Drafts must not state that a crime was committed or predict outcomes; missing facts are marked `[확인 필요]`.
+- Feature flags that collect new personal data must stay off until the privacy policy version that lists them is in effect (see `draft_save_available()`).

@@ -19,7 +19,7 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 from supabase_auth.errors import AuthApiError
-from calendar_test import get_calendar_service
+from policy_text import PRIVACY_V3_REVISED_DATE, build_privacy_policy_v2, build_privacy_policy_v3
 from case_guide import (
     CASE_FIELDS, CASE_LONG_TEXT_FIELDS, CASE_FIELD_MAX_CHARS, DRAFT_DISCLAIMER, DAMAGE_TYPES,
     FIELD_GUIDES, LEGAL_TERMS, LEGAL_TERMS_SOURCE, OTHER_TYPE, ROUTES,
@@ -27,10 +27,8 @@ from case_guide import (
     compute_case_fingerprint, damage_type_guide, field_label, field_placeholder, find_unsupported_details,
     is_missing, missing_info_items, normalize_case_values, validate_case_values,
 )
-MEMORY_FILE = "memory.json"
 MEMORY_TRIGGERS = [unicodedata.normalize("NFC", t) for t in ["기억해", "저장해"]]
 
-SCHEDULE_FILE = "schedules.json"
 CANCEL_TRIGGERS = [unicodedata.normalize("NFC", t) for t in ["취소", "삭제"]]
 DATE_WORDS = ["오늘", "내일", "모레", "이번주", "이번 주", "다음주", "다음 주"]
 
@@ -50,8 +48,16 @@ PRIVACY_OPERATOR_NAME = os.environ.get("PRIVACY_OPERATOR_NAME")
 PRIVACY_CONTACT_EMAIL = os.environ.get("PRIVACY_CONTACT_EMAIL")
 PRIVACY_POLICY_EFFECTIVE_DATE = (os.environ.get("PRIVACY_POLICY_EFFECTIVE_DATE") or "").strip() or None
 TERMS_EFFECTIVE_DATE = "2026-09-15"
+# 개정 예정인 개인정보처리방침 시행일(예: "2026-10-13"). 설정하면 시행 전까지 화면 위에 미리 알린다.
+PRIVACY_POLICY_UPCOMING_DATE = (os.environ.get("PRIVACY_POLICY_UPCOMING_DATE") or "").strip() or None
 
 EVIDENCE_UPLOAD_ENABLED = os.environ.get("EVIDENCE_UPLOAD_ENABLED") == "true"
+
+# 고소장 초안 저장. supabase/migrations/20261006000000_case_drafts.sql을 적용한 뒤 켠다.
+# 초안 저장을 적은 개인정보처리방침(v3) 시행일이 지나야 화면에 나타난다.
+DRAFT_SAVE_ENABLED = os.environ.get("DRAFT_SAVE_ENABLED") == "true"
+CASE_DRAFTS_TABLE = "case_drafts"
+CASE_DRAFT_MAX_CHARS = 20000
 EVIDENCE_BUCKET = "case-evidence"
 EVIDENCE_MAX_FILE_BYTES = 10 * 1024 * 1024
 EVIDENCE_MAX_FILES_PER_CASE = 20
@@ -122,38 +128,6 @@ SERVICE_IDENTITY_INSTRUCTION = (
 )
 
 
-def load_memory():
-    if os.path.exists(MEMORY_FILE):
-        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
-
-
-def save_memory(memory):
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(memory, f, ensure_ascii=False, indent=2)
-
-
-def extract_memory_text(question):
-    text = question
-    for trigger in MEMORY_TRIGGERS:
-        text = re.sub(trigger + r"\S*", "", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip(" ,.!?？")
-
-
-def load_schedules():
-    if os.path.exists(SCHEDULE_FILE):
-        with open(SCHEDULE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
-
-
-def save_schedules(schedules):
-    with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
-        json.dump(schedules, f, ensure_ascii=False, indent=2)
-
-
 def get_supabase_anon_client() -> Client:
     supabase_url = os.environ.get("SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY")
@@ -171,7 +145,8 @@ def get_authed_client() -> Client:
     return client
 
 
-def has_current_consent(user_id: str) -> bool:
+def has_current_consent(user_id: str):
+    """현재 버전 동의가 있으면 True, 없으면 False, 확인하지 못하면 None."""
     try:
         client = get_authed_client()
         response = (
@@ -184,8 +159,9 @@ def has_current_consent(user_id: str) -> bool:
             .execute()
         )
         return bool(response.data)
-    except Exception:
-        return False
+    except Exception as error:
+        log_auth_error(error)
+        return None
 
 
 def get_app_base_url():
@@ -428,6 +404,7 @@ def clear_user_session_data() -> None:
     st.session_state.last_saved_fingerprint = None
     st.session_state.last_saved_at = None
     st.session_state.pending_draft_entry = None
+    st.session_state.pending_draft_reason = None
     st.session_state.case_review = None
     st.session_state.case_notice = None
     st.session_state.case_draft_case = None
@@ -509,9 +486,18 @@ def render_delete_account_dialog() -> None:
         evidence_count = None
     case_text = "확인하지 못했습니다" if cases_error else f"{len(cases)}건"
     evidence_text = "확인하지 못했습니다" if evidence_count is None else f"{evidence_count}개"
-    st.markdown(f"**삭제될 자료:** 사건 {case_text}, 증거파일 {evidence_text}")
-    if cases_error or evidence_count is None:
-        st.caption("개수를 확인하지 못해도 탈퇴하면 이 계정의 모든 사건과 증거파일이 삭제됩니다.")
+    summary = f"**삭제될 자료:** 사건 {case_text}, 증거파일 {evidence_text}"
+    draft_count = 0
+    if draft_save_available():
+        try:
+            draft_count = count_user_drafts()
+            summary += f", 저장된 초안 {draft_count}개"
+        except Exception:
+            draft_count = None
+            summary += ", 저장된 초안 확인하지 못했습니다"
+    st.markdown(summary)
+    if cases_error or evidence_count is None or draft_count is None:
+        st.caption("개수를 확인하지 못해도 탈퇴하면 이 계정의 모든 사건·초안·증거파일이 삭제됩니다.")
 
     st.warning("탈퇴하면 위 계정과 저장된 사건, 증거자료를 삭제합니다. 삭제한 내용은 되돌릴 수 없습니다. 탈퇴할 계정이 맞는지 먼저 확인해 주세요.")
     confirmed = st.checkbox("위 계정과 모든 저장 자료의 삭제에 동의합니다.", key="confirm_delete_account")
@@ -540,6 +526,8 @@ def ensure_active_session():
         # A refresh token is single-use; write the rotated token to this
         # browser before continuing with the newly refreshed session.
         st.rerun()
+        # 버튼 콜백 안에서는 st.rerun()이 실행을 멈추지 않으므로 새 세션으로 계속한다.
+        return new_session
     except Exception as error:
         log_auth_error(error)
         st.session_state.supabase_session = None
@@ -1135,139 +1123,157 @@ def delete_case(case_id):
     client.table(CASES_TABLE).delete().eq("case_id", case_id).eq("user_id", session["user_id"]).execute()
 
 
-def generate_case_draft(case):
-    kst = datetime.timezone(datetime.timedelta(hours=9))
-    today_str = datetime.datetime.now(kst).date().isoformat()
+def draft_save_available() -> bool:
+    effective_date = parse_privacy_effective_date()
+    return bool(
+        DRAFT_SAVE_ENABLED
+        and privacy_config_ready()
+        and effective_date
+        and effective_date >= PRIVACY_V3_REVISED_DATE
+        and today_kst() >= effective_date
+    )
 
-    prompt = build_draft_prompt(case, today_str)
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+def load_draft_index() -> dict:
+    """이 계정의 저장된 초안 목록 {case_id: 마지막 저장 시각}. 본문은 열 때 따로 불러온다."""
+    session = st.session_state.get("supabase_session") or {}
+    response = (
+        get_authed_client()
+        .table(CASE_DRAFTS_TABLE)
+        .select("case_id, updated_at")
+        .eq("user_id", session.get("user_id", ""))
+        .execute()
+    )
+    return {row["case_id"]: row.get("updated_at") for row in response.data or []}
+
+
+def load_case_draft(case_id: str):
+    session = st.session_state.get("supabase_session") or {}
+    response = (
+        get_authed_client()
+        .table(CASE_DRAFTS_TABLE)
+        .select("draft_text, updated_at")
+        .eq("user_id", session.get("user_id", ""))
+        .eq("case_id", str(case_id))
+        .limit(1)
+        .execute()
+    )
+    return (response.data or [None])[0]
+
+
+def save_case_draft(case_id: str, draft_text: str) -> str:
+    """초안을 저장(이미 있으면 덮어쓰기)하고 서버에 기록된 저장 시각을 돌려준다."""
+    session = ensure_active_session()
+    if not session or not session.get("user_id"):
+        raise RuntimeError("로그인이 만료되었습니다. 다시 로그인해 주세요.")
+    text = (draft_text or "").strip()
+    if not text:
+        raise ValueError("빈 초안은 저장할 수 없습니다. 내용을 적은 뒤 저장해 주세요.")
+    if len(text) > CASE_DRAFT_MAX_CHARS:
+        raise ValueError(f"초안은 {CASE_DRAFT_MAX_CHARS:,}자까지 저장할 수 있습니다. 조금 줄인 뒤 저장해 주세요.")
+    response = (
+        get_authed_client()
+        .table(CASE_DRAFTS_TABLE)
+        .upsert(
+            {"user_id": session["user_id"], "case_id": str(case_id), "draft_text": text},
+            on_conflict="user_id,case_id",
+        )
+        .execute()
+    )
+    rows = response.data or []
+    return rows[0].get("updated_at") if rows else datetime.datetime.now(KST).isoformat()
+
+
+def map_draft_save_error(error: Exception) -> str:
+    if isinstance(error, ValueError):
+        return str(error)
+    message = str(getattr(error, "message", None) or error).lower()
+    if "로그인" in str(error) or "jwt" in message:
+        return "로그인이 만료되어 저장하지 못했습니다. 고친 내용을 TXT로 내려받아 두신 뒤 다시 로그인해 주세요."
+    if "row-level security" in message:
+        return "이 사건에 초안을 저장할 권한을 확인하지 못했습니다. 새로고침한 뒤 다시 시도해 주세요."
+    return "초안을 저장하지 못했습니다. 고친 내용은 화면에 남아 있으니 잠시 후 '초안 저장'을 다시 눌러 주세요." + contact_hint()
+
+
+def count_user_drafts() -> int:
+    return len(load_draft_index())
+
+
+GEMINI_MODEL = "gemini-3.5-flash-lite"
+GEMINI_TIMEOUT_MS = 90_000
+# 유료 API 비용 보호: 계정마다 1시간에 AI 호출(초안 생성·상담)을 이 횟수까지만 허용한다.
+AI_CALLS_PER_HOUR = int(os.environ.get("AI_CALLS_PER_HOUR") or 30)
+
+
+class AiUsageLimitError(RuntimeError):
+    pass
+
+
+class AiUsageLimiter:
+    """서버 메모리에 계정별 최근 1시간 호출 시각을 둔다. 앱이 다시 시작되면 초기화된다."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._calls = {}
+
+    def allow(self, user_id: str, limit: int) -> bool:
+        now = time.time()
+        with self._lock:
+            recent = [t for t in self._calls.get(user_id, []) if t > now - 3600]
+            if len(recent) >= limit:
+                self._calls[user_id] = recent
+                return False
+            recent.append(now)
+            self._calls[user_id] = recent
+            return True
+
+
+@st.cache_resource
+def get_ai_usage_limiter() -> AiUsageLimiter:
+    return AiUsageLimiter()
+
+
+def call_gemini(contents, system_instruction=None) -> str:
+    session = st.session_state.get("supabase_session") or {}
+    if not get_ai_usage_limiter().allow(session.get("user_id", ""), AI_CALLS_PER_HOUR):
+        raise AiUsageLimitError(
+            f"AI 기능은 계정마다 1시간에 {AI_CALLS_PER_HOUR}번까지 쓸 수 있습니다. 잠시 후 다시 시도해 주세요."
+        )
+    client = genai.Client(
+        api_key=os.environ["GEMINI_API_KEY"],
+        http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
+    )
     response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
-        contents=[{"role": "user", "parts": [{"text": prompt}]}],
+        model=GEMINI_MODEL,
+        contents=contents,
+        config=types.GenerateContentConfig(system_instruction=system_instruction) if system_instruction else None,
     )
+    text = (getattr(response, "text", None) or "").strip()
+    if not text:
+        # 안전 필터 등으로 빈 응답이 오면 'None'이 초안에 들어가지 않도록 실패로 처리한다.
+        raise RuntimeError("empty AI response")
+    return text
 
-    return f"{response.text}\n\n{DRAFT_DISCLAIMER}"
+
+def ai_error_message(error: Exception, default: str) -> str:
+    if isinstance(error, AiUsageLimitError):
+        return str(error)
+    return default + contact_hint()
 
 
-def get_google_calendar_schedule(question):
-    target_date = resolve_date(question)
+def generate_case_draft(case):
+    today_str = datetime.datetime.now(KST).date().isoformat()
+    prompt = build_draft_prompt(case, today_str)
+    text = call_gemini([{"role": "user", "parts": [{"text": prompt}]}])
+    return f"{text}\n\n{DRAFT_DISCLAIMER}"
 
-    if target_date is None:
-        target_date = datetime.date.today()
 
-    kst = datetime.timezone(datetime.timedelta(hours=9))
-
-    start_time = datetime.datetime.combine(
-        target_date,
-        datetime.time.min,
-        tzinfo=kst
-    )
-
-    end_time = start_time + datetime.timedelta(days=1)
-
-    service = get_calendar_service()
-
-    result = service.events().list(
-        calendarId="primary",
-        timeMin=start_time.isoformat(),
-        timeMax=end_time.isoformat(),
-        singleEvents=True,
-        orderBy="startTime"
-    ).execute()
-
-    events = result.get("items", [])
-
-    if not events:
-        return f"{target_date} 일정이 없습니다."
-
-    schedule_text = []
-
-    for event in events:
-        start = event["start"].get("dateTime", event["start"].get("date"))
-        title = event.get("summary", "제목 없음")
-        schedule_text.append(f"- {start} | {title}")
-
-    return "\n".join(schedule_text)
 def has_date_cue(question):
     return (
         any(word in question for word in DATE_WORDS)
         or re.search(r"\d{1,2}월\s*\d{1,2}일", question)
         or re.search(r"\d{1,2}시", question)
     )
-
-
-def resolve_date(question, today=None):
-    today = today or datetime.date.today()
-    if "모레" in question:
-        return today + datetime.timedelta(days=2)
-    if "내일" in question:
-        return today + datetime.timedelta(days=1)
-    if "오늘" in question:
-        return today
-    m = re.search(r"(\d{1,2})월\s*(\d{1,2})일", question)
-    if m:
-        month, day = int(m.group(1)), int(m.group(2))
-        candidate = datetime.date(today.year, month, day)
-        if candidate < today:
-            candidate = datetime.date(today.year + 1, month, day)
-        return candidate
-    return None
-
-
-def resolve_date_range(question, today=None):
-    today = today or datetime.date.today()
-    if "다음주" in question or "다음 주" in question:
-        this_monday = today - datetime.timedelta(days=today.weekday())
-        next_monday = this_monday + datetime.timedelta(days=7)
-        return next_monday, next_monday + datetime.timedelta(days=6)
-    if "이번주" in question or "이번 주" in question:
-        this_monday = today - datetime.timedelta(days=today.weekday())
-        return this_monday, this_monday + datetime.timedelta(days=6)
-    single_date = resolve_date(question, today)
-    if single_date:
-        return single_date, single_date
-    return None, None
-
-
-def resolve_time(question):
-    m = re.search(r"(오전|오후)?\s*(\d{1,2})\s*시(?:\s*(\d{1,2})\s*분)?", question)    
-    if not m:
-        return None
-
-    period = m.group(1)
-    hour = int(m.group(2))
-    minute = int(m.group(3)) if m.group(3) else 0
-
-    if period == "오후" and hour != 12:
-        hour += 12
-    if period == "오전" and hour == 12:
-        hour = 0
-
-    return f"{hour:02d}:{minute:02d}"    
-
-
-def strip_common_words(text):
-    for word in DATE_WORDS:
-        text = text.replace(word, "")
-    text = re.sub(r"\d{1,2}월\s*\d{1,2}일", "", text)
-    text = re.sub(r"(오전|오후)?\s*\d{1,2}시(\s*\d{1,2}분)?", "", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip(" ,.!?에는를을이가")
-
-
-def extract_task_text(question):
-    text = question
-    for trigger in MEMORY_TRIGGERS:
-        text = re.sub(trigger + r"\S*", "", text)
-    return strip_common_words(text)
-
-
-def extract_cancel_keyword(question):
-    text = question
-    for trigger in CANCEL_TRIGGERS:
-        text = re.sub(trigger + r"\S*", "", text)
-    text = text.replace("일정", "")
-    return strip_common_words(text)
 
 
 def is_cancel_request(question):
@@ -1280,172 +1286,8 @@ def is_schedule_query(question):
     return "일정" in question and not is_cancel_request(question)
 
 
-def format_schedule(item):
-    time_part = f" {item['time']}" if item["time"] else ""
-    return f"{item['date']}{time_part} {item['task']}"
-
-
-def handle_schedule_add(question, schedules):
-    date = resolve_date(question)
-    time = resolve_time(question)
-    task = extract_task_text(question)
-    print(f"[확인] date={date}, time={time}, task={task!r}")
-    if not date or not task:
-        print("[일정 저장 실패] 날짜나 내용을 정확히 알 수 없습니다.")
-        return "사용자가 일정을 저장하려 했지만 날짜 또는 내용을 인식하지 못했습니다."
-
-    entry = {
-        "date": date.isoformat(),
-        "time": time,
-        "task": task
-    }
-
-    schedules.append(entry)
-    save_schedules(schedules)
-
-    try:
-        service = get_calendar_service()
-
-        if time:
-            hour, minute = map(int, time.split(":")[:2])
-
-            start_dt = datetime.datetime(
-                date.year, date.month, date.day,
-                hour, minute,
-                tzinfo=datetime.timezone(datetime.timedelta(hours=9))
-            )
-
-            end_dt = start_dt + datetime.timedelta(hours=1)
-
-            event = {
-                "summary": task,
-                "start": {
-                    "dateTime": start_dt.isoformat(),
-                    "timeZone": "Asia/Seoul"
-                },
-                "end": {
-                    "dateTime": end_dt.isoformat(),
-                    "timeZone": "Asia/Seoul"
-                }
-            }
-
-        else:
-            event = {
-                "summary": task,
-                "start": {
-                    "date": date.isoformat()
-                },
-                "end": {
-                    "date": (date + datetime.timedelta(days=1)).isoformat()
-                }
-            }
-
-        service.events().insert(
-            calendarId="primary",
-            body=event
-        ).execute()
-
-        return f"일정을 저장했고 구글 캘린더에도 등록했습니다: {format_schedule(entry)}"
-
-    except Exception as e:
-        print(f"[구글 캘린더 저장 실패] {e}")
-        return f"일정은 저장했지만 구글 캘린더 등록은 실패했습니다: {format_schedule(entry)}"
-
-def handle_schedule_cancel(question, schedules):
-    date = resolve_date(question)
-    keyword = extract_cancel_keyword(question)
-
-    if not keyword:
-        return "어떤 일정을 취소할지 일정 이름을 말씀해 주세요."
-
-    local_matches = [
-        s for s in schedules
-        if (date is None or s["date"] == date.isoformat())
-        and keyword in s["task"]
-    ]
-
-    for item in local_matches:
-        schedules.remove(item)
-
-    if local_matches:
-        save_schedules(schedules)
-
-    kst = datetime.timezone(datetime.timedelta(hours=9))
-    target_date = date or datetime.datetime.now(kst).date()
-
-    start_time = datetime.datetime.combine(
-        target_date,
-        datetime.time.min,
-        tzinfo=kst
-    )
-
-    if date is None:
-        end_time = start_time + datetime.timedelta(days=365)
-    else:
-        end_time = start_time + datetime.timedelta(days=1)
-
-    google_matches = []
-
-    try:
-        service = get_calendar_service()
-        result = service.events().list(
-            calendarId="primary",
-            timeMin=start_time.isoformat(),
-            timeMax=end_time.isoformat(),
-            singleEvents=True,
-            orderBy="startTime"
-        ).execute()
-
-        for event in result.get("items", []):
-            title = event.get("summary", "")
-            if keyword in title:
-                service.events().delete(
-                    calendarId="primary",
-                    eventId=event["id"]
-                ).execute()
-                google_matches.append(title)
-
-    except Exception as e:
-        print(f"[구글 캘린더 삭제 실패] {e}")
-
-    removed_items = [format_schedule(item) for item in local_matches]
-    removed_items.extend(google_matches)
-
-    if not removed_items:
-        return "조건에 맞는 일정을 찾지 못했습니다. 어떤 일정인지 다시 말씀해 주세요."
-
-    removed_text = ", ".join(dict.fromkeys(removed_items))
-    print(f"[일정 삭제됨] {removed_text}")
-    return f"요청하신 일정을 삭제했습니다: {removed_text}"
-
-
-def handle_schedule_query(question, schedules):
-    start, end = resolve_date_range(question)
-    if start and end:
-        matches = [s for s in schedules if start.isoformat() <= s["date"] <= end.isoformat()]
-    else:
-        today_str = datetime.date.today().isoformat()
-        matches = [s for s in schedules if s["date"] >= today_str]
-    matches.sort(key=lambda s: (s["date"], s["time"] or ""))
-    if not matches:
-        print("[조회된 일정 없음]")
-        return "요청한 기간에 해당하는 저장된 일정이 없습니다. 없다고 자연스럽게 답변하세요."
-    listing = "\n".join(f"- {format_schedule(m)}" for m in matches)
-    print(f"[조회된 일정]\n{listing}")
-    return f"다음은 요청한 기간에 해당하는 저장된 일정입니다. 이 내용만 근거로 답변하세요:\n{listing}"
-
-
-def build_system_instruction(memory, schedule_notice):
-    parts = [SERVICE_IDENTITY_INSTRUCTION, SAFE_DRAFT_INSTRUCTION]
-    if memory:
-        lines = "\n".join(f"- {item}" for item in memory)
-        parts.append(
-            "다음은 사용자가 이전에 기억해달라고 요청한 장기 기억입니다. "
-            "관련된 질문에 답할 때 반드시 참고하세요:\n" + lines
-        )
-    if schedule_notice:
-        parts.append(schedule_notice)
-    return "\n\n".join(parts)
+def build_system_instruction():
+    return "\n\n".join([SERVICE_IDENTITY_INSTRUCTION, SAFE_DRAFT_INSTRUCTION])
 
 
 def process_question(question, history):
@@ -1470,20 +1312,14 @@ def process_question(question, history):
     if is_schedule_query(question):
         return UNSUPPORTED_ASSISTANT_MESSAGE
 
+    contents = history[-15:] + [{"role": "user", "parts": [{"text": question}]}]
+    answer = call_gemini(contents, build_system_instruction())
+    # 답변을 받은 뒤에만 대화 기록에 넣어, 실패한 질문이 다음 요청에 남지 않게 한다.
     history.append({"role": "user", "parts": [{"text": question}]})
-    client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    response = client.models.generate_content(
-        model="gemini-3.5-flash-lite",
-        contents=history[-16:],
-        config=types.GenerateContentConfig(
-            system_instruction=build_system_instruction([], None)
-        ),
-    )
-
-    history.append({"role": "model", "parts": [{"text": response.text}]})
+    history.append({"role": "model", "parts": [{"text": answer}]})
     if len(history) > 16:
         history[:] = history[-16:]
-    return response.text
+    return answer
 
 
 BRAND_CSS = """
@@ -1551,6 +1387,11 @@ BRAND_CSS = """
     font-weight: 600;
 }
 
+[data-testid="stButton"] button:disabled {
+    background-color: #E3E8EF;
+    color: var(--dgo-muted);
+}
+
 [data-testid="stButton"] button:hover,
 [data-testid="stFormSubmitButton"] button:hover,
 [data-testid="stDownloadButton"] button:hover {
@@ -1601,10 +1442,15 @@ BRAND_CSS = """
     }
 
     /* 휴대폰에서 버튼을 손가락으로 누르기 쉽게 가로 전체로 넓힌다. */
+    [data-testid="stElementContainer"]:has([data-testid="stButton"], [data-testid="stFormSubmitButton"], [data-testid="stDownloadButton"]),
+    [data-testid="stElementContainer"]:has([data-testid="stButton"], [data-testid="stFormSubmitButton"], [data-testid="stDownloadButton"]) > div,
+    [data-testid="stButton"],
+    [data-testid="stFormSubmitButton"],
+    [data-testid="stDownloadButton"],
     [data-testid="stButton"] button,
     [data-testid="stFormSubmitButton"] button,
     [data-testid="stDownloadButton"] button {
-        width: 100%;
+        width: 100% !important;
     }
 
     /* iOS는 16px보다 작은 입력칸에 초점이 가면 화면을 확대하므로 글자 크기를 맞춘다. */
@@ -1683,65 +1529,12 @@ footer {visibility: hidden;}
 """
 
 
-# 법률 검토 전 초안 — 실제 배포 전 검토 필요
 def build_privacy_policy_text():
-    return f"""
-### 개인정보처리방침
-
-{PRIVACY_OPERATOR_NAME}(이하 "운영자")는 개인이 운영하는 서비스(사업자등록 전)로서 "고소음이"(이하 "서비스")를 제공하며,
-이용자의 개인정보를 아래와 같이 처리합니다.
-
-**1. 수집하는 개인정보 항목**
-- 회원가입 시: 이메일 주소, 인증을 위한 비밀번호
-- 네이버 로그인 이용 시: 네이버 고유 식별자, 네이버 계정 이메일 (이용자 동의에 따라 네이버로부터 제공받음)
-  - 네이버 로그인 과정에서 발급되는 네이버 접근 토큰은 이용자 확인에만 사용하며, 서비스의 사건 데이터베이스에는 저장하지 않습니다. 로그인 직후 네이버 서비스 연결을 해제하지 않습니다.
-- Google 로그인 이용 시: Google 고유 식별자, Google 계정 이메일, 이름, 프로필 사진 (이용자 동의에 따라 Google로부터 제공받음)
-- 증거자료 첨부 이용 시: 이용자가 직접 선택한 사진, PDF 문서, 녹음파일 및 파일명
-- 사건 작성 시: 사건 유형, 신고인 정보, 상대방 정보, 사건 발생 일시, 사건 발생 장소, 사건 경위, 피해 내용, 증거자료, 목격자 유무, 처벌 의사 (총 10개 항목)
-  - 이 중 "상대방 정보"는 이용자 본인이 아닌 제3자에 관한 정보가 포함될 수 있습니다.
-- 로그인 유지 시: 로그인 유지에 필요한 갱신 토큰을 이용자의 브라우저 저장소에 최대 7일 동안 저장합니다. 로그아웃하면 브라우저에서 삭제하며, 같은 브라우저를 함께 사용하는 다른 사람이 접근할 수 있으므로 공용 기기에서는 로그아웃해 주세요.
-
-**2. 개인정보의 수집·이용 목적**
-- 회원가입, 로그인, 계정 관리
-- 네이버 고유 식별자·네이버 계정 이메일: 네이버 로그인을 통한 회원가입·로그인·계정관리
-- Google 고유 식별자·Google 계정 이메일·이름·프로필 사진: Google 로그인을 통한 회원가입·로그인·계정관리
-- 이용자가 입력한 사건 정보와 첨부한 증거자료의 비공개 저장·조회·다운로드·삭제
-- AI를 이용한 상담 응답 제공 및 고소장 초안 생성
-
-**3. 개인정보의 보유·이용 기간**
-- 회원 정보(이메일, 비밀번호, 네이버 고유 식별자, 네이버 계정 이메일, Google 고유 식별자, Google 계정 이메일·이름·프로필 사진): 회원탈퇴 시까지 보유하며, 탈퇴 확인 후 삭제합니다.
-- 사건 정보 및 첨부한 증거자료: 이용자가 직접 삭제하거나 회원탈퇴할 때까지 보유합니다.
-
-**4. 개인정보 처리 위탁 및 정보 전송**
-- Supabase — 회원 인증, 사건 정보 및 첨부한 증거자료의 비공개 저장. 데이터베이스와 인증 정보는 AWS 서울 리전에 저장되어 주로 처리됩니다.
-  다만 로그·모니터링·이메일 발송 등 부가 처리 과정에서 미국·싱가포르 소재 하위처리자를 거칠 수 있습니다.
-  비밀번호는 Supabase Auth에서 암호화된 인증정보로 처리되며 운영자는 원문을 열람할 수 없습니다.
-- Google Gemini API(유료 API) — 고소장 초안 생성 및 AI 상담 응답 생성을 위해 입력하신 정보가 처리 목적으로 전송됩니다.
-  유료 API 이용 시 입력·응답 내용은 제품 개선(모델 학습 포함)에 사용되지 않으며, 오남용 방지 등을 위한 로그가 기본 최대 55일간 보관될 수 있습니다.
-
-**5. 개인정보의 국외 이전**
-- Supabase의 로그·모니터링·이메일 발송 등 부가 처리는 미국·싱가포르 소재 하위처리자를 거칠 수 있습니다.
-- Google Gemini API로 전송되는 정보는 Google 또는 그 대리인이 시설을 운영하는 국가에서 일시 저장·캐시될 수 있습니다. 구체적인 처리 국가와 계약 법인은 현재 확인되지 않아 확인되는 대로 갱신하겠습니다.
-
-**6. 이용자의 권리**
-- 저장된 사건의 열람·삭제: 서비스 내 "내 사건" 화면에서 직접 삭제할 수 있습니다.
-- 회원탈퇴 및 전체 정보 삭제: 로그인 후 '계정 및 개인정보 메뉴'의 '회원탈퇴'에서 직접 계정, 저장된 사건과 증거자료를 삭제할 수 있습니다. 처리에 문제가 생기면 아래 문의처로 연락해 주세요.
-
-**7. 이용 연령 제한**
-본 서비스는 만 14세 이상만 이용할 수 있습니다.
-
-**8. 안전한 정보 입력 안내**
-상대방 등 제3자의 정보는 이용자가 적법하게 제공할 수 있는 범위에서 필요한 최소한만 입력해 주세요.
-주민등록번호, 계좌 비밀번호, 카드번호, 인증번호(OTP), 불필요한 주소·연락처 등은 입력하지 마세요.
-
-**9. 문의처**
-개인정보 관련 문의, 열람·정정·삭제 요청은 아래로 연락해 주세요.
-- 운영자: {PRIVACY_OPERATOR_NAME}
-- 이메일: {PRIVACY_CONTACT_EMAIL}
-
-**10. 시행일**
-이 개인정보처리방침은 {PRIVACY_POLICY_EFFECTIVE_DATE}부터 적용됩니다.
-"""
+    effective_date = parse_privacy_effective_date()
+    args = (PRIVACY_OPERATOR_NAME, PRIVACY_CONTACT_EMAIL, PRIVACY_POLICY_EFFECTIVE_DATE)
+    if effective_date and effective_date >= PRIVACY_V3_REVISED_DATE:
+        return build_privacy_policy_v3(*args)
+    return build_privacy_policy_v2(*args)
 
 
 @st.dialog("개인정보처리방침", width="large")
@@ -1962,6 +1755,28 @@ def contact_hint() -> str:
     return ""
 
 
+def render_upcoming_privacy_notice() -> None:
+    """개정 방침 시행 전에 바뀌는 내용을 미리 볼 수 있게 한다. 시행일이 지나면 자동으로 사라진다."""
+    try:
+        upcoming = datetime.date.fromisoformat(PRIVACY_POLICY_UPCOMING_DATE or "")
+    except ValueError:
+        return
+    current = parse_privacy_effective_date()
+    if not privacy_config_ready() or upcoming < PRIVACY_V3_REVISED_DATE or today_kst() >= upcoming:
+        return
+    if current and current >= upcoming:
+        return
+    with st.expander(f"📢 개인정보처리방침이 {upcoming.isoformat()}부터 바뀝니다 (눌러서 보기)"):
+        st.markdown(
+            "**주요 변경 내용**\n"
+            "- 고소장 초안 저장 기능 추가에 따라 저장하는 초안 내용과 저장 일시를 처리 항목에 추가\n"
+            "- 동의·만 14세 확인 기록, 로그인·인증 기록, 브라우저 저장소 사용을 구체적으로 안내\n"
+            "- 개인정보 파기 절차·방법, 처리 위탁(서비스 호스팅 포함), 국외 이전 정보(받는 자 연락처·국가·시기·거부 방법) 보완\n\n"
+            "시행일 이후 처음 이용하실 때 바뀐 방침에 다시 동의해 주셔야 합니다. 동의하지 않으시면 회원탈퇴할 수 있습니다."
+        )
+        st.markdown(build_privacy_policy_v3(PRIVACY_OPERATOR_NAME, PRIVACY_CONTACT_EMAIL, upcoming.isoformat()))
+
+
 def render_footer():
     contact = ""
     if PRIVACY_CONTACT_EMAIL:
@@ -2035,6 +1850,18 @@ def show_new_draft(case_entry: dict, draft_text: str) -> None:
     st.session_state.case_draft_id = case_entry["case_id"]
     st.session_state.case_draft_case = case_entry
     st.session_state.pop("case_draft_editor", None)
+    st.session_state.pop("case_draft_editor_saved", None)
+    if draft_save_available():
+        # 처음 만든 초안은 바로 저장해 두어, 창을 닫아도 '내 사건'에서 다시 열 수 있게 한다.
+        try:
+            saved_at = save_case_draft(case_entry["case_id"], draft_text)
+        except Exception as error:
+            log_auth_error(error)
+            st.session_state.case_draft_editor_error = (
+                "초안은 만들었지만 자동 저장하지 못했습니다. 아래에서 '초안 저장'을 눌러 주세요."
+            )
+        else:
+            st.session_state.case_draft_editor_saved = {"text": draft_text.strip(), "at": saved_at}
 
 
 def reset_case_form() -> None:
@@ -2052,14 +1879,30 @@ def restore_original_draft(editor_key: str, original: str) -> None:
     st.session_state[editor_key] = original
 
 
+def save_draft_from_editor(editor_key: str, case_id: str) -> None:
+    text = st.session_state.get(editor_key, "")
+    try:
+        saved_at = save_case_draft(case_id, text)
+    except Exception as error:
+        if not isinstance(error, ValueError):
+            log_auth_error(error)
+        st.session_state[f"{editor_key}_error"] = map_draft_save_error(error)
+    else:
+        st.session_state[f"{editor_key}_saved"] = {"text": text.strip(), "at": saved_at}
+        st.session_state[f"{editor_key}_notice"] = "초안을 저장했습니다. '내 사건'에서 언제든 다시 열어 이어서 고칠 수 있습니다."
+        st.session_state.pop(f"{editor_key}_error", None)
+
+
 def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str) -> None:
+    can_save = draft_save_available()
+    saved = st.session_state.get(f"{editor_key}_saved")
     st.markdown("#### 고소장 초안")
     st.caption(
         "AI가 입력하신 내용만으로 만든 참고용 초안입니다. 꼭 직접 읽고 고쳐 주세요. "
-        "고친 내용은 칸 바깥을 한 번 누르거나 Ctrl+Enter(맥은 ⌘+Enter)를 누르면 내려받기 파일에 반영됩니다."
+        "고친 내용은 칸 바깥을 한 번 누르거나 Ctrl+Enter(맥은 ⌘+Enter)를 누르면 저장·내려받기에 반영됩니다."
     )
     if editor_key not in st.session_state:
-        st.session_state[editor_key] = original
+        st.session_state[editor_key] = saved["text"] if saved else original
 
     missing = missing_info_items(case)
     if missing:
@@ -2068,7 +1911,9 @@ def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str)
             + "\n".join(f"- {item}" for item in missing)
         )
 
-    edited = st.text_area("초안 내용 (직접 고칠 수 있어요)", key=editor_key, height=420)
+    edited = st.text_area(
+        "초안 내용 (직접 고칠 수 있어요)", key=editor_key, height=420, max_chars=CASE_DRAFT_MAX_CHARS
+    )
 
     unsupported = find_unsupported_details(edited, case, datetime.datetime.now(KST).date().isoformat())
     if unsupported:
@@ -2076,7 +1921,29 @@ def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str)
             "입력하신 내용에 없던 정보가 초안에 들어갔을 수 있습니다. 아래 부분을 꼭 확인해 주세요.\n\n"
             + "\n".join(f"- {item}" for item in unsupported)
         )
-    if edited != original:
+
+    notice = st.session_state.pop(f"{editor_key}_notice", None)
+    if notice:
+        st.success(notice)
+    error = st.session_state.pop(f"{editor_key}_error", None)
+    if error:
+        st.error(error)
+
+    if can_save:
+        unsaved = not saved or edited.strip() != saved["text"]
+        if saved:
+            st.caption(f"마지막 저장: {format_created_at(saved['at'])}")
+        if unsaved:
+            st.caption("⚠️ 저장하지 않은 수정 내용이 있습니다. 창을 닫거나 새로고침하기 전에 '초안 저장'을 눌러 주세요.")
+        st.button(
+            "초안 저장" if unsaved else "✓ 저장됨",
+            key=f"{editor_key}_save",
+            type="primary",
+            disabled=not unsaved,
+            on_click=save_draft_from_editor,
+            args=(editor_key, case_id),
+        )
+    elif edited != original:
         st.caption("✏️ 직접 고친 내용이 TXT·Word 내려받기에 그대로 반영됩니다.")
 
     file_stem = f"case_draft_{case_id}"
@@ -2097,17 +1964,37 @@ def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str)
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             key=f"{editor_key}_docx",
         )
-    if edited != original:
+    baseline, baseline_label = (saved["text"], "마지막으로 저장한 초안으로 되돌리기") if saved else (
+        original, "처음 만든 초안으로 되돌리기"
+    )
+    if edited.strip() != baseline.strip():
         st.button(
-            "처음 만든 초안으로 되돌리기",
+            baseline_label,
             key=f"{editor_key}_restore",
             on_click=restore_original_draft,
-            args=(editor_key, original),
+            args=(editor_key, baseline),
         )
-    st.caption(
-        "초안은 서버에 저장되지 않습니다. 필요하면 내려받아 보관하세요. "
-        "저장한 사건 내용으로 '내 사건' 탭에서 언제든 다시 만들 수 있습니다."
-    )
+    if not can_save:
+        st.caption(
+            "초안은 서버에 저장되지 않습니다. 필요하면 내려받아 보관하세요. "
+            "저장한 사건 내용으로 '내 사건' 탭에서 언제든 다시 만들 수 있습니다."
+        )
+
+
+def open_saved_draft(case_id: str) -> None:
+    editor_key = f"list_draft_editor_{case_id}"
+    try:
+        row = load_case_draft(case_id)
+    except Exception as error:
+        log_auth_error(error)
+        st.session_state[f"{editor_key}_error"] = "저장된 초안을 불러오지 못했습니다. 새로고침한 뒤 다시 눌러 주세요." + contact_hint()
+        return
+    if not row:
+        st.session_state[f"{editor_key}_error"] = "저장된 초안을 찾지 못했습니다. 다른 탭에서 사건을 삭제했는지 확인해 주세요."
+        return
+    st.session_state[f"list_draft_{case_id}"] = row["draft_text"]
+    st.session_state[f"{editor_key}_saved"] = {"text": row["draft_text"].strip(), "at": row.get("updated_at")}
+    st.session_state[editor_key] = row["draft_text"]
 
 
 def render_signup_guide():
@@ -2395,6 +2282,7 @@ if not st.session_state.supabase_session:
     if st.session_state.pop("account_deleted", False):
         st.success("회원탈퇴가 완료되었습니다. 계정과 저장된 자료가 삭제되었습니다.")
     render_auth_flash()
+    render_upcoming_privacy_notice()
 
     if st.session_state.auth_view == "recovery_set_password":
         render_recovery_set_password_form()
@@ -2426,7 +2314,7 @@ if not st.session_state.supabase_session:
                 try:
                     auth_client = get_supabase_anon_client()
                     auth_response = auth_client.auth.sign_in_with_password(
-                        {"email": login_email, "password": login_password}
+                        {"email": login_email.strip(), "password": login_password}
                     )
                     if not getattr(auth_response, "session", None) or not getattr(auth_response, "user", None):
                         raise RuntimeError("empty sign_in response")
@@ -2489,7 +2377,7 @@ if not st.session_state.supabase_session:
                         try:
                             auth_client = get_supabase_anon_client()
                             auth_client.auth.sign_up({
-                                "email": signup_email,
+                                "email": signup_email.strip(),
                                 "password": signup_password,
                                 "options": {
                                     "email_redirect_to": base_url,
@@ -2501,7 +2389,7 @@ if not st.session_state.supabase_session:
                                     },
                                 },
                             })
-                            st.session_state.signup_sent_email = signup_email
+                            st.session_state.signup_sent_email = signup_email.strip()
                             st.session_state.signup_resend_last_sent_at = None
                             st.session_state.auth_view = "signup_sent"
                             st.rerun()
@@ -2541,7 +2429,17 @@ elif is_google_primary_session(st.session_state.supabase_session):
         render_footer()
         st.stop()
 
-if not has_current_consent(current_user_id):
+consent_status = has_current_consent(current_user_id)
+if consent_status is None:
+    render_brand_header()
+    st.error("동의 상태를 확인하지 못했습니다. 인터넷 연결을 확인하고 다시 시도해 주세요." + contact_hint())
+    if st.button("다시 시도", key="consent_retry_btn", type="primary"):
+        st.rerun()
+    if st.button("로그아웃", key="consent_error_logout_btn"):
+        perform_logout()
+    render_footer()
+    st.stop()
+if not consent_status:
     render_brand_header()
     consent_identity, consent_method = current_account_label(st.session_state.supabase_session)
     st.info(
@@ -2603,6 +2501,7 @@ render_brand_header()
 
 account_identity, account_method = current_account_label(st.session_state.supabase_session)
 st.caption(f"로그인한 계정: {account_identity} ({account_method})")
+render_upcoming_privacy_notice()
 
 with st.expander("계정 및 개인정보 메뉴"):
     st.markdown(f"**현재 로그인 계정:** {account_identity} ({account_method} 로그인)")
@@ -2649,6 +2548,11 @@ with tab_case:
             "- 보관기간: 이용자가 직접 삭제하거나 회원탈퇴할 때까지\n"
             "- 동의를 거부할 수 있으나, 거부 시 사건 저장과 고소장 초안 생성이 제한됩니다."
         )
+        if draft_save_available():
+            st.markdown(
+                "- 고소장 초안: 처음 만든 초안과 '초안 저장'으로 저장한 초안은 사건과 함께 보관되며, "
+                "사건을 삭제하거나 회원탈퇴하면 함께 삭제됩니다."
+            )
         st.caption(
             "입력하신 사건 정보(신고인·상대방 정보 등 개인정보 포함 가능)는 Supabase 데이터베이스에 저장되고, "
             "고소장 초안을 만들 때 Google Gemini API로 전송되어 처리됩니다. "
@@ -2665,6 +2569,8 @@ with tab_case:
             "사건은 저장했지만 고소장 초안을 만들지 못했습니다. 잠시 후 '초안 다시 만들기'를 눌러 주세요. "
             "계속 안 되면 '내 사건' 탭에서 같은 사건으로 초안을 다시 만들 수도 있습니다."
         )
+        if st.session_state.get("pending_draft_reason"):
+            st.info(st.session_state.pending_draft_reason)
         col_retry, col_cancel = st.columns(2)
         with col_retry:
             if st.button("초안 다시 만들기", key="retry_draft_button", type="primary"):
@@ -2672,8 +2578,8 @@ with tab_case:
                 try:
                     with st.spinner("고소장 초안을 만들고 있습니다. 보통 10~30초 걸립니다."):
                         draft_text = generate_case_draft(entry)
-                except Exception:
-                    st.error("초안을 또 만들지 못했습니다. 1~2분 뒤에 다시 시도해 주세요." + contact_hint())
+                except Exception as error:
+                    st.error(ai_error_message(error, "초안을 또 만들지 못했습니다. 1~2분 뒤에 다시 시도해 주세요."))
                 else:
                     show_new_draft(entry, draft_text)
                     st.session_state.pending_draft_entry = None
@@ -2830,11 +2736,18 @@ with tab_case:
                         try:
                             with st.spinner("사건을 저장했습니다. 고소장 초안을 만들고 있습니다. 보통 10~30초 걸립니다."):
                                 draft_text = generate_case_draft(case_entry)
-                        except Exception:
+                        except Exception as error:
                             st.session_state.pending_draft_entry = case_entry
+                            st.session_state.pending_draft_reason = (
+                                str(error) if isinstance(error, AiUsageLimitError) else None
+                            )
                         else:
                             show_new_draft(case_entry, draft_text)
-                            st.session_state.case_notice = "사건을 저장했습니다. 아래 초안을 읽고 필요한 부분을 고쳐 주세요. '내 사건' 탭에서 다시 볼 수 있습니다."
+                            st.session_state.case_notice = (
+                                "사건과 초안을 저장했습니다. 아래 초안을 읽고 고친 뒤 '초안 저장'을 눌러 주세요. '내 사건' 탭에서 다시 열 수 있습니다."
+                                if draft_save_available()
+                                else "사건을 저장했습니다. 아래 초안을 읽고 필요한 부분을 고쳐 주세요. '내 사건' 탭에서 다시 볼 수 있습니다."
+                            )
                     st.rerun()
 
     if st.session_state.case_draft and not st.session_state.pending_draft_entry:
@@ -2865,6 +2778,14 @@ with tab_case_list:
         )
     else:
         st.caption(f"저장한 사건 {len(cases)}건 · 회원탈퇴는 화면 위쪽 '계정 및 개인정보 메뉴'에서 할 수 있습니다.")
+        can_save_drafts = draft_save_available()
+        draft_index = {}
+        if can_save_drafts:
+            try:
+                draft_index = load_draft_index()
+            except Exception as error:
+                log_auth_error(error)
+                st.warning("저장된 초안 목록을 불러오지 못했습니다. 새로고침해 주세요. 사건 내용은 아래에서 그대로 볼 수 있습니다.")
         shown_case_ids = set()
         for case in cases:
             case_id = case.get("case_id", "")
@@ -2876,6 +2797,8 @@ with tab_case_list:
                     f"**{md_escape(case.get('case_type') or '유형 미입력')}** · "
                     f"{format_created_at(case.get('created_at'))} 저장"
                 )
+                if draft_index.get(str(case_id)):
+                    st.caption("📝 저장된 초안 있음")
                 summary = (case.get("incident_description") or "").strip()
                 if summary and not is_missing(summary):
                     st.caption(md_escape(summary[:80] + ("…" if len(summary) > 80 else "")))
@@ -2887,20 +2810,37 @@ with tab_case_list:
                         st.markdown(f"**{label}**  \n{shown}")
                     st.caption(f"사건 번호: {case_id}")
 
-                with st.expander("이 사건으로 초안 다시 만들기"):
-                    st.caption("저장한 내용으로 초안을 새로 만듭니다. 초안은 서버에 저장되지 않으니 필요하면 내려받아 주세요.")
+                saved_at = draft_index.get(str(case_id)) if draft_index else None
+                with st.expander("고소장 초안 열기·고치기"):
                     list_draft_key = f"list_draft_{case_id}"
-                    if st.button("초안 만들기", key=f"list_draft_btn_{case_id}"):
+                    list_editor_key = f"list_draft_editor_{case_id}"
+                    if saved_at:
+                        st.caption(f"저장된 초안이 있습니다 (마지막 저장 {format_created_at(saved_at)}).")
+                        st.button(
+                            "저장된 초안 열기",
+                            key=f"list_draft_open_{case_id}",
+                            type="primary",
+                            on_click=open_saved_draft,
+                            args=(case_id,),
+                        )
+                    elif can_save_drafts:
+                        st.caption("아직 저장된 초안이 없습니다. 아래에서 초안을 만든 뒤 '초안 저장'을 눌러 주세요.")
+                    else:
+                        st.caption("저장한 내용으로 초안을 새로 만듭니다. 초안은 서버에 저장되지 않으니 필요하면 내려받아 주세요.")
+                    if st.button("AI로 새 초안 만들기", key=f"list_draft_btn_{case_id}"):
                         try:
                             with st.spinner("고소장 초안을 만들고 있습니다. 보통 10~30초 걸립니다."):
                                 st.session_state[list_draft_key] = generate_case_draft(case)
-                            st.session_state.pop(f"list_draft_editor_{case_id}", None)
-                        except Exception:
-                            st.error("초안을 만들지 못했습니다. 1~2분 뒤에 다시 눌러 주세요." + contact_hint())
+                            st.session_state.pop(list_editor_key, None)
+                            if saved_at:
+                                st.info("새 초안을 만들었습니다. '초안 저장'을 누르기 전까지 저장된 초안은 바뀌지 않습니다.")
+                        except Exception as error:
+                            st.error(ai_error_message(error, "초안을 만들지 못했습니다. 1~2분 뒤에 다시 눌러 주세요."))
+                    load_error = st.session_state.pop(f"{list_editor_key}_error", None) if not st.session_state.get(list_draft_key) else None
+                    if load_error:
+                        st.error(load_error)
                     if st.session_state.get(list_draft_key):
-                        render_draft_panel(
-                            f"list_draft_editor_{case_id}", st.session_state[list_draft_key], case, case_id
-                        )
+                        render_draft_panel(list_editor_key, st.session_state[list_draft_key], case, case_id)
 
                 if EVIDENCE_UPLOAD_ENABLED:
                     render_case_evidence_manager(case_id)
@@ -2980,8 +2920,8 @@ with tab_chat:
         try:
             with st.spinner("답변을 만들고 있습니다."):
                 answer = process_question(prompt, st.session_state.model_history)
-        except Exception:
-            answer = "답변을 만들지 못했습니다. 잠시 후 다시 질문해 주세요." + contact_hint()
+        except Exception as error:
+            answer = ai_error_message(error, "답변을 만들지 못했습니다. 잠시 후 다시 질문해 주세요.")
 
         st.session_state.messages.append({"role": "assistant", "content": answer})
         with st.chat_message("assistant"):
