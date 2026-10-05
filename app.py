@@ -19,7 +19,10 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 from supabase_auth.errors import AuthApiError
-from policy_text import PRIVACY_V3_REVISED_DATE, build_privacy_policy_v2, build_privacy_policy_v3
+from billing import billing_mode, parse_plans, plan_summary, sales_open
+from policy_text import (
+    CHANGES_V2_TO_V3, PRIVACY_V3_REVISED_DATE, build_privacy_policy_v2, build_privacy_policy_v3,
+)
 from case_guide import (
     CASE_FIELDS, CASE_LONG_TEXT_FIELDS, CASE_FIELD_MAX_CHARS, DRAFT_DISCLAIMER, DAMAGE_TYPES,
     FIELD_GUIDES, LEGAL_TERMS, LEGAL_TERMS_SOURCE, OTHER_TYPE, ROUTES,
@@ -39,7 +42,9 @@ CASE_UI_STATE_PREFIXES = (
     "list_draft_", "evidence_", "confirm_delete_",
 )
 
-PASSWORD_RESET_ENABLED = False  # 기본 이메일 템플릿(커스텀 SMTP 미설정)에서는 재설정 링크가 동작하지 않음
+# 비밀번호 재설정은 Supabase에 직접 메일 서버(SMTP)와 재설정 메일 템플릿을 설정한 뒤 켠다.
+# 기본 메일 설정에서는 재설정 링크가 이 앱의 token_hash 처리 방식과 맞지 않아 동작하지 않는다.
+PASSWORD_RESET_ENABLED = os.environ.get("PASSWORD_RESET_ENABLED") == "true"
 
 UNSUPPORTED_ASSISTANT_MESSAGE = "죄송합니다. 현재 고소음이는 일정 관리·메모 기억 기능을 지원하지 않습니다. 법률 상담이나 사건 정리를 도와드릴게요."
 
@@ -52,6 +57,10 @@ TERMS_EFFECTIVE_DATE = "2026-09-15"
 PRIVACY_POLICY_UPCOMING_DATE = (os.environ.get("PRIVACY_POLICY_UPCOMING_DATE") or "").strip() or None
 
 EVIDENCE_UPLOAD_ENABLED = os.environ.get("EVIDENCE_UPLOAD_ENABLED") == "true"
+
+# 유료 요금제. 판매 조건이 갖춰지기 전에는 '준비 중'만 보여 준다(billing.py, docs/billing-readiness.md).
+BILLING_MODE = billing_mode(os.environ.get("BILLING_MODE"))
+BILLING_PLANS = parse_plans(os.environ.get("BILLING_PLANS_JSON"))
 
 # 고소장 초안 저장. supabase/migrations/20261006000000_case_drafts.sql을 적용한 뒤 켠다.
 # 초안 저장을 적은 개인정보처리방침(v3) 시행일이 지나야 화면에 나타난다.
@@ -1203,6 +1212,8 @@ GEMINI_MODEL = "gemini-3.5-flash-lite"
 GEMINI_TIMEOUT_MS = 90_000
 # 유료 API 비용 보호: 계정마다 1시간에 AI 호출(초안 생성·상담)을 이 횟수까지만 허용한다.
 AI_CALLS_PER_HOUR = int(os.environ.get("AI_CALLS_PER_HOUR") or 30)
+# 전체 이용자를 합친 1시간 호출 상한. 이용자가 많아져도 비용이 이 범위를 넘지 않게 한다.
+AI_CALLS_PER_HOUR_TOTAL = int(os.environ.get("AI_CALLS_PER_HOUR_TOTAL") or 300)
 
 
 class AiUsageLimitError(RuntimeError):
@@ -1227,6 +1238,12 @@ class AiUsageLimiter:
             self._calls[user_id] = recent
             return True
 
+    def refund(self, user_id: str) -> None:
+        """전체 상한에 걸려 실제로 호출하지 않은 경우 계정 사용량을 되돌린다."""
+        with self._lock:
+            if self._calls.get(user_id):
+                self._calls[user_id].pop()
+
 
 @st.cache_resource
 def get_ai_usage_limiter() -> AiUsageLimiter:
@@ -1235,9 +1252,15 @@ def get_ai_usage_limiter() -> AiUsageLimiter:
 
 def call_gemini(contents, system_instruction=None) -> str:
     session = st.session_state.get("supabase_session") or {}
-    if not get_ai_usage_limiter().allow(session.get("user_id", ""), AI_CALLS_PER_HOUR):
+    limiter = get_ai_usage_limiter()
+    if not limiter.allow(session.get("user_id", ""), AI_CALLS_PER_HOUR):
         raise AiUsageLimitError(
             f"AI 기능은 계정마다 1시간에 {AI_CALLS_PER_HOUR}번까지 쓸 수 있습니다. 잠시 후 다시 시도해 주세요."
+        )
+    if not limiter.allow("__all_users__", AI_CALLS_PER_HOUR_TOTAL):
+        limiter.refund(session.get("user_id", ""))
+        raise AiUsageLimitError(
+            "지금 이용자가 많아 AI 기능을 잠시 쉬고 있습니다. 10~20분 뒤에 다시 시도해 주세요. 저장한 사건은 그대로 있습니다."
         )
     client = genai.Client(
         api_key=os.environ["GEMINI_API_KEY"],
@@ -1258,6 +1281,11 @@ def call_gemini(contents, system_instruction=None) -> str:
 def ai_error_message(error: Exception, default: str) -> str:
     if isinstance(error, AiUsageLimitError):
         return str(error)
+    text = f"{type(error).__name__} {error}".lower()
+    if "timeout" in text or "timed out" in text:
+        return "AI 응답이 90초 넘게 걸려 멈췄습니다. 잠시 후 다시 시도해 주세요. 입력한 내용과 저장한 사건은 그대로 있습니다."
+    if "429" in text or "resource_exhausted" in text or "quota" in text:
+        return "AI 서비스 사용량이 잠시 몰렸습니다. 몇 분 뒤에 다시 시도해 주세요." + contact_hint()
     return default + contact_hint()
 
 
@@ -1767,13 +1795,12 @@ def render_upcoming_privacy_notice() -> None:
     if current and current >= upcoming:
         return
     with st.expander(f"📢 개인정보처리방침이 {upcoming.isoformat()}부터 바뀝니다 (눌러서 보기)"):
+        rows = "\n".join(f"| {section} | {before} | {after} |" for section, before, after in CHANGES_V2_TO_V3)
         st.markdown(
-            "**주요 변경 내용**\n"
-            "- 고소장 초안 저장 기능 추가에 따라 저장하는 초안 내용과 저장 일시를 처리 항목에 추가\n"
-            "- 동의·만 14세 확인 기록, 로그인·인증 기록, 브라우저 저장소 사용을 구체적으로 안내\n"
-            "- 개인정보 파기 절차·방법, 처리 위탁(서비스 호스팅 포함), 국외 이전 정보(받는 자 연락처·국가·시기·거부 방법) 보완\n\n"
+            "**변경 전·후 비교**\n\n| 항목 | 변경 전 | 변경 후 |\n|---|---|---|\n" + rows + "\n\n"
             "시행일 이후 처음 이용하실 때 바뀐 방침에 다시 동의해 주셔야 합니다. 동의하지 않으시면 회원탈퇴할 수 있습니다."
         )
+        st.markdown("**바뀐 개인정보처리방침 전문**")
         st.markdown(build_privacy_policy_v3(PRIVACY_OPERATOR_NAME, PRIVACY_CONTACT_EMAIL, upcoming.isoformat()))
 
 
@@ -2513,6 +2540,15 @@ with st.expander("계정 및 개인정보 메뉴"):
     if PRIVACY_CONTACT_EMAIL:
         st.markdown(f"**문의:** {md_escape(PRIVACY_CONTACT_EMAIL)} (서비스 이용·개인정보 관련)")
 
+    st.markdown("**요금제**")
+    if sales_open(BILLING_MODE, BILLING_PLANS):
+        st.caption("결제 기능을 준비하고 있습니다.")
+    else:
+        st.caption("유료 요금제는 준비 중입니다. 지금은 모든 기능을 무료로 이용할 수 있으며, 결제를 요청하지 않습니다.")
+        if BILLING_MODE == "test" and BILLING_PLANS:
+            for plan in BILLING_PLANS:
+                st.caption("🧪 " + plan_summary(plan, BILLING_MODE))
+
     if st.button("개인정보처리방침 보기", key="privacy_policy_view_btn_main"):
         render_privacy_policy_dialog()
 
@@ -2738,8 +2774,8 @@ with tab_case:
                                 draft_text = generate_case_draft(case_entry)
                         except Exception as error:
                             st.session_state.pending_draft_entry = case_entry
-                            st.session_state.pending_draft_reason = (
-                                str(error) if isinstance(error, AiUsageLimitError) else None
+                            st.session_state.pending_draft_reason = ai_error_message(
+                                error, "초안을 만드는 중 문제가 생겼습니다."
                             )
                         else:
                             show_new_draft(case_entry, draft_text)

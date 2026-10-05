@@ -48,7 +48,19 @@ class PrivacyPolicyV3Test(unittest.TestCase):
 
     def test_states_backup_and_log_retention_found_in_dashboard(self):
         self.assertIn("프로젝트 백업 기능이 없어", self.text)
-        self.assertIn("로그 보관 기간(1일)", self.text)
+        # 운영자가 조회할 수 있는 기간과 Supabase 내부 보관 기간을 구분한다
+        self.assertIn("조회할 수 있는 기간은 현재 요금제 기준 1일", self.text)
+        self.assertIn("Supabase 공개 자료에서 확인되지 않아", self.text)
+
+    def test_states_legal_basis_storage_location_and_subprocessor_link(self):
+        self.assertIn("제28조의8 제1항 제3호", self.text)
+        self.assertIn("대한민국 서울", self.text)
+        self.assertIn("subprocessor-list", self.text)
+
+    def test_change_comparison_covers_each_changed_section(self):
+        self.assertGreaterEqual(len(p.CHANGES_V2_TO_V3), 6)
+        for section, before, after in p.CHANGES_V2_TO_V3:
+            self.assertTrue(section and before and after)
 
     def test_does_not_guess_google_countries(self):
         self.assertIn("구체적인 국가를 공개하지 않습니다", self.text)
