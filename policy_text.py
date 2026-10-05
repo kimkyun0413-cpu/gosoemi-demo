@@ -77,6 +77,8 @@ def build_privacy_policy_v2(operator: str, email: str, effective_date: str) -> s
 #   개인정보처리방침(Supabase Pte. Ltd., privacy@supabase.com)
 # - Gemini API 추가 약관(2026-04-28: 유료 서비스 입력·응답 미학습, Google 또는 대리인 시설 국가에 일시 저장·캐시),
 #   Gemini API 오남용 모니터링 안내(2026-06-09: 55일 보관)
+# - Supabase 대시보드(2026-10-06): Free Plan, 프로젝트 백업 미제공, auth.audit_log_entries 0행(로그는 외부 로그 저장소)
+#   Supabase 요금 안내: Free 로그 보관 1일, Auth 감사 로그 문서: IP·user agent 기록
 # - Streamlit 개인정보처리방침(Snowflake 방침 적용), Snowflake 개인정보처리방침(2026-07-01: 주 서버 미국,
 #   privacy@snowflake.com, Snowflake Inc.)
 def build_privacy_policy_v3(operator: str, email: str, effective_date: str) -> str:
@@ -99,7 +101,7 @@ def build_privacy_policy_v3(operator: str, email: str, effective_date: str) -> s
   - 초안에는 위 사건 정보와 이용자가 직접 고쳐 쓴 내용(제3자 정보 포함 가능)이 들어 있을 수 있습니다.
 - 증거자료 첨부 이용 시: 이용자가 직접 선택한 사진, PDF 문서, 녹음파일 및 파일명(영문·숫자 외 문자는 저장 과정에서 제외됩니다)
 - AI 상담 이용 시: 이용자가 입력한 질문. 대화 내용은 서비스에 저장하지 않으며, 새로고침하거나 로그아웃하면 화면에서 사라집니다.
-- 서비스 이용 과정에서 자동으로 생성되는 정보: 로그인·인증 기록(접속 IP 주소, 일시 등). 회원 인증을 처리하는 Supabase Auth에 기록됩니다.
+- 서비스 이용 과정에서 자동으로 생성되는 정보: 로그인·인증 기록(접속 IP 주소, 브라우저 정보, 일시 등). 회원 인증을 처리하는 Supabase의 로그 저장소에 기록됩니다.
 
 **2. 개인정보의 처리 목적**
 - 회원가입, 로그인, 본인 확인, 계정 관리, 만 14세 이상 이용 제한 확인, 동의 내역 관리
@@ -110,11 +112,12 @@ def build_privacy_policy_v3(operator: str, email: str, effective_date: str) -> s
 **3. 개인정보의 처리 및 보유 기간**
 - 회원 정보, 동의 및 연령 확인 기록: 회원탈퇴 시까지 보유하며, 탈퇴 처리 시 삭제합니다.
 - 사건 정보, 고소장 초안, 첨부한 증거자료: 이용자가 직접 삭제하거나 회원탈퇴할 때까지 보유합니다. 사건을 삭제하면 그 사건의 초안과 증거자료도 함께 삭제됩니다.
-- 로그인·인증 기록: Supabase Auth의 기록 보관 기준에 따릅니다.
+- 로그인·인증 기록: Supabase 로그 저장소에 보관되며, 현재 이용 중인 요금제의 로그 보관 기간(1일)이 지나면 삭제됩니다.
 
 **4. 개인정보의 파기 절차 및 방법**
 - 이용자가 사건·초안·증거자료를 삭제하거나 회원탈퇴를 완료하면 해당 정보를 서비스 데이터베이스와 파일 저장소에서 지체 없이 삭제합니다.
 - 전자적 파일 형태의 정보는 서비스에서 다시 조회할 수 없도록 삭제하며, 종이 문서로 출력·보관하지 않습니다.
+- 현재 이용 중인 Supabase 요금제에는 프로젝트 백업 기능이 없어, 삭제한 정보를 운영자가 백업에서 복구할 수 없습니다.
 - 관련 법령에 따라 보존해야 하는 정보는 현재 없습니다.
 
 **5. 개인정보 처리의 위탁**

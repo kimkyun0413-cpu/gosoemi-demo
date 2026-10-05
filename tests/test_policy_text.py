@@ -46,6 +46,10 @@ class PrivacyPolicyV3Test(unittest.TestCase):
         ]:
             self.assertIn(phrase, self.text)
 
+    def test_states_backup_and_log_retention_found_in_dashboard(self):
+        self.assertIn("프로젝트 백업 기능이 없어", self.text)
+        self.assertIn("로그 보관 기간(1일)", self.text)
+
     def test_does_not_guess_google_countries(self):
         self.assertIn("구체적인 국가를 공개하지 않습니다", self.text)
 
