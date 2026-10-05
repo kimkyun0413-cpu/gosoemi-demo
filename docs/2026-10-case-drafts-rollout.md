@@ -2,6 +2,30 @@
 
 작성: 2026-10-06. 앱 코드는 main에 반영되어 있지만, 아래 설정을 하기 전까지 초안 저장 기능은 꺼져 있고 화면도 기존과 같습니다.
 
+## 0. 현재 결정 (2026-10-06)
+- **지금 적용하는 것:** ① 초안 테이블 마이그레이션만. 날짜와 관계없고, 앱에서 기능을 켜기 전까지 아무 동작도 바꾸지 않습니다.
+- **시행일이 확정될 때까지 미루는 것:** ② 동의 함수 변경, 방침 변경 사전 안내(`PRIVACY_POLICY_UPCOMING_DATE`), 새 방침 시행, 초안 저장 활성화.
+  - ②에는 방침 버전 날짜가 들어가므로, 확정 전에 적용하면 확정 날짜가 다를 때 한 번 더 바꿔야 합니다.
+  - 사전 안내는 이용자에게 시행일을 공개하는 것이므로, 확정되지 않은 날짜를 띄우지 않습니다.
+
+## 시행일 확정 전에 끝낼 검토
+1. 법률 검토(아래 4절): 국외 이전 처리 근거, 이전받는 자 연락처 표기, 보호책임자 연락처, 사전 안내 기간, 운영자 표시
+2. Supabase 백업 보관 기간 확인 후 파기 항목에 적을지 결정
+3. 검토 결과에 따라 [policy_text.py](../policy_text.py)의 v3 문구 수정
+4. 시행일 결정: 사전 안내를 시작하는 날 + 검토에서 정한 안내 기간 이후
+
+## 시행일이 정해지면 바꿀 곳 (모두 같은 날짜)
+| 위치 | 내용 |
+|---|---|
+| ② SQL `20261013000000_update_consent_privacy_version_v3.sql` | `'2026-10-13'` → 확정 날짜 (파일 이름도 바꾸면 좋음) |
+| `policy_text.py`의 `PRIVACY_V3_REVISED_DATE` | 확정 날짜가 2026-10-13보다 **앞이면** 확정 날짜로 바꿔야 새 문구가 적용됨. 뒤면 그대로 둬도 됨 |
+| Streamlit Secrets | 안내 시작일에 `PRIVACY_POLICY_UPCOMING_DATE`, 시행일에 `PRIVACY_POLICY_EFFECTIVE_DATE`·`DRAFT_SAVE_ENABLED` |
+
+## 운영 DB 작업 전후 확인 (읽기 전용)
+- 적용 전: [supabase/checks/preflight_case_drafts.sql](../supabase/checks/preflight_case_drafts.sql) — `ok`가 모두 true일 때만 ①을 실행
+- 적용 후: [supabase/checks/postapply_case_drafts.sql](../supabase/checks/postapply_case_drafts.sql) — `ok`가 모두 true인지 확인
+- 둘 다 구조와 개수만 조회하고 사용자 자료 내용은 읽지 않습니다. 로컬 임시 DB에서 정상 동작을 확인했습니다.
+
 ## 1. 운영 DB에 실행할 SQL (Supabase Dashboard > SQL Editor)
 
 | 순서 | 파일 | 하는 일 |
