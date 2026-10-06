@@ -20,6 +20,19 @@ from google import genai
 from google.genai import types
 from supabase import ClientOptions, create_client, Client
 from supabase_auth.errors import AuthApiError
+import importlib
+import auth_ip as _auth_ip_module
+import billing as _billing_module
+import case_guide as _case_guide_module
+import policy_text as _policy_text_module
+import voice_input as _voice_input_module
+
+# Streamlit Cloud는 git push 뒤 app.py만 새로 실행하고, 이미 불러온 보조 모듈(case_guide, voice_input 등)은
+# 예전 버전을 메모리에 그대로 둘 수 있다. 그러면 새로 추가한 이름을 못 찾아 ImportError로 앱이 멈춘다
+# (2026-10-06 실제 발생). 의존 순서대로 다시 불러와 항상 배포된 파일과 같은 내용을 쓰게 한다.
+for _module in (_case_guide_module, _policy_text_module, _billing_module, _auth_ip_module, _voice_input_module):
+    importlib.reload(_module)
+
 from voice_input import (
     NEEDS_CHECK, TEST_PHRASE_KEYWORDS, VOICE_UPLOAD_TYPES, test_phrase_check, audio_mime_type, clean_transcript, extraction_prompt,
     is_empty_transcript, merge_rows, parse_extraction, transcription_prompt, validate_audio,
