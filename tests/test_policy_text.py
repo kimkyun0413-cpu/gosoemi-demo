@@ -67,6 +67,9 @@ class PrivacyPolicyV3Test(unittest.TestCase):
         self.assertIn("음성은 서비스에 저장하지 않습니다", self.text)
         self.assertIn("음성 입력의 음성과 바뀐 글", self.text)
         self.assertIn("입력(음성 포함)", self.text)
+        # 서비스에서의 삭제와 Google 측 보관을 구분한다
+        self.assertIn("글로 바꾸고 나면 바로 지웁니다", self.text)
+        self.assertIn("서비스가 지울 수 없습니다", self.text)
 
     def test_does_not_guess_google_countries(self):
         self.assertIn("구체적인 국가를 공개하지 않습니다", self.text)

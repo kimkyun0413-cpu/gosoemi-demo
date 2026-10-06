@@ -15,6 +15,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 import streamlit as st
+from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
 from google import genai
 from google.genai import types
 from supabase import create_client, Client
@@ -2041,11 +2042,37 @@ def voice_widget_suffix() -> int:
     return st.session_state.setdefault("voice_widget_n", 0)
 
 
+def purge_uploaded_audio(uploaded) -> bool:
+    """서버 메모리의 업로드 저장소에서 음성파일을 지운다.
+
+    녹음·업로드한 음성은 Streamlit 업로드 저장소(서버 메모리)에 세션이 끝날 때까지 남는다.
+    위젯 상태만 지워서는 이 저장소가 비지 않으므로, 파일 ID로 직접 지운다.
+    (Streamlit 1.61의 ScriptRunContext.uploaded_file_mgr를 쓴다. 버전을 올리면 tests의 확인을 다시 돌린다.)
+    """
+    file_id = getattr(uploaded, "file_id", None)
+    ctx = get_script_run_ctx()
+    if not file_id or ctx is None or ctx.uploaded_file_mgr is None:
+        return False
+    try:
+        ctx.uploaded_file_mgr.remove_file(session_id=ctx.session_id, file_id=file_id)
+    except Exception as error:
+        print(f"[voice] stage=purge result={type(error).__name__}", flush=True)
+        return False
+    return True
+
+
 def discard_voice_audio() -> None:
-    """녹음·업로드 위젯 상태를 버린다. 위젯 키를 바꾸면 이전 음성 데이터도 세션에서 사라진다."""
+    """녹음·업로드 위젯과 서버 업로드 저장소에서 음성을 지운다. 위젯 키를 바꿔 화면의 녹음도 비운다."""
     n = voice_widget_suffix()
-    st.session_state.pop(f"voice_record_{n}", None)
-    st.session_state.pop(f"voice_upload_{n}", None)
+    for key in (f"voice_record_{n}", f"voice_upload_{n}"):
+        uploaded = st.session_state.get(key)
+        if uploaded is not None:
+            purge_uploaded_audio(uploaded)
+            try:
+                uploaded.close()
+            except Exception:
+                pass
+        st.session_state.pop(key, None)
     st.session_state.voice_widget_n = n + 1
 
 
@@ -2089,7 +2116,8 @@ def render_voice_input() -> None:
     with st.expander("🎤 말로 설명하고 입력칸 채우기 (선택)"):
         st.caption(
             "말로 피해 내용을 설명하면 글로 바꾸고, 확인을 거쳐 아래 입력칸에 나눠 넣어 드립니다. "
-            "음성은 글로 바꾸는 데만 쓰고 저장하지 않으며, Google Gemini로 전송되어 처리됩니다."
+            "음성은 글로 바꾸는 데만 쓰고 이 서비스에 저장하지 않습니다. 글로 바꾸려면 Google Gemini로 전송되며, "
+            "Google은 오남용 방지를 위해 AI 입력 기록을 일정 기간 보관할 수 있습니다."
         )
         notice = st.session_state.pop("voice_notice", None)
         if notice:
@@ -2111,6 +2139,11 @@ def render_voice_input() -> None:
             )
 
         audio = recorded or uploaded
+        if audio is not None:
+            st.button(
+                "녹음·파일 지우기", key="voice_discard_btn", on_click=discard_voice_audio,
+                help="글로 바꾸지 않고 서버 메모리에서 바로 지웁니다.",
+            )
         if st.button("글로 바꾸기", key="voice_transcribe_btn", type="primary", disabled=audio is None):
             name = getattr(audio, "name", "") or "recording.wav"
             mime = audio_mime_type(name, getattr(audio, "type", "") or "audio/wav")
@@ -2126,6 +2159,7 @@ def render_voice_input() -> None:
                         ])
                 except Exception as error:
                     st.error(ai_error_message(error, "음성을 글로 바꾸지 못했습니다. 조용한 곳에서 다시 녹음하거나 잠시 후 시도해 주세요."))
+                    st.caption("다시 시도할 수 있도록 음성을 잠시 남겨 두었습니다. 그만두려면 '녹음·파일 지우기'를 눌러 주세요. 탭을 닫아도 지워집니다.")
                 else:
                     text = clean_transcript(text)
                     # 여기서 st.rerun()을 하지 않는다. 아래 사건 입력칸이 그려지기 전에 다시 실행하면
@@ -2136,7 +2170,7 @@ def render_voice_input() -> None:
                     else:
                         st.session_state.voice_transcript_editor = text
                         st.session_state.voice_proposal = None
-                        st.success("글로 바꿨습니다. 원본 음성은 지웠습니다. 아래 글을 확인하고 고쳐 주세요.")
+                        st.success("글로 바꿨습니다. 이 서비스에 있던 원본 음성은 지웠습니다. 아래 글을 확인하고 고쳐 주세요.")
 
         error = st.session_state.pop("voice_error", None)
         if error:
@@ -2147,7 +2181,10 @@ def render_voice_input() -> None:
                 "바뀐 글 (말한 내용과 다르면 직접 고쳐 주세요)", key="voice_transcript_editor", height=180,
                 max_chars=8000,
             )
-            st.caption("[잘 안 들림]으로 표시된 부분은 직접 고쳐 주세요. 원본 음성은 이미 지웠습니다.")
+            st.caption(
+                "[잘 안 들림]으로 표시된 부분은 직접 고쳐 주세요. 이 서비스에 있던 원본 음성은 지웠습니다. "
+                "다만 Google이 오남용 방지를 위해 AI 입력 기록을 일정 기간 보관할 수 있습니다(개인정보처리방침 참고)."
+            )
             if st.button("입력칸으로 정리하기", key="voice_extract_btn"):
                 try:
                     with st.spinner("말한 내용을 입력칸별로 나누고 있습니다."):
