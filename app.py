@@ -19,6 +19,10 @@ from google import genai
 from google.genai import types
 from supabase import create_client, Client
 from supabase_auth.errors import AuthApiError
+from voice_input import (
+    NEEDS_CHECK, VOICE_UPLOAD_TYPES, audio_mime_type, clean_transcript, extraction_prompt,
+    is_empty_transcript, merge_rows, parse_extraction, transcription_prompt, validate_audio,
+)
 from billing import billing_mode, parse_plans, plan_summary, sales_open
 from policy_text import (
     CHANGES_V2_TO_V3, PRIVACY_V3_REVISED_DATE, build_privacy_policy_v2, build_privacy_policy_v3,
@@ -39,7 +43,7 @@ CASES_TABLE = "cases"
 # 사건 작성·초안·증거 화면의 위젯 상태 키 접두어. 계정이 바뀌면 모두 지운다.
 CASE_UI_STATE_PREFIXES = (
     "case_field_", "case_type_", "case_draft_editor", "case_data_consent",
-    "list_draft_", "evidence_", "confirm_delete_",
+    "list_draft_", "evidence_", "confirm_delete_", "voice_",
 )
 
 # 비밀번호 재설정은 Supabase에 직접 메일 서버(SMTP)와 재설정 메일 템플릿을 설정한 뒤 켠다.
@@ -65,6 +69,8 @@ BILLING_PLANS = parse_plans(os.environ.get("BILLING_PLANS_JSON"))
 # 고소장 초안 저장. supabase/migrations/20261006000000_case_drafts.sql을 적용한 뒤 켠다.
 # 초안 저장을 적은 개인정보처리방침(v3) 시행일이 지나야 화면에 나타난다.
 DRAFT_SAVE_ENABLED = os.environ.get("DRAFT_SAVE_ENABLED") == "true"
+# 음성 입력. 음성을 Gemini로 보내므로 이를 적은 개인정보처리방침(v3) 시행 후에만 나타난다.
+VOICE_INPUT_ENABLED = os.environ.get("VOICE_INPUT_ENABLED") == "true"
 CASE_DRAFTS_TABLE = "case_drafts"
 CASE_DRAFT_MAX_CHARS = 20000
 EVIDENCE_BUCKET = "case-evidence"
@@ -1132,15 +1138,22 @@ def delete_case(case_id):
     client.table(CASES_TABLE).delete().eq("case_id", case_id).eq("user_id", session["user_id"]).execute()
 
 
-def draft_save_available() -> bool:
+def privacy_v3_in_effect() -> bool:
     effective_date = parse_privacy_effective_date()
     return bool(
-        DRAFT_SAVE_ENABLED
-        and privacy_config_ready()
+        privacy_config_ready()
         and effective_date
         and effective_date >= PRIVACY_V3_REVISED_DATE
         and today_kst() >= effective_date
     )
+
+
+def draft_save_available() -> bool:
+    return DRAFT_SAVE_ENABLED and privacy_v3_in_effect()
+
+
+def voice_input_available() -> bool:
+    return VOICE_INPUT_ENABLED and privacy_v3_in_effect()
 
 
 def load_draft_index() -> dict:
@@ -2024,6 +2037,154 @@ def open_saved_draft(case_id: str) -> None:
     st.session_state[editor_key] = row["draft_text"]
 
 
+def voice_widget_suffix() -> int:
+    return st.session_state.setdefault("voice_widget_n", 0)
+
+
+def discard_voice_audio() -> None:
+    """녹음·업로드 위젯 상태를 버린다. 위젯 키를 바꾸면 이전 음성 데이터도 세션에서 사라진다."""
+    n = voice_widget_suffix()
+    st.session_state.pop(f"voice_record_{n}", None)
+    st.session_state.pop(f"voice_upload_{n}", None)
+    st.session_state.voice_widget_n = n + 1
+
+
+def current_case_values() -> dict:
+    values = {key: st.session_state.get(f"case_field_{key}", "") or "" for _, key in CASE_FIELDS if key != "case_type"}
+    choice = st.session_state.get("case_type_choice")
+    values["case_type"] = choice if choice in DAMAGE_TYPES else ""
+    return values
+
+
+def apply_voice_proposal() -> None:
+    proposal = st.session_state.get("voice_proposal") or {}
+    applied = 0
+    for key, value in proposal.items():
+        if not st.session_state.get(f"voice_pick_{key}"):
+            continue
+        if key == "case_type":
+            st.session_state.case_type_choice = value
+        else:
+            st.session_state[f"case_field_{key}"] = value
+        applied += 1
+    for key in list(st.session_state.keys()):
+        if key.startswith("voice_pick_"):
+            del st.session_state[key]
+    st.session_state.voice_proposal = None
+    st.session_state.voice_notice = (
+        f"{applied}개 항목을 입력칸에 넣었습니다. 아래 입력칸에서 내용을 확인하고 고쳐 주세요. "
+        f"'{NEEDS_CHECK}' 표시는 다시 확인이 필요한 부분입니다."
+        if applied else "선택한 항목이 없어 입력칸을 바꾸지 않았습니다."
+    )
+
+
+def cancel_voice_proposal() -> None:
+    st.session_state.voice_proposal = None
+    for key in list(st.session_state.keys()):
+        if key.startswith("voice_pick_"):
+            del st.session_state[key]
+
+
+def render_voice_input() -> None:
+    with st.expander("🎤 말로 설명하고 입력칸 채우기 (선택)"):
+        st.caption(
+            "말로 피해 내용을 설명하면 글로 바꾸고, 확인을 거쳐 아래 입력칸에 나눠 넣어 드립니다. "
+            "음성은 글로 바꾸는 데만 쓰고 저장하지 않으며, Google Gemini로 전송되어 처리됩니다."
+        )
+        notice = st.session_state.pop("voice_notice", None)
+        if notice:
+            st.success(notice)
+
+        n = voice_widget_suffix()
+        record_tab, upload_tab = st.tabs(["녹음하기", "음성파일 올리기"])
+        with record_tab:
+            recorded = st.audio_input("마이크 버튼을 누르고 말한 뒤 다시 눌러 멈추세요", key=f"voice_record_{n}")
+            st.caption(
+                "언제·어디서·누가·무엇을 했는지, 피해 금액, 가지고 있는 자료를 차례로 말해 주세요. 5분 안쪽을 권장합니다. "
+                "마이크 권한을 거부했다면 브라우저 주소창의 자물쇠(또는 설정)에서 마이크를 허용하거나, "
+                "휴대폰 녹음 앱으로 녹음한 뒤 '음성파일 올리기'를 이용해 주세요."
+            )
+        with upload_tab:
+            uploaded = st.file_uploader(
+                "음성파일 고르기 (10MB까지)", type=VOICE_UPLOAD_TYPES, key=f"voice_upload_{n}",
+                help="WAV, MP3, M4A, AAC, OGG, OPUS, FLAC, WEBM 파일을 올릴 수 있습니다.",
+            )
+
+        audio = recorded or uploaded
+        if st.button("글로 바꾸기", key="voice_transcribe_btn", type="primary", disabled=audio is None):
+            name = getattr(audio, "name", "") or "recording.wav"
+            mime = audio_mime_type(name, getattr(audio, "type", "") or "audio/wav")
+            problem = validate_audio(name, getattr(audio, "size", 0) or 0, getattr(audio, "type", "") or "audio/wav")
+            if problem:
+                st.error(problem)
+            else:
+                try:
+                    with st.spinner("음성을 글로 바꾸고 있습니다. 길이에 따라 30초 정도 걸릴 수 있습니다."):
+                        text = call_gemini([
+                            types.Part.from_text(text=transcription_prompt()),
+                            types.Part.from_bytes(data=audio.getvalue(), mime_type=mime or "audio/wav"),
+                        ])
+                except Exception as error:
+                    st.error(ai_error_message(error, "음성을 글로 바꾸지 못했습니다. 조용한 곳에서 다시 녹음하거나 잠시 후 시도해 주세요."))
+                else:
+                    text = clean_transcript(text)
+                    # 여기서 st.rerun()을 하지 않는다. 아래 사건 입력칸이 그려지기 전에 다시 실행하면
+                    # Streamlit이 그 입력칸에 적어 둔 내용을 지워 버린다.
+                    discard_voice_audio()
+                    if is_empty_transcript(text):
+                        st.session_state.voice_error = "말소리를 찾지 못했습니다. 마이크 가까이에서 다시 녹음해 주세요."
+                    else:
+                        st.session_state.voice_transcript_editor = text
+                        st.session_state.voice_proposal = None
+                        st.success("글로 바꿨습니다. 원본 음성은 지웠습니다. 아래 글을 확인하고 고쳐 주세요.")
+
+        error = st.session_state.pop("voice_error", None)
+        if error:
+            st.error(error)
+
+        if st.session_state.get("voice_transcript_editor"):
+            transcript = st.text_area(
+                "바뀐 글 (말한 내용과 다르면 직접 고쳐 주세요)", key="voice_transcript_editor", height=180,
+                max_chars=8000,
+            )
+            st.caption("[잘 안 들림]으로 표시된 부분은 직접 고쳐 주세요. 원본 음성은 이미 지웠습니다.")
+            if st.button("입력칸으로 정리하기", key="voice_extract_btn"):
+                try:
+                    with st.spinner("말한 내용을 입력칸별로 나누고 있습니다."):
+                        raw = call_gemini([{"role": "user", "parts": [{"text": extraction_prompt(transcript, list(DAMAGE_TYPES))}]}])
+                        proposal = parse_extraction(raw, transcript, list(DAMAGE_TYPES))
+                except ValueError:
+                    st.error("정리 결과를 읽지 못했습니다. '입력칸으로 정리하기'를 한 번 더 눌러 주세요.")
+                except Exception as error:
+                    st.error(ai_error_message(error, "입력칸으로 정리하지 못했습니다. 잠시 후 다시 시도해 주세요."))
+                else:
+                    if not proposal:
+                        st.warning("글에서 입력칸에 넣을 내용을 찾지 못했습니다. 글을 고치거나 입력칸에 직접 적어 주세요.")
+                    st.session_state.voice_proposal = proposal or None
+
+        proposal = st.session_state.get("voice_proposal")
+        if proposal:
+            rows = merge_rows(current_case_values(), proposal)
+            st.markdown("**입력칸에 넣을 내용 확인** — 넣을 항목만 체크해 주세요.")
+            overwrites = 0
+            for key, label, now, new, action in rows:
+                default = action == "fill"
+                caption = {"fill": "빈 칸에 넣습니다", "same": "지금 내용과 같습니다", "overwrite": "⚠️ 이미 적은 내용을 바꿉니다"}[action]
+                overwrites += action == "overwrite"
+                st.checkbox(f"{label}: {new}", value=default, key=f"voice_pick_{key}", disabled=action == "same")
+                if action == "overwrite":
+                    st.caption(f"{caption} — 지금 내용: {now[:120]}")
+                else:
+                    st.caption(caption)
+            if overwrites:
+                st.warning(f"이미 적은 내용이 있는 항목 {overwrites}개는 기본으로 체크하지 않았습니다. 바꾸려면 직접 체크해 주세요.")
+            col_apply, col_cancel = st.columns(2)
+            with col_apply:
+                st.button("선택한 항목을 입력칸에 넣기", key="voice_apply_btn", type="primary", on_click=apply_voice_proposal)
+            with col_cancel:
+                st.button("넣지 않기", key="voice_cancel_btn", on_click=cancel_voice_proposal)
+
+
 def render_signup_guide():
     st.markdown(
         "**가입 절차**\n\n"
@@ -2625,6 +2786,8 @@ with tab_case:
                 st.session_state.pending_draft_entry = None
                 st.rerun()
     else:
+        if voice_input_available():
+            render_voice_input()
         type_options = list(DAMAGE_TYPES) + [OTHER_TYPE]
         case_type_choice = st.selectbox(
             "① 어떤 피해를 입으셨나요?",
@@ -2648,7 +2811,9 @@ with tab_case:
             st.info("먼저 피해 유형을 골라 주세요. 유형에 맞는 작성 예시가 아래 입력칸에 나타납니다.")
 
         guide_type = case_type_choice or ""
-        with st.form("case_form"):
+        # 폼(st.form)을 쓰지 않는다: 폼 안에 적은 글은 제출 전까지 앱이 볼 수 없어,
+        # 음성 입력이 기존 내용을 덮어쓰는지 확인할 수 없기 때문이다. 각 칸은 칸을 벗어날 때 저장된다.
+        with st.container(border=True):
             st.markdown("**② 아는 내용을 적어 주세요** (* 표시는 꼭 적어야 하는 칸, 나머지는 모르면 비워 두셔도 됩니다)")
             field_values = {}
             for _, key in CASE_FIELDS:
@@ -2671,7 +2836,7 @@ with tab_case:
                 "[필수] 위 안내를 확인했으며 사건 정보 저장·전송에 동의합니다.",
                 key="case_data_consent",
             )
-            submitted = st.form_submit_button("③ 입력 내용 확인하기", type="primary")
+            submitted = st.button("③ 입력 내용 확인하기", type="primary", key="case_form_submit")
 
         if submitted:
             field_values["case_type"] = (

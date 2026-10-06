@@ -62,6 +62,12 @@ class PrivacyPolicyV3Test(unittest.TestCase):
         for section, before, after in p.CHANGES_V2_TO_V3:
             self.assertTrue(section and before and after)
 
+    def test_voice_input_is_disclosed(self):
+        self.assertIn("음성 입력 이용 시", self.text)
+        self.assertIn("음성은 서비스에 저장하지 않습니다", self.text)
+        self.assertIn("음성 입력의 음성과 바뀐 글", self.text)
+        self.assertIn("입력(음성 포함)", self.text)
+
     def test_does_not_guess_google_countries(self):
         self.assertIn("구체적인 국가를 공개하지 않습니다", self.text)
 
