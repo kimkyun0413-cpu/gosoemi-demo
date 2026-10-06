@@ -18,12 +18,13 @@ import streamlit as st
 from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
 from google import genai
 from google.genai import types
-from supabase import create_client, Client
+from supabase import ClientOptions, create_client, Client
 from supabase_auth.errors import AuthApiError
 from voice_input import (
     NEEDS_CHECK, VOICE_UPLOAD_TYPES, audio_mime_type, clean_transcript, extraction_prompt,
     is_empty_transcript, merge_rows, parse_extraction, transcription_prompt, validate_audio,
 )
+from auth_ip import auth_request_settings, client_ip_from
 from billing import billing_mode, parse_plans, plan_summary, sales_open
 from policy_text import (
     CHANGES_V2_TO_V3, PRIVACY_V3_REVISED_DATE, build_privacy_policy_v2, build_privacy_policy_v3,
@@ -50,6 +51,8 @@ CASE_UI_STATE_PREFIXES = (
 # 비밀번호 재설정은 Supabase에 직접 메일 서버(SMTP)와 재설정 메일 템플릿을 설정한 뒤 켠다.
 # 기본 메일 설정에서는 재설정 링크가 이 앱의 token_hash 처리 방식과 맞지 않아 동작하지 않는다.
 PASSWORD_RESET_ENABLED = os.environ.get("PASSWORD_RESET_ENABLED") == "true"
+# 이용자 IP를 Supabase Auth에 전달해 IP별 제한을 이용자마다 따로 적용(auth_ip.py). 기본은 꺼짐.
+AUTH_IP_FORWARDING_ENABLED = os.environ.get("AUTH_IP_FORWARDING_ENABLED") == "true"
 
 UNSUPPORTED_ASSISTANT_MESSAGE = "죄송합니다. 현재 고소음이는 일정 관리·메모 기억 기능을 지원하지 않습니다. 법률 상담이나 사건 정리를 도와드릴게요."
 
@@ -72,6 +75,11 @@ BILLING_PLANS = parse_plans(os.environ.get("BILLING_PLANS_JSON"))
 DRAFT_SAVE_ENABLED = os.environ.get("DRAFT_SAVE_ENABLED") == "true"
 # 음성 입력. 음성을 Gemini로 보내므로 이를 적은 개인정보처리방침(v3) 시행 후에만 나타난다.
 VOICE_INPUT_ENABLED = os.environ.get("VOICE_INPUT_ENABLED") == "true"
+# 관리자(운영자) 이메일 목록. 공개 기능을 켜지 않고 음성 입력 시험, 운영 진단을 이 계정에만 보여 준다.
+# 운영 AI 키는 서버(Streamlit Secrets)에만 있고 화면·로그에 나오지 않는다. 개인정보 없는 시험 음성만 쓴다.
+ADMIN_EMAILS = {
+    e.strip().lower() for e in (os.environ.get("ADMIN_EMAILS") or "").split(",") if e.strip()
+}
 CASE_DRAFTS_TABLE = "case_drafts"
 CASE_DRAFT_MAX_CHARS = 20000
 EVIDENCE_BUCKET = "case-evidence"
@@ -150,6 +158,32 @@ def get_supabase_anon_client() -> Client:
     if not supabase_url or not supabase_key:
         raise RuntimeError("SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY 환경변수가 설정되지 않았습니다.")
     return create_client(supabase_url, supabase_key)
+
+
+def get_auth_client() -> Client:
+    """로그인·가입·토큰 갱신·인증 확인 요청 전용 클라이언트. DB·파일 요청에는 쓰지 않는다.
+
+    AUTH_IP_FORWARDING_ENABLED와 SUPABASE_SECRET_KEY가 있고 이용자의 공인 IP를 알 수 있으면,
+    secret 키와 Sb-Forwarded-For 헤더로 요청해 Supabase의 IP별 제한이 이용자마다 따로 적용되게 한다.
+    (Supabase 대시보드 Authentication > Rate Limits > IP Address Forwarding도 켜야 한다.)
+    조건이 하나라도 없으면 지금처럼 publishable 키로 요청한다.
+    """
+    supabase_url = os.environ.get("SUPABASE_URL")
+    publishable_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY")
+    if not supabase_url or not publishable_key:
+        raise RuntimeError("SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY 환경변수가 설정되지 않았습니다.")
+    user_ip = None
+    if AUTH_IP_FORWARDING_ENABLED:
+        try:
+            user_ip = client_ip_from(st.context.headers.get("X-Forwarded-For"), st.context.ip_address)
+        except Exception:
+            user_ip = None
+    key, headers = auth_request_settings(
+        AUTH_IP_FORWARDING_ENABLED, publishable_key, os.environ.get("SUPABASE_SECRET_KEY", ""), user_ip
+    )
+    if not headers:
+        return create_client(supabase_url, publishable_key)
+    return create_client(supabase_url, key, options=ClientOptions(headers=headers))
 
 
 def get_authed_client() -> Client:
@@ -350,7 +384,7 @@ def restore_browser_session() -> None:
         result = _browser_session_component(
             key="browser_login_clear_component", data={"action": "clear"}
         )
-        if result.stored == "cleared":
+        if getattr(result, "stored", None) == "cleared":
             st.session_state.browser_login_clear = False
             st.rerun()
         st.info("로그아웃하고 있습니다. 잠시만 기다려 주세요.")
@@ -388,14 +422,14 @@ def restore_browser_session() -> None:
     result = _browser_session_component(
         key="browser_login_restore_component", data={"action": "restore"}
     )
-    token = result.stored
+    token = getattr(result, "stored", None)
     if token is None:
         st.info("로그인 상태를 확인하고 있습니다. 잠시만 기다려 주세요.")
         st.stop()
     st.session_state.browser_login_checked = True
     if token not in ("empty", "cleared"):
         try:
-            response = get_supabase_anon_client().auth.refresh_session(token)
+            response = get_auth_client().auth.refresh_session(token)
             if response.session and response.user:
                 st.session_state.supabase_session = session_from_auth_response(response)
                 st.rerun()
@@ -533,7 +567,7 @@ def ensure_active_session():
     if expires_at and time.time() < expires_at - 60:
         return session
     try:
-        client = get_supabase_anon_client()
+        client = get_auth_client()
         refreshed = client.auth.refresh_session(session["refresh_token"])
         if not getattr(refreshed, "session", None) or not getattr(refreshed, "user", None):
             raise RuntimeError("empty refresh response")
@@ -563,7 +597,7 @@ def handle_auth_query_params() -> None:
     st.query_params.clear()
 
     try:
-        auth_client = get_supabase_anon_client()
+        auth_client = get_auth_client()
         response = auth_client.auth.verify_otp({"token_hash": token_hash, "type": type_})
         if not getattr(response, "session", None) or not getattr(response, "user", None):
             raise RuntimeError("empty verify_otp response")
@@ -699,7 +733,7 @@ def handle_naver_query_params() -> None:
         st.rerun()
 
     try:
-        auth_client = get_supabase_anon_client()
+        auth_client = get_auth_client()
         response = auth_client.auth.verify_otp({"token_hash": naver_token_hash, "type": "magiclink"})
         if not getattr(response, "session", None) or not getattr(response, "user", None):
             raise RuntimeError("empty verify_otp response")
@@ -849,7 +883,7 @@ def handle_google_query_params() -> None:
         st.rerun()
 
     try:
-        auth_client = get_supabase_anon_client()
+        auth_client = get_auth_client()
         response = auth_client.auth.exchange_code_for_session(
             {"auth_code": auth_code, "code_verifier": code_verifier}
         )
@@ -1006,17 +1040,32 @@ def evidence_display_name(object_name: str) -> str:
     return object_name
 
 
+def get_user_data_client(session: dict) -> Client:
+    """로그인 사용자 권한으로 DB·파일 저장소를 쓰는 클라이언트. Supabase Auth에 요청을 보내지 않는다.
+
+    auth.set_session()은 만들 때마다 Auth의 /user를 호출한다. 모든 요청이 앱 서버 IP 하나에서
+    나가므로 사건마다 이 호출이 쌓이지 않도록, 토큰을 Authorization 헤더로 직접 넣는다.
+    권한 판단은 Supabase(RLS·Storage 정책)가 이 토큰으로 한다.
+    """
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY")
+    if not supabase_url or not supabase_key:
+        raise RuntimeError("SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY 환경변수가 설정되지 않았습니다.")
+    return create_client(
+        supabase_url,
+        supabase_key,
+        options=ClientOptions(headers={"Authorization": f"Bearer {session['access_token']}"}),
+    )
+
+
 def get_storage_authed_client() -> Client:
     session = ensure_active_session()
     if not session or not session.get("user_id"):
         raise RuntimeError("로그인이 필요합니다.")
-    client = get_session_authed_client(session)
-    auth_session = client.auth.get_session()
-    if not auth_session or not auth_session.user or auth_session.user.id != session["user_id"]:
+    # 화면 분기용 확인: 토큰의 사용자와 이 탭의 사용자가 같은지 서명 검증 없이 대조한다.
+    if decode_access_token_claims(session).get("sub") != session["user_id"]:
         raise RuntimeError("세션 사용자 정보가 일치하지 않습니다.")
-    if auth_session.access_token != session["access_token"]:
-        st.session_state.supabase_session = session_to_dict(auth_session, session)
-    return client
+    return get_user_data_client(session)
 
 
 def safe_error_message(error: Exception) -> str:
@@ -1098,9 +1147,9 @@ def upload_case_evidence(case_id: str, uploaded_file) -> None:
     if len(existing) >= EVIDENCE_MAX_FILES_PER_CASE:
         raise ValueError("사건 하나에는 파일을 20개까지 첨부할 수 있습니다. 필요 없는 파일을 지운 뒤 다시 시도해 주세요.")
     client = get_storage_authed_client()
-    auth_user = client.auth.get_session().user
+    user_id = st.session_state.supabase_session["user_id"]
     safe_name = safe_evidence_filename(uploaded_file.name)
-    object_path = f"{evidence_folder(auth_user.id, case_id)}/{uuid.uuid4().hex}_{safe_name}"
+    object_path = f"{evidence_folder(user_id, case_id)}/{uuid.uuid4().hex}_{safe_name}"
     client.storage.from_(EVIDENCE_BUCKET).upload(
         object_path,
         uploaded_file.getvalue(),
@@ -1153,8 +1202,40 @@ def draft_save_available() -> bool:
     return DRAFT_SAVE_ENABLED and privacy_v3_in_effect()
 
 
+def is_admin() -> bool:
+    session = st.session_state.get("supabase_session") or {}
+    email = (session.get("email") or "").strip().lower()
+    return bool(email and email in ADMIN_EMAILS)
+
+
+def voice_admin_test_mode() -> bool:
+    """공개 기능이 꺼져 있어도 관리자 이메일 계정이면 시험용으로 보여 준다."""
+    return is_admin()
+
+
+def render_admin_diagnostics() -> None:
+    """운영자에게만 보이는 진단. 비밀값은 보여 주지 않고 '있음/없음'만 표시한다."""
+    try:
+        forwarded = st.context.headers.get("X-Forwarded-For")
+        connection_ip = st.context.ip_address
+    except Exception:
+        forwarded, connection_ip = None, None
+    detected = client_ip_from(forwarded, connection_ip)
+    with st.expander("🛠 운영자 진단 (관리자에게만 보임)"):
+        st.markdown(
+            f"- 이용자 공인 IP 감지: **{'됨' if detected else '안 됨'}** "
+            f"(X-Forwarded-For 헤더 {'있음' if forwarded else '없음'})\n"
+            f"- 로그인 IP 전달 설정(AUTH_IP_FORWARDING_ENABLED): **{'켜짐' if AUTH_IP_FORWARDING_ENABLED else '꺼짐'}**, "
+            f"secret 키: **{'설정됨' if os.environ.get('SUPABASE_SECRET_KEY') else '없음'}**\n"
+            f"- 음성 입력 공개: **{'켜짐' if VOICE_INPUT_ENABLED and privacy_v3_in_effect() else '꺼짐'}**, "
+            f"초안 저장: **{'켜짐' if draft_save_available() else '꺼짐'}**\n"
+            f"- AI 키: **{'설정됨' if os.environ.get('GEMINI_API_KEY') else '없음'}** (값은 표시하지 않음)"
+        )
+        st.caption("IP 감지가 '안 됨'이면 Streamlit Community Cloud가 이용자 IP를 앱에 넘기지 않는 것이므로 IP 전달 기능을 켜도 효과가 없습니다.")
+
+
 def voice_input_available() -> bool:
-    return VOICE_INPUT_ENABLED and privacy_v3_in_effect()
+    return (VOICE_INPUT_ENABLED and privacy_v3_in_effect()) or voice_admin_test_mode()
 
 
 def load_draft_index() -> dict:
@@ -2113,7 +2194,14 @@ def cancel_voice_proposal() -> None:
 
 
 def render_voice_input() -> None:
-    with st.expander("🎤 말로 설명하고 입력칸 채우기 (선택)"):
+    admin_test = voice_admin_test_mode() and not (VOICE_INPUT_ENABLED and privacy_v3_in_effect())
+    title = "🎤 말로 설명하고 입력칸 채우기 (선택)" + (" · 🧪 관리자 시험 모드" if admin_test else "")
+    with st.expander(title, expanded=admin_test):
+        if admin_test:
+            st.warning(
+                "관리자 시험 모드입니다. 일반 이용자에게는 이 기능이 보이지 않습니다. "
+                "개인정보가 없는 시험 음성(예: docs/voice-test 안내의 시험 문장)만 사용해 주세요."
+            )
         st.caption(
             "말로 피해 내용을 설명하면 글로 바꾸고, 확인을 거쳐 아래 입력칸에 나눠 넣어 드립니다. "
             "음성은 글로 바꾸는 데만 쓰고 이 서비스에 저장하지 않습니다. 글로 바꾸려면 Google Gemini로 전송되며, "
@@ -2376,7 +2464,7 @@ def render_pending_email_screen(email, resend_key, on_resend, message):
 
 def render_check_email_screen(email, resend_key):
     def _resend(target_email, base_url):
-        auth_client = get_supabase_anon_client()
+        auth_client = get_auth_client()
         auth_client.auth.resend({
             "type": "signup",
             "email": target_email,
@@ -2394,7 +2482,7 @@ def render_reset_sent_screen():
     email = st.session_state.get("reset_sent_email") or ""
 
     def _resend(target_email, base_url):
-        auth_client = get_supabase_anon_client()
+        auth_client = get_auth_client()
         auth_client.auth.reset_password_for_email(target_email, {"redirect_to": base_url})
 
     render_pending_email_screen(
@@ -2416,7 +2504,7 @@ def render_forgot_password_form():
             st.error("서비스 주소 설정이 아직 끝나지 않아 메일을 보낼 수 없습니다. 잠시 후 다시 시도해 주세요." + contact_hint())
         else:
             try:
-                auth_client = get_supabase_anon_client()
+                auth_client = get_auth_client()
                 auth_client.auth.reset_password_for_email(forgot_email, {"redirect_to": base_url})
                 st.session_state.reset_sent_email = forgot_email
                 st.session_state.reset_resend_last_sent_at = None
@@ -2537,7 +2625,7 @@ if not st.session_state.supabase_session:
                 st.error("이메일과 비밀번호를 모두 입력해 주세요.")
             elif login_submitted:
                 try:
-                    auth_client = get_supabase_anon_client()
+                    auth_client = get_auth_client()
                     auth_response = auth_client.auth.sign_in_with_password(
                         {"email": login_email.strip(), "password": login_password}
                     )
@@ -2600,7 +2688,7 @@ if not st.session_state.supabase_session:
                         st.error("서비스 주소 설정이 아직 끝나지 않아 메일을 보낼 수 없습니다. 잠시 후 다시 시도해 주세요." + contact_hint())
                     else:
                         try:
-                            auth_client = get_supabase_anon_client()
+                            auth_client = get_auth_client()
                             auth_client.auth.sign_up({
                                 "email": signup_email.strip(),
                                 "password": signup_password,
@@ -2727,6 +2815,8 @@ render_brand_header()
 account_identity, account_method = current_account_label(st.session_state.supabase_session)
 st.caption(f"로그인한 계정: {account_identity} ({account_method})")
 render_upcoming_privacy_notice()
+if is_admin():
+    render_admin_diagnostics()
 
 with st.expander("계정 및 개인정보 메뉴"):
     st.markdown(f"**현재 로그인 계정:** {account_identity} ({account_method} 로그인)")
