@@ -24,12 +24,23 @@ def public_ip(value):
 
 
 def client_ip_from(forwarded_for, connection_ip):
-    """프록시가 붙인 X-Forwarded-For의 첫 공인 IP, 없으면 연결 IP(공인일 때만)."""
-    for part in (forwarded_for or "").split(","):
+    """X-Forwarded-For에서 오른쪽(가장 마지막에 프록시가 붙인 쪽)부터 첫 공인 IP, 없으면 연결 IP(공인일 때만).
+
+    왼쪽 값은 이용자가 직접 써 넣을 수 있어 믿을 수 없다. 프록시는 받은 연결의 IP를 오른쪽에 덧붙이므로,
+    우리 앞의 프록시들이 모두 사설 IP라면 오른쪽에서 처음 나오는 공인 IP가 실제 접속 IP다.
+    단, Streamlit Community Cloud 앞단 프록시 구성은 공개되어 있지 않아 이 가정이 맞는지 운영에서 확인해야 한다.
+    """
+    for part in reversed((forwarded_for or "").split(",")):
         ip = public_ip(part)
         if ip:
             return ip
     return public_ip(connection_ip)
+
+
+def forwarded_chain_summary(forwarded_for) -> dict:
+    """진단용: 헤더에 IP가 몇 개 있고 그중 공인 IP가 몇 개인지(값은 돌려주지 않는다)."""
+    parts = [p.strip() for p in (forwarded_for or "").split(",") if p.strip()]
+    return {"entries": len(parts), "public": sum(1 for p in parts if public_ip(p))}
 
 
 def auth_request_settings(enabled: bool, publishable_key: str, secret_key: str, user_ip):

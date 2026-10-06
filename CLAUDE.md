@@ -27,7 +27,7 @@ deno test supabase/proposals/billing/functions/billing-webhook/handler_test.ts
 streamlit run app.py
 ```
 
-The app reads all secrets and feature flags from environment variables (Streamlit secrets in production): `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `GEMINI_API_KEY`, `APP_BASE_URL`, `PRIVACY_*`, `EVIDENCE_UPLOAD_ENABLED`, `DRAFT_SAVE_ENABLED`, `VOICE_INPUT_ENABLED`, `NAVER_*`, `GOOGLE_*`, `AI_CALLS_PER_HOUR`, `AI_CALLS_PER_HOUR_TOTAL`, `PASSWORD_RESET_ENABLED`, `BILLING_MODE`, `BILLING_PLANS_JSON`, `ADMIN_EMAILS` (operator-only voice test mode and diagnostics), `AUTH_IP_FORWARDING_ENABLED` + `SUPABASE_SECRET_KEY` (secret key used only for Auth requests, never for data). Never hardcode keys.
+The app reads all secrets and feature flags from environment variables (Streamlit secrets in production): `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `GEMINI_API_KEY`, `APP_BASE_URL`, `PRIVACY_*`, `EVIDENCE_UPLOAD_ENABLED`, `DRAFT_SAVE_ENABLED`, `VOICE_INPUT_ENABLED`, `NAVER_*`, `GOOGLE_*`, `AI_CALLS_PER_HOUR`, `AI_CALLS_PER_HOUR_TOTAL`, `PASSWORD_RESET_ENABLED`, `BILLING_MODE`, `BILLING_PLANS_JSON`, `ADMIN_USER_IDS` (operator-only voice test mode and diagnostics; Supabase user IDs, verified server-side against the token), `AUTH_IP_FORWARDING_ENABLED` + `SUPABASE_SECRET_KEY` (secret key used only for Auth requests, never for data). Never hardcode keys.
 
 `supabase/tests/local_case_drafts_test.py` and `local_billing_test.py` check the `case_drafts` migration and RLS against a local throwaway Postgres only. It refuses to run against a Supabase host.
 

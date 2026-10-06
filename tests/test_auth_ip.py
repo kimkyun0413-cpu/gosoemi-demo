@@ -16,11 +16,16 @@ class AuthIpTest(unittest.TestCase):
         for bad in ("10.0.0.1", "192.168.0.2", "127.0.0.1", "::1", "", None, "not-an-ip", "169.254.1.1"):
             self.assertIsNone(a.public_ip(bad), bad)
 
-    def test_first_public_forwarded_ip_wins(self):
-        self.assertEqual(a.client_ip_from("10.0.0.5, 203.0.113.9, 8.8.8.8", "172.16.0.1"), "8.8.8.8")
-        self.assertEqual(a.client_ip_from("1.1.1.1, 8.8.8.8", None), "1.1.1.1")
+    def test_rightmost_public_ip_wins_so_spoofed_left_values_are_ignored(self):
+        # 이용자가 "1.1.1.1"을 직접 써 넣고, 프록시가 실제 접속 IP 8.8.8.8과 내부 사설 IP를 덧붙인 경우
+        self.assertEqual(a.client_ip_from("1.1.1.1, 8.8.8.8, 10.0.0.5", "172.16.0.1"), "8.8.8.8")
+        self.assertEqual(a.client_ip_from("1.1.1.1, 8.8.8.8", None), "8.8.8.8")
         self.assertEqual(a.client_ip_from("", "9.9.9.9"), "9.9.9.9")
         self.assertIsNone(a.client_ip_from("garbage", "10.1.1.1"))
+
+    def test_chain_summary_hides_values(self):
+        summary = a.forwarded_chain_summary("1.1.1.1, 8.8.8.8, 10.0.0.5")
+        self.assertEqual(summary, {"entries": 3, "public": 2})
 
     def test_settings_fall_back_to_publishable_key(self):
         self.assertEqual(a.auth_request_settings(False, "pub", "sec", "8.8.8.8"), ("pub", {}))

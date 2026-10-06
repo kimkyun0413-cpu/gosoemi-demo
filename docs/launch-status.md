@@ -22,7 +22,7 @@
 | 3 | 개인정보 | 시행일 확정 (안내 시작일 + 검토자가 정한 기간) | 운영자 | 1번 결과 |
 | 4 | 개인정보 | ② 동의 함수 SQL 날짜 수정·실행, 사전 안내 설정(`PRIVACY_POLICY_UPCOMING_DATE`) | Claude (Supabase·Streamlit 로그인 필요) | 3번 |
 | 5 | 초안·음성 | 시행일에 `PRIVACY_POLICY_EFFECTIVE_DATE`, `DRAFT_SAVE_ENABLED`, `VOICE_INPUT_ENABLED` 설정 | 운영자 또는 Claude(Streamlit 로그인) | 3번 |
-| 6 | 초안·음성 | 운영 앱 확인: A·B 계정으로 초안 저장 → 새로고침 → 다시 열기. 실제 음성은 시행 전에도 `ADMIN_EMAILS` 관리자 시험 모드로 확인 가능 (decisions 5절) | 운영자 | 관리자 이메일 |
+| 6 | 초안·음성 | 운영 앱 확인: A·B 계정으로 초안 저장 → 새로고침 → 다시 열기. 실제 음성은 시행 전에도 `ADMIN_USER_IDS` 관리자 시험 모드로 확인 가능 (decisions 5절) | 운영자 | 관리자 이메일 |
 | 7 | 메일 | 도메인 구입 → Resend 무료(월 3,000·일 100) 연결 추천 (decisions 1절) | 운영자(도메인 비용 판단) + Claude(설정 안내) | 도메인 구입 결정 |
 | 8 | 메일 | SMTP 연결 후 재설정 메일 템플릿 링크 변경 → `PASSWORD_RESET_ENABLED` 켜고 시험 | Claude | 7번 |
 | 9 | 인증 | 화면마다 생기던 Auth `/user` 호출 제거 완료(사건 3건 기준 3→0). 남은 것: IP 전달(코드 준비, secret 키·대시보드 설정 필요) 또는 제한값 상향 (decisions 3절) | 운영자 승인 → Claude 설정 | secret 키 추가 승인 |

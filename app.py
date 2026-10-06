@@ -24,7 +24,7 @@ from voice_input import (
     NEEDS_CHECK, VOICE_UPLOAD_TYPES, audio_mime_type, clean_transcript, extraction_prompt,
     is_empty_transcript, merge_rows, parse_extraction, transcription_prompt, validate_audio,
 )
-from auth_ip import auth_request_settings, client_ip_from
+from auth_ip import auth_request_settings, client_ip_from, forwarded_chain_summary
 from billing import billing_mode, parse_plans, plan_summary, sales_open
 from policy_text import (
     CHANGES_V2_TO_V3, PRIVACY_V3_REVISED_DATE, build_privacy_policy_v2, build_privacy_policy_v3,
@@ -75,10 +75,11 @@ BILLING_PLANS = parse_plans(os.environ.get("BILLING_PLANS_JSON"))
 DRAFT_SAVE_ENABLED = os.environ.get("DRAFT_SAVE_ENABLED") == "true"
 # 음성 입력. 음성을 Gemini로 보내므로 이를 적은 개인정보처리방침(v3) 시행 후에만 나타난다.
 VOICE_INPUT_ENABLED = os.environ.get("VOICE_INPUT_ENABLED") == "true"
-# 관리자(운영자) 이메일 목록. 공개 기능을 켜지 않고 음성 입력 시험, 운영 진단을 이 계정에만 보여 준다.
+# 관리자(운영자) 계정의 Supabase 사용자 ID 목록(쉼표로 구분). 공개 기능을 켜지 않고 음성 입력 시험과
+# 운영 진단을 이 계정에만 보여 준다. 이메일은 바뀌거나 소셜 로그인 제공자가 정할 수 있어 쓰지 않는다.
 # 운영 AI 키는 서버(Streamlit Secrets)에만 있고 화면·로그에 나오지 않는다. 개인정보 없는 시험 음성만 쓴다.
-ADMIN_EMAILS = {
-    e.strip().lower() for e in (os.environ.get("ADMIN_EMAILS") or "").split(",") if e.strip()
+ADMIN_USER_IDS = {
+    i.strip().lower() for i in (os.environ.get("ADMIN_USER_IDS") or "").split(",") if i.strip()
 }
 CASE_DRAFTS_TABLE = "case_drafts"
 CASE_DRAFT_MAX_CHARS = 20000
@@ -1202,10 +1203,38 @@ def draft_save_available() -> bool:
     return DRAFT_SAVE_ENABLED and privacy_v3_in_effect()
 
 
+def verified_user_id(session: dict):
+    """Supabase Auth에 액세스 토큰을 직접 확인해 받은 사용자 ID. 토큰마다 한 번만 확인하고 결과를 기억한다."""
+    token = session.get("access_token")
+    if not token:
+        return None
+    cache = st.session_state.get("_verified_token")
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if cache and cache.get("digest") == digest:
+        return cache.get("user_id")
+    try:
+        response = get_supabase_anon_client().auth.get_user(token)
+        user_id = str(response.user.id) if response and response.user else None
+    except Exception as error:
+        log_auth_error(error)
+        user_id = None
+    st.session_state["_verified_token"] = {"digest": digest, "user_id": user_id}
+    return user_id
+
+
 def is_admin() -> bool:
+    """관리자 판별: 목록에 있는 사용자 ID이면서, Supabase가 서버에서 그 토큰의 주인을 같은 ID로 확인해야 한다.
+
+    브라우저가 보낸 값(입력한 이메일, 쿼리 파라미터 등)은 쓰지 않는다. session_state는 서버 메모리에 있고,
+    사용자 ID와 토큰은 Supabase 로그인·갱신 응답에서만 채워진다.
+    """
+    if not ADMIN_USER_IDS:
+        return False
     session = st.session_state.get("supabase_session") or {}
-    email = (session.get("email") or "").strip().lower()
-    return bool(email and email in ADMIN_EMAILS)
+    user_id = (session.get("user_id") or "").lower()
+    if user_id not in ADMIN_USER_IDS:
+        return False
+    return (verified_user_id(session) or "").lower() == user_id
 
 
 def voice_admin_test_mode() -> bool:
@@ -1221,17 +1250,22 @@ def render_admin_diagnostics() -> None:
     except Exception:
         forwarded, connection_ip = None, None
     detected = client_ip_from(forwarded, connection_ip)
+    chain = forwarded_chain_summary(forwarded)
     with st.expander("🛠 운영자 진단 (관리자에게만 보임)"):
         st.markdown(
             f"- 이용자 공인 IP 감지: **{'됨' if detected else '안 됨'}** "
-            f"(X-Forwarded-For 헤더 {'있음' if forwarded else '없음'})\n"
+            f"(X-Forwarded-For 항목 {chain['entries']}개, 그중 공인 IP {chain['public']}개, "
+            f"연결 IP {'공인' if client_ip_from(None, connection_ip) else '사설·없음'})\n"
             f"- 로그인 IP 전달 설정(AUTH_IP_FORWARDING_ENABLED): **{'켜짐' if AUTH_IP_FORWARDING_ENABLED else '꺼짐'}**, "
             f"secret 키: **{'설정됨' if os.environ.get('SUPABASE_SECRET_KEY') else '없음'}**\n"
             f"- 음성 입력 공개: **{'켜짐' if VOICE_INPUT_ENABLED and privacy_v3_in_effect() else '꺼짐'}**, "
             f"초안 저장: **{'켜짐' if draft_save_available() else '꺼짐'}**\n"
             f"- AI 키: **{'설정됨' if os.environ.get('GEMINI_API_KEY') else '없음'}** (값은 표시하지 않음)"
         )
-        st.caption("IP 감지가 '안 됨'이면 Streamlit Community Cloud가 이용자 IP를 앱에 넘기지 않는 것이므로 IP 전달 기능을 켜도 효과가 없습니다.")
+        st.caption(
+            "IP 감지가 '안 됨'이면 IP 전달 기능을 켜도 효과가 없습니다. '됨'이어도 Streamlit 앞단 프록시가 "
+            "헤더를 덮어쓰는지(이용자가 넣은 값을 지우는지) 공개 자료로 확인되기 전에는 켜지 마세요."
+        )
 
 
 def voice_input_available() -> bool:
