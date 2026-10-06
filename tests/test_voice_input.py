@@ -98,6 +98,12 @@ class ExtractionTest(unittest.TestCase):
         self.assertLessEqual(len(result["witness"]), 1000)
 
 
+class TestPhraseTest(unittest.TestCase):
+    def test_counts_keywords_ignoring_spaces(self):
+        self.assertEqual(v.test_phrase_check(TRANSCRIPT), ["9월 2일", "45만", "판매왕", "채팅", "이체"])
+        self.assertEqual(v.test_phrase_check("구월 이일에 돈을 보냈어요"), [])
+
+
 class MergeTest(unittest.TestCase):
     def test_marks_fill_overwrite_same(self):
         rows = v.merge_rows(

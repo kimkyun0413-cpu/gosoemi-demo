@@ -32,6 +32,16 @@ UNCLEAR_MARK = "[잘 안 들림]"
 NEEDS_CHECK = "(확인 필요)"
 NO_SPEECH = "[음성 없음]"
 
+# 관리자 시험용 합성 음성(tests/fixtures/voice_test_ko.wav)에 들어 있는 핵심어. 받아쓰기 점검에만 쓴다.
+TEST_PHRASE_KEYWORDS = ["9월 2일", "45만", "판매왕", "채팅", "이체"]
+
+
+def test_phrase_check(transcript: str) -> list:
+    """시험 문장 핵심어 중 받아쓰기에 들어 있는 것."""
+    compact = re.sub(r"\s", "", transcript or "")
+    return [word for word in TEST_PHRASE_KEYWORDS if re.sub(r"\s", "", word) in compact]
+
+
 # 음성에서 정리해 넣을 수 있는 입력칸. 사건 유형은 목록에서 고르는 값이라 따로 다룬다.
 EXTRACT_FIELDS = [key for _, key in CASE_FIELDS if key != "case_type"]
 

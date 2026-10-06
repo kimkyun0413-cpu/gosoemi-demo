@@ -20,11 +20,11 @@ from google.genai import types  # noqa: E402
 
 from case_guide import DAMAGE_TYPES  # noqa: E402
 from voice_input import (  # noqa: E402
-    audio_mime_type, clean_transcript, extraction_prompt, parse_extraction, transcription_prompt, validate_audio,
+    TEST_PHRASE_KEYWORDS, audio_mime_type, clean_transcript, extraction_prompt, parse_extraction, test_phrase_check,
+    transcription_prompt, validate_audio,
 )
 
 MODEL = "gemini-3.5-flash-lite"
-EXPECTED = ["9월 2일", "45만", "판매왕", "채팅", "이체"]
 
 
 def main() -> int:
@@ -55,8 +55,8 @@ def main() -> int:
     fields = parse_extraction(raw, transcript, list(DAMAGE_TYPES))
     print("[입력칸 정리]\n" + json.dumps(fields, ensure_ascii=False, indent=2) + "\n")
 
-    found = [word for word in EXPECTED if word in transcript]
-    print(f"[확인] 시험 문장의 핵심어 {len(found)}/{len(EXPECTED)}개 인식: {found}")
+    found = test_phrase_check(transcript)
+    print(f"[확인] 시험 문장의 핵심어 {len(found)}/{len(TEST_PHRASE_KEYWORDS)}개 인식: {found}")
     return 0
 
 

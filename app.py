@@ -21,7 +21,7 @@ from google.genai import types
 from supabase import ClientOptions, create_client, Client
 from supabase_auth.errors import AuthApiError
 from voice_input import (
-    NEEDS_CHECK, VOICE_UPLOAD_TYPES, audio_mime_type, clean_transcript, extraction_prompt,
+    NEEDS_CHECK, TEST_PHRASE_KEYWORDS, VOICE_UPLOAD_TYPES, test_phrase_check, audio_mime_type, clean_transcript, extraction_prompt,
     is_empty_transcript, merge_rows, parse_extraction, transcription_prompt, validate_audio,
 )
 from auth_ip import auth_request_settings, client_ip_from, forwarded_chain_summary
@@ -2303,6 +2303,12 @@ def render_voice_input() -> None:
                 "바뀐 글 (말한 내용과 다르면 직접 고쳐 주세요)", key="voice_transcript_editor", height=180,
                 max_chars=8000,
             )
+            if admin_test:
+                found = test_phrase_check(transcript)
+                st.info(
+                    f"🧪 시험 문장 인식 점검: 핵심어 {len(found)}/{len(TEST_PHRASE_KEYWORDS)}개 "
+                    f"({', '.join(found) or '없음'}). 시험 음성 파일을 쓴 경우에만 의미가 있습니다."
+                )
             st.caption(
                 "[잘 안 들림]으로 표시된 부분은 직접 고쳐 주세요. 이 서비스에 있던 원본 음성은 지웠습니다. "
                 "다만 Google이 오남용 방지를 위해 AI 입력 기록을 일정 기간 보관할 수 있습니다(개인정보처리방침 참고)."
