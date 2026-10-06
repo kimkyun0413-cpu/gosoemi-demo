@@ -291,7 +291,7 @@ def session_to_dict(session, previous: dict | None = None) -> dict:
         "user_id": session.user.id,
         "email": session.user.email,
         "expires_at": session.expires_at,
-        "login_nonce": (previous or {}).get("login_nonce") or secrets.token_urlsafe(16),
+        "login_nonce": (previous or {}).get("login_nonce") or secrets.token_hex(16),
     }
 
 
@@ -385,6 +385,15 @@ BROWSER_SYNC_MESSAGES = {
 }
 
 
+def browser_save_component_key(login_nonce: str) -> str:
+    """브라우저 세션 컴포넌트 key. Streamlit은 컴포넌트 ID(=key 포함)에 '__'가 있으면 오류를 낸다.
+
+    예전에는 token_urlsafe 값을 그대로 붙여 '_'가 겹치면(약 2%) 운영 앱이 BidiComponentInvalidIdError로
+    멈췄다(2026-10-06). 16진수 해시만 쓰면 '_'가 들어가지 않는다.
+    """
+    return "browser_login_save_" + hashlib.sha256(login_nonce.encode("utf-8")).hexdigest()[:24]
+
+
 def drop_local_session() -> None:
     """서버 로그아웃이나 브라우저 저장소 삭제 없이 이 탭의 로그인 상태만 지운다."""
     st.session_state.supabase_session = None
@@ -407,9 +416,9 @@ def restore_browser_session() -> None:
     session = st.session_state.get("supabase_session")
     if session:
         if not session.get("login_nonce"):
-            session["login_nonce"] = secrets.token_urlsafe(16)
+            session["login_nonce"] = secrets.token_hex(16)
         result = _browser_session_component(
-            key=f"browser_login_save_{session['login_nonce']}",
+            key=browser_save_component_key(session["login_nonce"]),
             data={
                 "action": "save",
                 "token": session["refresh_token"],
