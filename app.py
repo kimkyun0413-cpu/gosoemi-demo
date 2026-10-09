@@ -26,16 +26,25 @@ import billing as _billing_module
 import case_guide as _case_guide_module
 import policy_text as _policy_text_module
 import voice_input as _voice_input_module
+import chat_assistant as _chat_assistant_module
 
 # Streamlit Cloud는 git push 뒤 app.py만 새로 실행하고, 이미 불러온 보조 모듈(case_guide, voice_input 등)은
 # 예전 버전을 메모리에 그대로 둘 수 있다. 그러면 새로 추가한 이름을 못 찾아 ImportError로 앱이 멈춘다
 # (2026-10-06 실제 발생). 의존 순서대로 다시 불러와 항상 배포된 파일과 같은 내용을 쓰게 한다.
-for _module in (_case_guide_module, _policy_text_module, _billing_module, _auth_ip_module, _voice_input_module):
+for _module in (
+    _case_guide_module, _policy_text_module, _billing_module, _auth_ip_module, _voice_input_module,
+    _chat_assistant_module,
+):
     importlib.reload(_module)
 
 from voice_input import (
-    NEEDS_CHECK, TEST_PHRASE_KEYWORDS, VOICE_UPLOAD_TYPES, test_phrase_check, audio_mime_type, clean_transcript, extraction_prompt,
-    is_empty_transcript, merge_rows, parse_extraction, transcription_prompt, validate_audio,
+    NEEDS_CHECK, SOURCE_CHAT, TEST_PHRASE_KEYWORDS, VOICE_UPLOAD_TYPES, test_phrase_check, audio_mime_type, clean_transcript,
+    extraction_prompt, is_empty_transcript, merge_rows, parse_extraction, transcription_prompt, validate_audio,
+)
+from chat_assistant import (
+    CHAT_LIMITS_NOTE, CHAT_MAX_INPUT_CHARS, CHAT_RETENTION_NOTE, CHAT_WELCOME, SPEECH_COMPONENT_JS, SPEECH_NOTE,
+    SPEECH_STOP_JS, append_exchange, is_duplicate_submit, model_contents, normalize_question, question_digest,
+    speech_text, system_instruction as chat_system_instruction, user_statements,
 )
 from auth_ip import auth_request_settings, client_ip_from, forwarded_chain_summary
 from billing import billing_mode, parse_plans, plan_summary, sales_open
@@ -43,7 +52,7 @@ from policy_text import (
     CHANGES_V2_TO_V3, PRIVACY_V3_REVISED_DATE, build_privacy_policy_v2, build_privacy_policy_v3,
 )
 from case_guide import (
-    CASE_FIELDS, CASE_LONG_TEXT_FIELDS, CASE_FIELD_MAX_CHARS, DRAFT_DISCLAIMER, DAMAGE_TYPES,
+    CASE_FIELDS, CASE_FIELD_LABELS, CASE_LONG_TEXT_FIELDS, CASE_FIELD_MAX_CHARS, DRAFT_DISCLAIMER, DAMAGE_TYPES,
     FIELD_GUIDES, LEGAL_TERMS, LEGAL_TERMS_SOURCE, OTHER_TYPE, ROUTES,
     SAFE_DRAFT_INSTRUCTION, SUSPECT_UNKNOWN_GUIDE, build_case_draft_docx, build_draft_prompt,
     compute_case_fingerprint, damage_type_guide, field_label, field_placeholder, find_unsupported_details,
@@ -58,7 +67,7 @@ CASES_TABLE = "cases"
 # 사건 작성·초안·증거 화면의 위젯 상태 키 접두어. 계정이 바뀌면 모두 지운다.
 CASE_UI_STATE_PREFIXES = (
     "case_field_", "case_type_", "case_draft_editor", "case_data_consent",
-    "list_draft_", "evidence_", "confirm_delete_", "voice_",
+    "list_draft_", "evidence_", "confirm_delete_", "voice_", "chat_",
 )
 
 # 비밀번호 재설정은 Supabase에 직접 메일 서버(SMTP)와 재설정 메일 템플릿을 설정한 뒤 켠다.
@@ -88,6 +97,9 @@ BILLING_PLANS = parse_plans(os.environ.get("BILLING_PLANS_JSON"))
 DRAFT_SAVE_ENABLED = os.environ.get("DRAFT_SAVE_ENABLED") == "true"
 # 음성 입력. 음성을 Gemini로 보내므로 이를 적은 개인정보처리방침(v3) 시행 후에만 나타난다.
 VOICE_INPUT_ENABLED = os.environ.get("VOICE_INPUT_ENABLED") == "true"
+# 새 AI 대화(이어지는 대화·사건 정보 정리)와 음성 대화. v3 방침에 적은 처리라 시행 전에는 관리자 시험 모드에서만 보인다.
+AI_CHAT_V2_ENABLED = os.environ.get("AI_CHAT_V2_ENABLED") == "true"
+VOICE_CHAT_ENABLED = os.environ.get("VOICE_CHAT_ENABLED") == "true"
 # 관리자(운영자) 계정의 Supabase 사용자 ID 목록(쉼표로 구분). 공개 기능을 켜지 않고 음성 입력 시험과
 # 운영 진단을 이 계정에만 보여 준다. 이메일은 바뀌거나 소셜 로그인 제공자가 정할 수 있어 쓰지 않는다.
 # 운영 AI 키는 서버(Streamlit Secrets)에만 있고 화면·로그에 나오지 않는다. 개인정보 없는 시험 음성만 쓴다.
@@ -484,10 +496,20 @@ def clear_user_session_data() -> None:
     st.session_state.messages = []
     st.session_state.model_history = []
     st.session_state.case_workflow_user_id = None
+    # 서버 업로드 저장소의 녹음(사건 음성 입력·음성 대화)은 위젯 상태를 지우기 전에 파일 ID로 지운다.
+    purge_session_audio()
     # 이전 계정이 입력하던 사건 내용·초안·다운로드 준비 파일이 다음 계정 화면에 남지 않게 지운다.
     for key in list(st.session_state.keys()):
         if key.startswith(CASE_UI_STATE_PREFIXES):
             del st.session_state[key]
+
+
+def purge_session_audio() -> None:
+    for key in list(st.session_state.keys()):
+        if key.startswith(("voice_record_", "voice_upload_", "chat_voice_record_")):
+            uploaded = st.session_state.get(key)
+            if uploaded is not None:
+                purge_uploaded_audio(uploaded)
 
 
 def perform_logout() -> None:
@@ -1281,7 +1303,9 @@ def render_admin_diagnostics() -> None:
             f"- 로그인 IP 전달 설정(AUTH_IP_FORWARDING_ENABLED): **{'켜짐' if AUTH_IP_FORWARDING_ENABLED else '꺼짐'}**, "
             f"secret 키: **{'설정됨' if os.environ.get('SUPABASE_SECRET_KEY') else '없음'}**\n"
             f"- 음성 입력 공개: **{'켜짐' if VOICE_INPUT_ENABLED and privacy_v3_in_effect() else '꺼짐'}**, "
-            f"초안 저장: **{'켜짐' if draft_save_available() else '꺼짐'}**\n"
+            f"초안 저장: **{'켜짐' if draft_save_available() else '꺼짐'}**, "
+            f"새 AI 대화 공개: **{'켜짐' if chat_v2_public() else '꺼짐'}**, "
+            f"음성 대화 공개: **{'켜짐' if VOICE_CHAT_ENABLED and chat_v2_public() else '꺼짐'}**\n"
             f"- AI 키: **{'설정됨' if os.environ.get('GEMINI_API_KEY') else '없음'}** (값은 표시하지 않음)"
         )
         st.caption(
@@ -1292,6 +1316,18 @@ def render_admin_diagnostics() -> None:
 
 def voice_input_available() -> bool:
     return (VOICE_INPUT_ENABLED and privacy_v3_in_effect()) or voice_admin_test_mode()
+
+
+def chat_v2_public() -> bool:
+    return AI_CHAT_V2_ENABLED and privacy_v3_in_effect()
+
+
+def chat_v2_available() -> bool:
+    return chat_v2_public() or is_admin()
+
+
+def voice_chat_available() -> bool:
+    return (VOICE_CHAT_ENABLED and chat_v2_public()) or is_admin()
 
 
 def load_draft_index() -> dict:
@@ -2372,6 +2408,335 @@ def render_voice_input() -> None:
                 st.button("넣지 않기", key="voice_cancel_btn", on_click=cancel_voice_proposal)
 
 
+# ── AI 대화(글·음성) ─────────────────────────────────────────────
+_speech_component = st.components.v2.component("gosoemi_answer_speech", js=SPEECH_COMPONENT_JS)
+_speech_stop_component = st.components.v2.component("gosoemi_answer_speech_stop", js=SPEECH_STOP_JS)
+
+
+def chat_messages() -> list:
+    return st.session_state.setdefault("chat_messages", [])
+
+
+def chat_voice_suffix() -> int:
+    return st.session_state.setdefault("chat_voice_n", 0)
+
+
+def discard_chat_audio() -> None:
+    """음성 대화 녹음을 위젯과 서버 업로드 저장소에서 지운다."""
+    n = chat_voice_suffix()
+    key = f"chat_voice_record_{n}"
+    uploaded = st.session_state.get(key)
+    if uploaded is not None:
+        purge_uploaded_audio(uploaded)
+        try:
+            uploaded.close()
+        except Exception:
+            pass
+    st.session_state.pop(key, None)
+    st.session_state.chat_voice_n = n + 1
+
+
+def reset_chat(notice: str) -> None:
+    """대화·대기 중 질문·실패한 질문·정리 제안·녹음을 모두 지운다(버튼 콜백)."""
+    discard_chat_audio()
+    for key in list(st.session_state.keys()):
+        if key.startswith(("chat_pick_", "chat_edit_")) or key in (
+            "chat_messages", "chat_pending", "chat_failed", "chat_last_sent", "chat_proposal",
+            "chat_voice_editor", "chat_retry_text", "chat_autoplay_index", "chat_voice_error",
+        ):
+            del st.session_state[key]
+    st.session_state.chat_stop_speech = True
+    st.session_state.chat_notice = notice
+
+
+def queue_chat_question(text: str, via_voice: bool) -> str:
+    """질문을 보낼 차례에 올린다. 문제가 있으면 안내 문구를 돌려준다."""
+    question = normalize_question(text)
+    if not question:
+        return "보낼 내용이 없습니다. 질문을 적어 주세요."
+    if st.session_state.get("chat_pending"):
+        return "앞의 질문에 답변을 만들고 있습니다. 답변이 나온 뒤에 보내 주세요."
+    if is_duplicate_submit(st.session_state.get("chat_last_sent"), question):
+        return "방금 보낸 질문과 같아 한 번만 보냈습니다."
+    st.session_state.chat_pending = {"text": question, "voice": via_voice}
+    st.session_state.pop("chat_failed", None)
+    return ""
+
+
+def send_voice_question() -> None:
+    problem = queue_chat_question(st.session_state.get("chat_voice_editor", ""), via_voice=True)
+    if problem:
+        st.session_state.chat_voice_error = problem
+    else:
+        st.session_state.pop("chat_voice_editor", None)
+
+
+def retry_chat_question() -> None:
+    failed = st.session_state.get("chat_failed") or {}
+    problem = queue_chat_question(st.session_state.get("chat_retry_text", ""), via_voice=failed.get("voice", False))
+    if problem:
+        st.session_state.chat_notice = problem
+    else:
+        st.session_state.pop("chat_retry_text", None)
+
+
+def drop_failed_question() -> None:
+    st.session_state.pop("chat_failed", None)
+    st.session_state.pop("chat_retry_text", None)
+
+
+def answer_chat_question() -> None:
+    """대기 중인 질문에 답한다. 결과는 다른 Streamlit 호출보다 먼저 세션에 적어, 화면이 다시 그려져도 두 번 호출하지 않게 한다."""
+    pending = st.session_state.get("chat_pending")
+    if not pending:
+        return
+    messages = chat_messages()
+    try:
+        answer = call_gemini(
+            model_contents(messages, pending["text"]),
+            chat_system_instruction(SERVICE_IDENTITY_INSTRUCTION, SAFE_DRAFT_INSTRUCTION),
+        )
+    except Exception as error:
+        st.session_state.chat_failed = {
+            "text": pending["text"], "voice": pending.get("voice", False),
+            "error": ai_error_message(error, "답변을 만들지 못했습니다. 적은 내용은 아래에 남겨 두었으니 잠시 후 다시 보내 주세요."),
+        }
+        st.session_state.chat_retry_text = pending["text"]
+        st.session_state.chat_pending = None
+        print(f"[chat] stage=answer result={type(error).__name__}", flush=True)
+        return
+    append_exchange(messages, pending["text"], answer, via_voice=pending.get("voice", False))
+    st.session_state.chat_last_sent = {"digest": question_digest(pending["text"]), "at": time.time()}
+    st.session_state.chat_autoplay_index = len(messages) - 1
+    st.session_state.chat_pending = None
+
+
+def apply_chat_proposal() -> None:
+    proposal = st.session_state.get("chat_proposal") or {}
+    applied = 0
+    for key in proposal:
+        if not st.session_state.get(f"chat_pick_{key}"):
+            continue
+        value = (st.session_state.get(f"chat_edit_{key}", proposal[key]) or "").strip()
+        if key == "case_type":
+            if value not in DAMAGE_TYPES:
+                continue
+            st.session_state.case_type_choice = value
+        else:
+            if not value:
+                continue
+            st.session_state[f"case_field_{key}"] = value[: CASE_FIELD_MAX_CHARS[key]]
+        applied += 1
+    cancel_chat_proposal()
+    st.session_state.chat_notice = (
+        f"{applied}개 항목을 '고소장 작성' 탭의 입력칸에 넣었습니다. 사건은 아직 저장하지 않았습니다. "
+        f"'고소장 작성' 탭에서 내용을 확인·수정한 뒤 직접 저장해 주세요. '{NEEDS_CHECK}' 표시는 다시 확인이 필요한 부분입니다."
+        if applied else "선택한 항목이 없어 입력칸을 바꾸지 않았습니다."
+    )
+
+
+def cancel_chat_proposal() -> None:
+    st.session_state.chat_proposal = None
+    for key in list(st.session_state.keys()):
+        if key.startswith(("chat_pick_", "chat_edit_")):
+            del st.session_state[key]
+
+
+def render_chat_proposal() -> None:
+    proposal = st.session_state.get("chat_proposal")
+    if not proposal:
+        return
+    with st.container(border=True):
+        st.markdown("**사건 정보 정리 제안** — 넣을 항목만 체크하고, 필요하면 글을 고쳐 주세요.")
+        st.caption(
+            "대화에서 이용자가 직접 쓰거나 말한 내용만 근거로 정리했습니다. 말하지 않은 항목은 비워 두었고, "
+            f"확인이 필요한 부분에는 '{NEEDS_CHECK}'를 붙였습니다. 넣기 전까지 작성 화면은 바뀌지 않고, 사건도 저장되지 않습니다."
+        )
+        overwrites = 0
+        for key, label, now, new, action in merge_rows(current_case_values(), proposal):
+            overwrites += action == "overwrite"
+            st.checkbox(
+                f"{label}" + {"fill": " — 빈 칸에 넣습니다", "same": " — 지금 내용과 같습니다", "overwrite": " — ⚠️ 이미 적은 내용을 바꿉니다"}[action],
+                value=action == "fill", key=f"chat_pick_{key}", disabled=action == "same",
+            )
+            if key == "case_type":
+                st.caption(f"제안: {new}")
+            else:
+                st.text_area(
+                    f"{label} 제안 내용", value=new, key=f"chat_edit_{key}", label_visibility="collapsed",
+                    height=68 if len(new) < 80 else 140, max_chars=CASE_FIELD_MAX_CHARS[key],
+                )
+            if action == "overwrite":
+                st.caption(f"지금 작성 화면의 내용: {now[:150]}")
+        missing = [CASE_FIELD_LABELS[key] for _, key in CASE_FIELDS if key not in proposal]
+        if missing:
+            st.caption("대화에서 찾지 못해 비워 둔 항목: " + ", ".join(missing))
+        if overwrites:
+            st.warning(f"이미 적은 내용이 있는 항목 {overwrites}개는 기본으로 체크하지 않았습니다. 바꾸려면 직접 체크해 주세요.")
+        col_apply, col_cancel = st.columns(2)
+        with col_apply:
+            st.button("선택한 항목을 작성 화면에 넣기", key="chat_apply_btn", type="primary", on_click=apply_chat_proposal)
+        with col_cancel:
+            st.button("넣지 않기", key="chat_cancel_proposal_btn", on_click=cancel_chat_proposal)
+
+
+def render_chat_voice_input(busy: bool) -> None:
+    with st.expander("🎤 말로 질문하기", expanded=bool(st.session_state.get("chat_voice_editor"))):
+        st.caption(
+            "마이크 버튼을 누른 동안만 녹음합니다(마이크를 계속 켜 두지 않습니다). 녹음은 글로 바꾸는 데만 쓰고, "
+            "글로 바꾸면 이 서비스에서 바로 지웁니다. 바뀐 글을 확인·수정한 뒤 보내 주세요. "
+            "글로 바꾸려면 음성이 Google Gemini로 전송됩니다."
+        )
+        n = chat_voice_suffix()
+        recorded = st.audio_input("마이크를 누르고 질문한 뒤 다시 눌러 멈추세요", key=f"chat_voice_record_{n}", disabled=busy)
+        col_t, col_d = st.columns(2)
+        with col_t:
+            transcribe = st.button("글로 바꾸기", key="chat_voice_transcribe_btn", type="primary", disabled=recorded is None or busy)
+        with col_d:
+            st.button("녹음 지우기", key="chat_voice_discard_btn", on_click=discard_chat_audio, disabled=recorded is None)
+        st.caption(
+            "마이크 권한을 거부했거나 녹음이 안 되면 브라우저 주소창의 자물쇠(또는 설정)에서 마이크를 허용하거나, "
+            "아래 입력창에 글로 적어 주세요."
+        )
+        if transcribe and recorded is not None:
+            name = getattr(recorded, "name", "") or "recording.wav"
+            declared = getattr(recorded, "type", "") or "audio/wav"
+            problem = validate_audio(name, getattr(recorded, "size", 0) or 0, declared)
+            if problem:
+                st.error(problem)
+            else:
+                try:
+                    with st.spinner("말한 내용을 글로 바꾸고 있습니다."):
+                        text = call_gemini([
+                            types.Part.from_text(text=transcription_prompt()),
+                            types.Part.from_bytes(data=recorded.getvalue(), mime_type=audio_mime_type(name, declared) or "audio/wav"),
+                        ])
+                except Exception as error:
+                    st.error(ai_error_message(error, "음성을 글로 바꾸지 못했습니다. 다시 녹음하거나 아래 입력창에 글로 적어 주세요."))
+                    st.caption("다시 시도할 수 있도록 녹음을 잠시 남겨 두었습니다. 그만두려면 '녹음 지우기'를 눌러 주세요.")
+                else:
+                    text = clean_transcript(text)
+                    discard_chat_audio()
+                    if is_empty_transcript(text):
+                        st.session_state.chat_voice_error = "말소리를 찾지 못했습니다. 마이크 가까이에서 다시 녹음하거나 글로 적어 주세요."
+                    else:
+                        st.session_state.chat_voice_editor = text[:CHAT_MAX_INPUT_CHARS]
+                    st.rerun()
+        error = st.session_state.pop("chat_voice_error", None)
+        if error:
+            st.error(error)
+        if st.session_state.get("chat_voice_editor"):
+            st.text_area(
+                "바뀐 글 (말한 내용과 다르면 고친 뒤 보내 주세요)", key="chat_voice_editor", height=110,
+                max_chars=CHAT_MAX_INPUT_CHARS,
+            )
+            st.caption("[잘 안 들림]으로 표시된 부분은 직접 고쳐 주세요. 원본 녹음은 이미 지웠습니다.")
+            col_s, col_c = st.columns(2)
+            with col_s:
+                st.button("이 글로 보내기", key="chat_voice_send_btn", type="primary", on_click=send_voice_question, disabled=busy)
+            with col_c:
+                st.button("보내지 않기", key="chat_voice_clear_btn", on_click=lambda: st.session_state.pop("chat_voice_editor", None))
+
+
+def render_chat_v2() -> None:
+    public = chat_v2_public()
+    voice_ok = voice_chat_available()
+    if not public:
+        st.warning("🧪 관리자 시험 모드입니다. 일반 이용자에게는 기존 AI 상담 화면이 보입니다. 개인정보가 없는 시험 내용만 사용해 주세요.")
+    st.caption(CHAT_LIMITS_NOTE)
+    with st.expander("대화와 음성은 어떻게 처리되나요?"):
+        st.markdown(f"- {CHAT_RETENTION_NOTE}\n- 말로 질문하면 녹음이 Google Gemini로 전송되어 글로 바뀌고, 이 서비스에서는 바로 지웁니다.\n- {SPEECH_NOTE}")
+
+    if st.session_state.pop("chat_stop_speech", False):
+        _speech_stop_component(key="chat_speech_stop", data={"t": time.time()})
+    notice = st.session_state.pop("chat_notice", None)
+    if notice:
+        st.info(notice)
+
+    messages = chat_messages()
+    busy = bool(st.session_state.get("chat_pending"))
+    col_new, col_clear, col_speak = st.columns([1, 1, 1.4])
+    with col_new:
+        st.button("새 대화", key="chat_new_btn", on_click=reset_chat, args=("새 대화를 시작했습니다.",), disabled=busy)
+    with col_clear:
+        st.button(
+            "대화 지우기", key="chat_clear_btn", on_click=reset_chat, args=("지금 대화를 지웠습니다.",),
+            disabled=busy or not (messages or st.session_state.get("chat_failed")),
+        )
+    with col_speak:
+        speak_on = st.toggle("답변 듣기", key="chat_speak_on", value=voice_ok, help=SPEECH_NOTE)
+
+    history_box = st.container()
+    with history_box:
+        with st.chat_message("assistant"):
+            st.markdown(CHAT_WELCOME)
+        autoplay_index = st.session_state.pop("chat_autoplay_index", None)
+        last_answer = max((i for i, m in enumerate(messages) if m["role"] == "assistant"), default=None)
+        for index, message in enumerate(messages):
+            with st.chat_message(message["role"]):
+                st.markdown(("🎤 " if message.get("voice") else "") + message["content"])
+                if speak_on and index == last_answer:
+                    _speech_component(
+                        key=f"chat_speech_{index}",
+                        data={"text": speech_text(message["content"]), "autoplay": index == autoplay_index},
+                        height="content",
+                    )
+
+    if voice_ok:
+        render_chat_voice_input(busy)
+
+    failed = st.session_state.get("chat_failed")
+    if failed and not busy:
+        st.error(failed["error"])
+        st.text_area("보내지 못한 질문 (고쳐서 다시 보낼 수 있습니다)", key="chat_retry_text", max_chars=CHAT_MAX_INPUT_CHARS)
+        col_r, col_x = st.columns(2)
+        with col_r:
+            st.button("다시 보내기", key="chat_retry_btn", type="primary", on_click=retry_chat_question)
+        with col_x:
+            st.button("보내지 않기", key="chat_drop_failed_btn", on_click=drop_failed_question)
+
+    has_user_text = any(m["role"] == "user" for m in messages)
+    if st.button(
+        "📝 이 대화로 사건 정보 정리하기", key="chat_extract_btn", disabled=busy or not has_user_text,
+        help="대화에서 직접 말한 내용만 모아 고소장 작성 입력칸에 넣을 제안을 만듭니다. 확인 전에는 아무것도 바뀌지 않습니다.",
+    ):
+        transcript = user_statements(messages)
+        try:
+            with st.spinner("대화에서 말씀하신 내용을 입력칸별로 나누고 있습니다."):
+                raw = call_gemini([{"role": "user", "parts": [{"text": extraction_prompt(transcript, list(DAMAGE_TYPES), SOURCE_CHAT)}]}])
+                proposal = parse_extraction(raw, transcript, list(DAMAGE_TYPES))
+        except ValueError:
+            st.error("정리 결과를 읽지 못했습니다. 버튼을 한 번 더 눌러 주세요.")
+        except Exception as error:
+            st.error(ai_error_message(error, "사건 정보를 정리하지 못했습니다. 잠시 후 다시 시도해 주세요."))
+        else:
+            cancel_chat_proposal()
+            if not proposal:
+                st.warning("대화에서 입력칸에 넣을 내용을 찾지 못했습니다. 상황을 조금 더 말씀하시거나 작성 화면에 직접 적어 주세요.")
+            st.session_state.chat_proposal = proposal or None
+    render_chat_proposal()
+
+    prompt = st.chat_input(
+        "답변을 만들고 있습니다…" if busy else "궁금한 점이나 상황을 적어 주세요",
+        max_chars=CHAT_MAX_INPUT_CHARS, key="chat_input_box", disabled=busy,
+    )
+    if prompt and not busy:
+        problem = queue_chat_question(prompt, via_voice=False)
+        if problem:
+            st.session_state.chat_notice = problem
+        st.rerun()
+
+    if busy:
+        pending = st.session_state.chat_pending
+        with history_box:
+            with st.chat_message("user"):
+                st.markdown(("🎤 " if pending.get("voice") else "") + pending["text"])
+            with st.chat_message("assistant"):
+                with st.spinner("답변을 만들고 있습니다. 보통 5~20초 걸립니다."):
+                    answer_chat_question()
+        st.rerun()
+
+
 def render_signup_guide():
     st.markdown(
         "**가입 절차**\n\n"
@@ -3285,36 +3650,39 @@ with tab_terms:
     st.markdown(f"[설명 근거: 대검찰청 사건처리절차 안내]({LEGAL_TERMS_SOURCE})")
 
 with tab_chat:
-    st.caption(
-        "피해 상황을 편하게 이야기하면 핵심 사실을 정리하도록 도와드려요. 대화 내용은 저장되지 않고, "
-        "새로고침하거나 로그아웃하면 사라집니다. 답변은 일반 정보이며 법률 자문이 아닙니다."
-    )
-
-    if not st.session_state.messages:
-        st.info(
-            "이렇게 물어보세요:\n\n"
-            "- 중고거래로 돈을 보냈는데 연락이 끊겼어요. 무엇부터 정리할까요?\n"
-            "- 고소장에 상대방 이름을 모르면 어떻게 쓰나요?\n"
-            "- 증거로 어떤 자료를 모아 두면 좋을까요?"
+    if chat_v2_available():
+        render_chat_v2()
+    else:
+        st.caption(
+            "피해 상황을 편하게 이야기하면 핵심 사실을 정리하도록 도와드려요. 대화 내용은 저장되지 않고, "
+            "새로고침하거나 로그아웃하면 사라집니다. 답변은 일반 정보이며 법률 자문이 아닙니다."
         )
 
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+        if not st.session_state.messages:
+            st.info(
+                "이렇게 물어보세요:\n\n"
+                "- 중고거래로 돈을 보냈는데 연락이 끊겼어요. 무엇부터 정리할까요?\n"
+                "- 고소장에 상대방 이름을 모르면 어떻게 쓰나요?\n"
+                "- 증거로 어떤 자료를 모아 두면 좋을까요?"
+            )
 
-    if prompt := st.chat_input("궁금한 점이나 상황을 적어 주세요", max_chars=3000):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
 
-        try:
-            with st.spinner("답변을 만들고 있습니다."):
-                answer = process_question(prompt, st.session_state.model_history)
-        except Exception as error:
-            answer = ai_error_message(error, "답변을 만들지 못했습니다. 잠시 후 다시 질문해 주세요.")
+        if prompt := st.chat_input("궁금한 점이나 상황을 적어 주세요", max_chars=3000):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-        st.session_state.messages.append({"role": "assistant", "content": answer})
-        with st.chat_message("assistant"):
-            st.markdown(answer)
+            try:
+                with st.spinner("답변을 만들고 있습니다."):
+                    answer = process_question(prompt, st.session_state.model_history)
+            except Exception as error:
+                answer = ai_error_message(error, "답변을 만들지 못했습니다. 잠시 후 다시 질문해 주세요.")
+
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+            with st.chat_message("assistant"):
+                st.markdown(answer)
 
 render_footer()

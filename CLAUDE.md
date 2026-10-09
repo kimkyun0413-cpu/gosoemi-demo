@@ -10,6 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [case_guide.py](case_guide.py) — Streamlit-free data and helpers: damage types and official source links, field guides, draft prompt, draft checks, Word export.
 - [policy_text.py](policy_text.py) — privacy policy text per version. Never edit a version users already consented to; add a new version instead.
 - [voice_input.py](voice_input.py) — voice input rules: allowed audio formats/limits, transcription and field-extraction prompts, checks that flag unstated amounts/dates/numbers. Audio is never stored.
+- [chat_assistant.py](chat_assistant.py) — AI chat (text and voice) rules: chat system instruction, history trimming, duplicate-send guard, user-only text for case extraction, on-device-only answer read-aloud component. Chat history is never stored in the DB.
 - [billing.py](billing.py) — paid-plan settings and display rules only. No payment provider is integrated; sales stay closed. DB/Edge Function drafts live in `supabase/proposals/billing/` and are not applied.
 - [auth_ip.py](auth_ip.py) — when to forward the user's IP to Supabase Auth (Sb-Forwarded-For).
 - [scripts/](scripts/) — Free-plan backup/restore, voice smoke test, privacy review packet builder. None of them run automatically.
@@ -27,7 +28,7 @@ deno test supabase/proposals/billing/functions/billing-webhook/handler_test.ts
 streamlit run app.py
 ```
 
-The app reads all secrets and feature flags from environment variables (Streamlit secrets in production): `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `GEMINI_API_KEY`, `APP_BASE_URL`, `PRIVACY_*`, `EVIDENCE_UPLOAD_ENABLED`, `DRAFT_SAVE_ENABLED`, `VOICE_INPUT_ENABLED`, `NAVER_*`, `GOOGLE_*`, `AI_CALLS_PER_HOUR`, `AI_CALLS_PER_HOUR_TOTAL`, `PASSWORD_RESET_ENABLED`, `BILLING_MODE`, `BILLING_PLANS_JSON`, `ADMIN_USER_IDS` (operator-only voice test mode and diagnostics; Supabase user IDs, verified server-side against the token), `AUTH_IP_FORWARDING_ENABLED` + `SUPABASE_SECRET_KEY` (secret key used only for Auth requests, never for data). Never hardcode keys.
+The app reads all secrets and feature flags from environment variables (Streamlit secrets in production): `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `GEMINI_API_KEY`, `APP_BASE_URL`, `PRIVACY_*`, `EVIDENCE_UPLOAD_ENABLED`, `DRAFT_SAVE_ENABLED`, `VOICE_INPUT_ENABLED`, `AI_CHAT_V2_ENABLED`, `VOICE_CHAT_ENABLED`, `NAVER_*`, `GOOGLE_*`, `AI_CALLS_PER_HOUR`, `AI_CALLS_PER_HOUR_TOTAL`, `PASSWORD_RESET_ENABLED`, `BILLING_MODE`, `BILLING_PLANS_JSON`, `ADMIN_USER_IDS` (operator-only voice test mode and diagnostics; Supabase user IDs, verified server-side against the token), `AUTH_IP_FORWARDING_ENABLED` + `SUPABASE_SECRET_KEY` (secret key used only for Auth requests, never for data). Never hardcode keys.
 
 `supabase/tests/local_case_drafts_test.py` and `local_billing_test.py` check the `case_drafts` migration and RLS against a local throwaway Postgres only. It refuses to run against a Supabase host.
 

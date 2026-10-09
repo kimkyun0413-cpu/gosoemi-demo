@@ -78,10 +78,15 @@ def transcription_prompt() -> str:
     )
 
 
-def extraction_prompt(transcript: str, case_types: list) -> str:
+SOURCE_VOICE = "피해자가 직접 말한 내용을 글로 바꾼 것입니다"
+# AI 대화에서 정리할 때: AI 답변은 빼고 이용자가 쓰거나 말한 내용만 보낸다.
+SOURCE_CHAT = "피해자가 AI 상담 대화에서 직접 쓰거나 말한 내용만 순서대로 모은 것입니다(AI의 답변은 들어 있지 않습니다)"
+
+
+def extraction_prompt(transcript: str, case_types: list, source: str = SOURCE_VOICE) -> str:
     labels = "\n".join(f"- {key}: {CASE_FIELD_LABELS[key]}" for key in EXTRACT_FIELDS)
     return (
-        "아래 [변환된 글]은 피해자가 직접 말한 내용을 글로 바꾼 것입니다. 이 글만 근거로 사건 입력칸을 채울 JSON을 만드세요.\n"
+        f"아래 [변환된 글]은 {source}. 이 글만 근거로 사건 입력칸을 채울 JSON을 만드세요.\n"
         "규칙:\n"
         "1. 글에 없는 사실(날짜, 시간, 금액, 이름, 장소, 연락처, 증거, 목격자, 처벌 의사)을 절대 만들지 마세요.\n"
         "2. 말하지 않은 항목은 빈 문자열 \"\"로 두세요.\n"

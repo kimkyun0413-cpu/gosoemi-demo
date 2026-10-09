@@ -19,7 +19,7 @@ class PrivacyPolicyV3Test(unittest.TestCase):
             "동의 및 연령 확인 기록",
             "만 14세 이상 확인 여부와 확인 일시",
             "로그인·인증 기록",
-            "AI 상담 이용 시",
+            "AI 상담(글·음성 대화) 이용 시",
             "localStorage",
             "sessionStorage",
         ]:
@@ -46,6 +46,17 @@ class PrivacyPolicyV3Test(unittest.TestCase):
         ]:
             self.assertIn(phrase, self.text)
 
+    def test_lists_chat_and_voice_conversation(self):
+        for phrase in [
+            "AI 상담(글·음성 대화) 이용 시",
+            "데이터베이스에 저장하지 않고 서버 메모리에만",
+            "약 2분",
+            "AI 답변 제외",
+            "기기 안에서 읽습니다",
+            "음성 입력·음성 대화 이용 시",
+        ]:
+            self.assertIn(phrase, self.text)
+
     def test_states_backup_and_log_retention_found_in_dashboard(self):
         self.assertIn("프로젝트 백업 기능이 없어", self.text)
         # 운영자가 조회할 수 있는 기간과 Supabase 내부 보관 기간을 구분한다
@@ -63,9 +74,9 @@ class PrivacyPolicyV3Test(unittest.TestCase):
             self.assertTrue(section and before and after)
 
     def test_voice_input_is_disclosed(self):
-        self.assertIn("음성 입력 이용 시", self.text)
+        self.assertIn("음성 입력·음성 대화 이용 시", self.text)
         self.assertIn("음성은 서비스에 저장하지 않습니다", self.text)
-        self.assertIn("음성 입력의 음성과 바뀐 글", self.text)
+        self.assertIn("음성 입력·음성 대화의 음성과 바뀐 글", self.text)
         self.assertIn("입력(음성 포함)", self.text)
         # 서비스에서의 삭제와 Google 측 보관을 구분한다
         self.assertIn("글로 바꾸고 나면 바로 지웁니다", self.text)
