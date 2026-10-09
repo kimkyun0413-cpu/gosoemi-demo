@@ -45,7 +45,19 @@ CASE_REQUIRED_FIELDS = ("case_type", "reporter_info", "incident_description")
 MISSING_VALUE = "미입력"
 UNKNOWN_HINTS = ("모름", "모릅니다", "모르겠", "확인 필요", "기억나지 않", "기억이 안", "미상", "불상")
 
-DRAFT_DISCLAIMER = "이 문서는 참고용 초안이며 제출 전 법률 전문가의 검토가 필요합니다."
+DRAFT_DISCLAIMER = "AI가 만든 참고용 초안입니다. 제출 전 사실관계와 내용을 직접 확인하고, 법률 전문가의 검토를 받아 주세요."
+# 예전 초안(저장된 초안 포함)에 붙어 있던 안내. 내려받을 때 같은 안내가 두 번 붙지 않게 알아본다.
+OLD_DRAFT_DISCLAIMERS = ("이 문서는 참고용 초안이며 제출 전 법률 전문가의 검토가 필요합니다.",)
+
+
+def has_draft_disclaimer(text: str) -> bool:
+    return any(d in (text or "") for d in (DRAFT_DISCLAIMER,) + OLD_DRAFT_DISCLAIMERS)
+
+
+def with_draft_disclaimer(text: str) -> str:
+    """내려받는 초안에는 이용자가 안내 문구를 지웠더라도 끝에 한 번 붙인다."""
+    text = (text or "").rstrip()
+    return text if has_draft_disclaimer(text) else f"{text}\n\n{DRAFT_DISCLAIMER}"
 DOCX_TITLE = "고소장"
 DOCX_SECTION_HEADERS = [
     "고소인", "피고소인", "고소 취지", "범죄 사실", "고소 이유",
@@ -550,6 +562,127 @@ LEGAL_TERMS = [
     ("불기소", "검사가 해당 사건을 형사재판에 넘기지 않기로 결정하는 것입니다. 이유는 사건마다 다를 수 있습니다."),
 ]
 LEGAL_TERMS_SOURCE = "https://www.spo.go.kr/site/spo/01/10101050200002018112210.jsp"
+LEGAL_TERMS_SOURCE_LABEL = "대검찰청 사건처리절차 안내"
+
+# 쉬운 말 풀이와 짧은 예시. 뜻은 위 대검찰청 안내에 있는 설명을 쉬운 말로 옮겼고, 예시는 쓰임새를 보여 주는 가상의 상황이다.
+# 기한(며칠 안에 등)은 사건마다 확인이 필요해 적지 않는다.
+LEGAL_TERM_GUIDE = [
+    ("고소", "피해를 입은 사람이 경찰·검찰에 범죄 사실을 알리고 처벌해 달라고 요청하는 것이에요.",
+     "중고거래로 돈을 잃은 피해자가 경찰서에 고소장을 내는 경우"),
+    ("고발", "피해자가 아닌 사람이 범죄 사실을 알리고 처벌을 요청하는 것이에요. 누구나 할 수 있어요.",
+     "범죄 장면을 본 사람이 처벌을 요청하며 신고하는 경우"),
+    ("고소장", "고소할 때 내는 문서예요. 정해진 양식은 없고, 누가 누구를, 어떤 피해 사실로, 처벌을 원한다는 뜻이 들어가면 돼요.",
+     "고소음이가 만드는 초안은 이 내용을 정리한 참고용 문서예요"),
+    ("고소인", "고소장을 내는 사람이에요. 보통 피해를 입은 본인이에요.", "돈을 보낸 피해자 본인"),
+    ("피고소인", "고소장에서 처벌을 요청하는 상대방이에요. 이름을 모르면 '성명불상'이라고 적기도 해요.",
+     "이름은 모르고 닉네임만 아는 판매자"),
+    ("피의자", "범죄 혐의로 수사를 받는 사람이에요. 죄가 확정됐다는 뜻은 아니에요.", "경찰 조사를 받고 있는 상대방"),
+    ("피고인", "검사가 재판에 넘긴(기소한) 사람이에요. 유죄가 확정됐다는 뜻은 아니에요.", "형사재판을 받게 된 상대방"),
+    ("송치", "경찰이 사건 기록을 검찰로 보내는 절차예요. 송치됐다고 해서 기소나 유죄가 정해진 것은 아니에요.",
+     "'사건이 검찰로 송치되었습니다'라는 안내를 받은 경우"),
+    ("불송치", "경찰이 범죄가 되지 않는다고 판단해 사건을 검찰로 보내지 않기로 하는 결정이에요.",
+     "경찰에서 불송치 결정 통지를 받은 경우"),
+    ("이의신청", "불송치 결정에 대해 고소인 등이 다툴 수 있는 방법이에요. 신청하면 사건이 검찰로 넘어가요.",
+     "불송치 통지를 받고 다시 판단해 달라고 하는 경우"),
+    ("기소", "검사가 법원에 형사재판을 열어 달라고 하는 것이에요.", "검사가 상대방을 재판에 넘긴 경우"),
+    ("불기소", "검사가 사건을 재판에 넘기지 않기로 하는 결정이에요. 혐의없음·기소유예 등 여러 종류가 있어요.",
+     "검찰에서 불기소 결정 통지를 받은 경우"),
+    ("혐의없음", "불기소 결정의 한 종류예요. 범죄가 되지 않거나, 범죄를 증명할 증거가 부족할 때 내려져요.",
+     "증거가 부족하다는 이유로 혐의없음 결정이 난 경우"),
+    ("기소유예", "범죄는 인정되지만 여러 사정을 고려해 검사가 재판에 넘기지 않는 결정이에요.",
+     "상대방이 피해를 배상한 사정 등이 고려된 경우"),
+    ("공소권없음", "공소시효가 지났거나 고소가 취소된 경우 등 재판에 넘길 수 없을 때의 결정이에요.",
+     "고소를 취소한 뒤 내려진 결정"),
+    ("약식명령", "정식 재판을 열지 않고 벌금 등을 정하는 절차예요.", "상대방에게 벌금을 내라는 약식명령이 나온 경우"),
+    ("합의", "상대방이 피해를 배상하고, 피해자가 처벌을 원하지 않는다는 뜻을 밝히는 것이에요.",
+     "상대방이 돈을 돌려주고 합의서를 쓰자고 하는 경우"),
+    ("형사조정", "검사가 사건을 조정에 맡겨 당사자끼리 합의를 시도하도록 하는 절차예요.", "검찰에서 형사조정 안내를 받은 경우"),
+    ("배상명령", "형사재판에서 법원이 피해 배상을 명하는 것이에요. 민사 판결과 같은 효력이 있어요.",
+     "형사재판 중에 피해 금액을 배상하라는 명령을 신청하는 경우"),
+    ("무고죄", "사실이 아닌 줄 알면서 다른 사람을 처벌받게 하려고 신고하면 처벌될 수 있는 범죄예요.",
+     "고소장에는 확인한 사실과 짐작을 구분해 적어 주세요"),
+]
+
+# 화면별로 함께 보여 줄 말(기본 화면을 복잡하게 하지 않도록 펼쳐 보기 안에서만 보인다)
+SCREEN_TERMS = {
+    "case": ["고소", "고소장", "고소인", "피고소인", "무고죄"],
+    "draft": ["고소장", "고소인", "피고소인", "무고죄", "송치", "불송치"],
+}
+
+
+def legal_terms_for(screen: str) -> list:
+    wanted = SCREEN_TERMS.get(screen)
+    return [t for t in LEGAL_TERM_GUIDE if wanted is None or t[0] in wanted]
+
+
+def search_legal_terms(query: str) -> list:
+    q = (query or "").strip().casefold()
+    return [t for t in LEGAL_TERM_GUIDE if not q or q in t[0].casefold() or q in t[1].casefold()]
+
+
+# 절차 구분 표시(형사·민사·노동 등). 모든 피해가 고소 대상이라는 뜻이 아니다.
+ROUTE_TAGS = {"criminal": "형사", "mixed": "형사 + 다른 절차", "civil": "민사", "labor": "노동"}
+
+
+def type_faq(case_type: str) -> list:
+    """피해 유형별 자주 묻는 질문. 유형마다 쓴 Q&A에, 이미 확인한 안내(준비 자료·상대방 정보·절차·공식 기관)로
+    만든 공통 질문을 빠진 것만 덧붙인다. 새로운 법률 사실은 만들지 않는다."""
+    guide = damage_type_guide(case_type)
+    faq = list(guide.get("qa", []))
+    asked = " ".join(q for q, _ in faq)
+    if "자료" not in asked and guide.get("evidence_tips"):
+        faq.append((
+            "어떤 자료를 준비하면 좋을까요?",
+            "**이 유형에서 모아 두면 좋은 자료예요.**\n\n" + "\n".join(f"- {t}" for t in guide["evidence_tips"])
+            + "\n\n원본은 지우지 말고 보관하세요. 자료를 얻으려고 위험한 행동을 하지는 마세요.",
+        ))
+    if "모르" not in asked:
+        faq.append(("상대방 이름이나 연락처를 모르면 어떻게 하나요?", SUSPECT_UNKNOWN_GUIDE))
+    route = ROUTES.get(guide.get("route"))
+    if route:
+        answer = f"**{route['label']}이에요.** {route['note']}"
+        if guide.get("route_detail"):
+            answer += f"\n\n{guide['route_detail']}"
+        if guide.get("sources"):
+            answer += "\n\n확인할 공식 안내: " + " · ".join(f"[{label}]({url})" for label, url in guide["sources"])
+        answer += "\n\n어떤 절차가 맞는지는 사건마다 달라요. 모든 피해가 고소 대상인 것은 아니니, 담당 기관이나 법률 상담에서 확인해 주세요."
+        faq.append(("어떤 절차를 확인하면 되나요? 꼭 고소해야 하나요?", answer))
+    return faq
+
+
+# 사건 진행 체크리스트: 이용자가 직접 표시하는 준비 기록. 경찰·법원의 실제 진행을 조회하지 않는다.
+PROGRESS_ITEMS = [
+    ("story", "사건 경위를 시간 순서대로 정리했어요"),
+    ("evidence", "증거 자료를 모으고 원본을 보관했어요"),
+    ("draft", "고소장 초안을 만들었어요"),
+    ("review", "초안의 사실관계를 직접 확인했어요"),
+    ("expert", "법률 전문가나 상담 기관에 검토·상담을 받았어요 (선택)"),
+    ("submitted", "고소장(또는 신고·진정)을 직접 제출했어요"),
+]
+PROGRESS_NOTE_MAX_CHARS = 300
+PROGRESS_PLACE_MAX_CHARS = 60
+PROGRESS_NOTICE = (
+    "직접 표시하는 준비 기록이에요. 경찰·법원의 실제 진행 상황을 조회한 것이 아니며, "
+    "실제 진행은 사건을 맡은 기관의 안내로 확인해 주세요."
+)
+
+
+def progress_summary(record: dict) -> tuple:
+    """(완료 수, 전체 수). 선택 항목도 셈에 넣는다."""
+    record = record or {}
+    done = sum(1 for key, _ in PROGRESS_ITEMS if record.get(key) is True)
+    return done, len(PROGRESS_ITEMS)
+
+
+def clean_progress(record: dict) -> dict:
+    """저장 전 검사: 알려진 항목만 남기고 글자 수를 줄인다."""
+    record = record or {}
+    out = {key: record.get(key) is True for key, _ in PROGRESS_ITEMS}
+    out["submitted_to"] = str(record.get("submitted_to") or "").strip()[:PROGRESS_PLACE_MAX_CHARS]
+    on = str(record.get("submitted_on") or "").strip()
+    out["submitted_on"] = on if re.fullmatch(r"\d{4}-\d{2}-\d{2}", on) else ""
+    out["next_note"] = str(record.get("next_note") or "").strip()[:PROGRESS_NOTE_MAX_CHARS]
+    return out
 
 
 def damage_type_guide(case_type: str) -> dict:
@@ -747,7 +880,7 @@ def build_case_draft_docx(draft_text: str) -> BytesIO:
 
     title_skipped = False
     skip_next_line = False
-    for raw_line in (draft_text or "").splitlines():
+    for raw_line in with_draft_disclaimer(draft_text).splitlines():
         line = raw_line.strip()
         if not line:
             continue

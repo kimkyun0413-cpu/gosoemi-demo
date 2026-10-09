@@ -175,6 +175,32 @@ def speech_text(answer: str) -> str:
 
 
 
+# ── 긴 답변 '핵심만 보기' ─────────────────────────────────────────
+SUMMARY_MIN_CHARS = 300
+SUMMARY_FAILED = "요약에 원래 답변에 없는 내용이 섞여 보여 드리지 않았어요. 원래 답변을 확인해 주세요."
+
+
+def summary_prompt(answer: str) -> str:
+    return (
+        "아래 [답변]만 근거로 짧게 요약하세요.\n"
+        "형식:\n핵심: 한두 문장\n다음에 할 일: 답변에 나온 행동만 한두 개(없으면 '답변에 따로 없음')\n"
+        "규칙: 답변에 없는 사실·숫자·기관·연락처·기한·법조문·판례를 보태지 마세요. 범죄 여부나 결과를 단정하지 마세요. "
+        "쉬운 존댓말로, 마크다운 기호 없이 쓰세요.\n\n"
+        f"[답변]\n{answer}"
+    )
+
+
+def summary_supported(summary: str, answer: str) -> bool:
+    """요약에 들어 있는 숫자(금액·날짜·전화번호 등)가 모두 원래 답변에 있으면 True."""
+    digits = lambda text: set(re.findall(r"\d+", re.sub(r"(?<=\d),(?=\d)", "", text or "")))
+    return digits(summary) <= digits(answer)
+
+
+def clean_summary(summary: str) -> str:
+    text = re.sub(r"[*_`#>]+", "", summary or "").strip()
+    return text[:600]
+
+
 # ── 음성 대화 브라우저 부품 ─────────────────────────────────────────
 # 한 번 화면에 올라오면(마운트) 상태를 parentElement에 두고, 새 data가 올 때마다 같은 상태에서 이어 간다.
 # Streamlit은 data가 바뀔 때 이 함수를 다시 부르고, 화면에서 사라질 때만 마지막 정리 함수를 부른다.

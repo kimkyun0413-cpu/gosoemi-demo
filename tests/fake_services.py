@@ -14,6 +14,7 @@ USER_ID = "00000000-0000-4000-8000-00000000b002"
 CALLS = []
 REPLIES = []
 WRITES = []
+CASES = []  # 'cases' 표를 읽을 때 돌려줄 가짜 사건
 
 
 def fake_token(user_id: str) -> str:
@@ -45,6 +46,8 @@ class FakeQuery:
     def execute(self):
         if self.table_name == "consent_records" and self.op == "select":
             return SimpleNamespace(data=[{"terms_version": "x"}])
+        if self.table_name == "cases" and self.op == "select":
+            return SimpleNamespace(data=[dict(c) for c in CASES])
         return SimpleNamespace(data=[])
 
 
@@ -95,6 +98,7 @@ def reset():
     CALLS.clear()
     REPLIES.clear()
     WRITES.clear()
+    CASES.clear()
 
 
 def contents_text(call) -> str:

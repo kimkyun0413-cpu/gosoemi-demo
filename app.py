@@ -27,13 +27,14 @@ import case_guide as _case_guide_module
 import policy_text as _policy_text_module
 import voice_input as _voice_input_module
 import chat_assistant as _chat_assistant_module
+import precedent_search as _precedent_search_module
 
 # Streamlit Cloud는 git push 뒤 app.py만 새로 실행하고, 이미 불러온 보조 모듈(case_guide, voice_input 등)은
 # 예전 버전을 메모리에 그대로 둘 수 있다. 그러면 새로 추가한 이름을 못 찾아 ImportError로 앱이 멈춘다
 # (2026-10-06 실제 발생). 의존 순서대로 다시 불러와 항상 배포된 파일과 같은 내용을 쓰게 한다.
 for _module in (
     _case_guide_module, _policy_text_module, _billing_module, _auth_ip_module, _voice_input_module,
-    _chat_assistant_module,
+    _chat_assistant_module, _precedent_search_module,
 ):
     importlib.reload(_module)
 
@@ -45,7 +46,10 @@ from chat_assistant import (
     CHAT_INPUT_PLACEHOLDER, CHAT_LIMITS_NOTE, CHAT_MAX_INPUT_CHARS, CHAT_RETENTION_NOTE, CHAT_WELCOME, SPEECH_NOTE, VOICE_CHAT_CSS, VOICE_CHAT_JS,
     VOICE_MIC_NOTE, VOICE_TURN_MAX_SECONDS, append_exchange, decode_voice_turn, is_duplicate_submit, model_contents,
     normalize_question, question_digest, speech_text, system_instruction as chat_system_instruction, user_statements,
-    voice_system_instruction,
+    voice_system_instruction, SUMMARY_FAILED, SUMMARY_MIN_CHARS, clean_summary, summary_prompt, summary_supported,
+)
+from precedent_search import (
+    OFFICIAL_PRECEDENT_SEARCH, OPEN_API_SOURCE, check_query as check_precedent_query, search_precedents, suggest_keywords,
 )
 from auth_ip import auth_request_settings, client_ip_from, forwarded_chain_summary
 from billing import billing_mode, parse_plans, plan_summary, sales_open
@@ -53,7 +57,9 @@ from policy_text import (
     CHANGES_V2_TO_V3, PRIVACY_V3_REVISED_DATE, build_privacy_policy_v2, build_privacy_policy_v3,
 )
 from case_guide import (
-    CASE_FIELDS, CASE_FIELD_LABELS, CASE_LONG_TEXT_FIELDS, CASE_FIELD_MAX_CHARS, DRAFT_DISCLAIMER, DAMAGE_TYPES,
+    CASE_FIELDS, CASE_FIELD_LABELS, CASE_LONG_TEXT_FIELDS, CASE_FIELD_MAX_CHARS, DAMAGE_TYPES,
+    LEGAL_TERMS_SOURCE_LABEL, PROGRESS_ITEMS, PROGRESS_NOTE_MAX_CHARS, PROGRESS_NOTICE, PROGRESS_PLACE_MAX_CHARS, ROUTE_TAGS,
+    clean_progress, legal_terms_for, progress_summary, search_legal_terms, type_faq, with_draft_disclaimer,
     FIELD_GUIDES, LEGAL_TERMS, LEGAL_TERMS_SOURCE, OTHER_TYPE, ROUTES,
     SAFE_DRAFT_INSTRUCTION, SUSPECT_UNKNOWN_GUIDE, build_case_draft_docx, build_draft_prompt,
     compute_case_fingerprint, damage_type_guide, field_label, field_placeholder, find_unsupported_details,
@@ -68,7 +74,7 @@ CASES_TABLE = "cases"
 # 사건 작성·초안·증거 화면의 위젯 상태 키 접두어. 계정이 바뀌면 모두 지운다.
 CASE_UI_STATE_PREFIXES = (
     "case_field_", "case_type_", "case_draft_editor", "case_data_consent",
-    "list_draft_", "evidence_", "confirm_delete_", "voice_", "chat_",
+    "list_draft_", "evidence_", "confirm_delete_", "voice_", "chat_", "prog_", "progress_", "prec_",
 )
 
 # 비밀번호 재설정은 Supabase에 직접 메일 서버(SMTP)와 재설정 메일 템플릿을 설정한 뒤 켠다.
@@ -101,6 +107,10 @@ VOICE_INPUT_ENABLED = os.environ.get("VOICE_INPUT_ENABLED") == "true"
 # 새 AI 대화(이어지는 대화·사건 정보 정리)와 음성 대화. v3 방침에 적은 처리라 시행 전에는 관리자 시험 모드에서만 보인다.
 AI_CHAT_V2_ENABLED = os.environ.get("AI_CHAT_V2_ENABLED") == "true"
 VOICE_CHAT_ENABLED = os.environ.get("VOICE_CHAT_ENABLED") == "true"
+# 용어 풀이·유형별 Q&A 보강·진행 체크리스트(미리보기)·핵심만 보기·판례 찾기. 켜기 전에는 관리자에게만 보인다.
+ASSIST_V2_ENABLED = os.environ.get("ASSIST_V2_ENABLED") == "true"
+# 법제처 국가법령정보 Open API 사용자 ID(OC). 사용 신청·서버 IP 등록 전에는 비워 둔다. 값은 화면·로그에 내지 않는다.
+LAW_OPEN_API_OC = (os.environ.get("LAW_OPEN_API_OC") or "").strip()
 # 관리자(운영자) 계정의 Supabase 사용자 ID 목록(쉼표로 구분). 공개 기능을 켜지 않고 음성 입력 시험과
 # 운영 진단을 이 계정에만 보여 준다. 이메일은 바뀌거나 소셜 로그인 제공자가 정할 수 있어 쓰지 않는다.
 # 운영 AI 키는 서버(Streamlit Secrets)에만 있고 화면·로그에 나오지 않는다. 개인정보 없는 시험 음성만 쓴다.
@@ -1307,7 +1317,9 @@ def render_admin_diagnostics() -> None:
             f"- 음성 입력 공개: **{'켜짐' if VOICE_INPUT_ENABLED and privacy_v3_in_effect() else '꺼짐'}**, "
             f"초안 저장: **{'켜짐' if draft_save_available() else '꺼짐'}**, "
             f"새 AI 대화 공개: **{'켜짐' if chat_v2_public() else '꺼짐'}**, "
-            f"음성 대화 공개: **{'켜짐' if VOICE_CHAT_ENABLED and chat_v2_public() else '꺼짐'}**\n"
+            f"음성 대화 공개: **{'켜짐' if VOICE_CHAT_ENABLED and chat_v2_public() else '꺼짐'}**, "
+            f"보조 기능 공개: **{'켜짐' if ASSIST_V2_ENABLED else '꺼짐'}**, "
+            f"판례 Open API: **{'설정됨' if LAW_OPEN_API_OC else '없음'}**\n"
             f"- AI 키: **{'설정됨' if os.environ.get('GEMINI_API_KEY') else '없음'}** (값은 표시하지 않음)"
         )
         st.caption(
@@ -1326,6 +1338,10 @@ def chat_v2_public() -> bool:
 
 def chat_v2_available() -> bool:
     return chat_v2_public() or is_admin()
+
+
+def assist_preview() -> bool:
+    return ASSIST_V2_ENABLED or is_admin()
 
 
 def voice_chat_available() -> bool:
@@ -1482,7 +1498,7 @@ def generate_case_draft(case):
     today_str = datetime.datetime.now(KST).date().isoformat()
     prompt = build_draft_prompt(case, today_str)
     text = call_gemini([{"role": "user", "parts": [{"text": prompt}]}])
-    return f"{text}\n\n{DRAFT_DISCLAIMER}"
+    return with_draft_disclaimer(text)
 
 
 def has_date_cue(question):
@@ -2026,11 +2042,16 @@ def format_created_at(value) -> str:
 
 def render_damage_type_guide(case_type: str, show_qa: bool) -> None:
     guide = damage_type_guide(case_type)
+    preview = assist_preview()
+    if preview:
+        # 유형별 Q&A에 준비 자료·상대방 정보·절차 질문을 보탠다(이미 확인한 안내로만 만든다).
+        guide = {**guide, "qa": type_faq(case_type)}
     route = ROUTES.get(guide.get("route"))
     if guide.get("urgent"):
         st.error("🚨 " + guide["urgent"])
     if route:
-        message = f"**{route['label']}**  \n{route['note']}"
+        tag = f"[{ROUTE_TAGS[guide['route']]}] " if preview and guide.get("route") in ROUTE_TAGS else ""
+        message = f"**{tag}{route['label']}**  \n{route['note']}"
         if guide.get("route_detail"):
             message += f"  \n{guide['route_detail']}"
         if guide["route"] == "criminal":
@@ -2060,6 +2081,105 @@ def render_damage_type_guide(case_type: str, show_qa: bool) -> None:
         links = " · ".join(f"[{label}]({url})" for label, url in guide["sources"])
         st.markdown(f"공식 안내: {links}")
 
+
+def render_legal_terms(screen: str, title: str = "📖 어려운 말 풀이") -> None:
+    """화면에 나오는 법률 용어를 쉬운 말과 예시로 펼쳐 보기. 기본 화면에는 접힌 제목만 보인다."""
+    terms = legal_terms_for(screen)
+    with st.expander(title):
+        for term, plain, example in terms:
+            st.markdown(f"**{term}** — {plain}  \n:gray[예: {example}]")
+        st.caption(f"뜻 출처: [{LEGAL_TERMS_SOURCE_LABEL}]({LEGAL_TERMS_SOURCE}) · 예시는 이해를 돕기 위한 가상의 상황이에요.")
+
+
+def render_legal_terms_search(key: str) -> None:
+    query = st.text_input("용어 찾기", placeholder="예: 송치, 불송치, 합의", key=key)
+    found = search_legal_terms(query)
+    if not found:
+        st.caption("찾는 용어가 없어요. 다른 말로 찾아보세요.")
+    for term, plain, example in found:
+        st.markdown(f"**{term}** — {plain}  \n:gray[예: {example}]")
+    st.caption(f"뜻 출처: [{LEGAL_TERMS_SOURCE_LABEL}]({LEGAL_TERMS_SOURCE}) · 예시는 가상의 상황이에요.")
+
+
+def render_precedent_finder(case_type: str) -> None:
+    """공식 판례 검색으로 연결한다. 앱이 판례를 고르거나 만들어 보여 주지 않는다."""
+    label, url = OFFICIAL_PRECEDENT_SEARCH
+    with st.expander("🔎 판례 찾아보기 (외부 공식 사이트)"):
+        st.caption(
+            "고소음이는 판례를 직접 검색하지 않아요. 아래 버튼을 누르면 법제처 국가법령정보센터의 판례 검색 화면이 새 창으로 열려요. "
+            "검색어를 복사해 그 화면의 검색창에 붙여 넣어 주세요. 판례는 사건마다 사실관계가 달라 내 사건 결과를 뜻하지 않아요."
+        )
+        st.link_button(f"{label} 열기 ↗", url, width="stretch")
+        keywords = suggest_keywords(case_type)
+        if keywords:
+            st.caption("검색어 예시 (오른쪽 위 아이콘으로 복사)")
+            for word in keywords:
+                st.code(word, language=None)
+        st.caption("검색창에 이름·전화번호·계좌번호 같은 개인정보는 넣지 마세요.")
+        if LAW_OPEN_API_OC:
+            render_precedent_api_search(case_type)
+
+
+def render_precedent_api_search(case_type: str) -> None:
+    """법제처 Open API가 설정된 경우에만: 실제로 조회된 판례 목록만 출처와 함께 보여 준다."""
+    query = st.text_input("국가법령정보센터에서 판례 목록 조회", key=f"prec_query_{case_type}", max_chars=40)
+    if st.button("목록 조회", key=f"prec_search_{case_type}"):
+        problem = check_precedent_query(query)
+        if problem:
+            st.warning(problem)
+            return
+        try:
+            with st.spinner("국가법령정보센터에서 조회하고 있어요."):
+                rows = search_precedents(
+                    query, LAW_OPEN_API_OC,
+                    lambda u: urlopen(Request(u, headers={"User-Agent": "gosoemi"}), timeout=15).read().decode("utf-8"),
+                )
+        except Exception as error:
+            print(f"[precedent] result={type(error).__name__}", flush=True)
+            st.error("판례 목록을 받지 못했어요. 위 버튼으로 공식 사이트에서 직접 찾아 주세요.")
+            return
+        if not rows:
+            st.info("조회된 판례가 없어요. 다른 검색어로 찾아보세요.")
+        for row in rows:
+            st.markdown(f"**{md_escape(row['name'])}**  \n{md_escape(row['court'])} · {md_escape(row['case_no'])} · 선고 {md_escape(row['date'])}")
+        if rows:
+            st.caption(f"출처: {OPEN_API_SOURCE}. 전문은 위 공식 검색 화면에서 사건번호로 찾아 주세요.")
+
+
+def render_case_progress(case_id: str) -> None:
+    """사건 진행 체크리스트(미리보기). 이용자가 직접 표시하는 준비 기록이며, 지금은 이 탭에서만 기억하고 저장하지 않는다."""
+    prefix = f"prog_{case_id}_"
+    # 위젯 값은 위젯 키에만 둔다(기본값을 매번 넘기면 Streamlit이 새 위젯으로 보고 체크를 되돌린다).
+    for key, _ in PROGRESS_ITEMS:
+        st.session_state.setdefault(prefix + key, False)
+    st.session_state.setdefault(prefix + "to", "")
+    st.session_state.setdefault(prefix + "on", None)
+    st.session_state.setdefault(prefix + "note", "")
+    on = st.session_state.get(prefix + "on")
+    record = clean_progress({
+        **{key: st.session_state[prefix + key] for key, _ in PROGRESS_ITEMS},
+        "submitted_to": st.session_state[prefix + "to"],
+        "submitted_on": on.isoformat() if on else "",
+        "next_note": st.session_state[prefix + "note"],
+    })
+    done, total = progress_summary(record)
+    # 제목을 바꾸면 Streamlit이 새 펼침 상자로 보고 접어 버리므로 제목은 고정하고 개수는 안에 적는다.
+    with st.expander("✅ 진행 체크리스트"):
+        st.markdown(f"**{done}/{total}개 표시함**")
+        st.caption(PROGRESS_NOTICE)
+        st.caption("🧪 미리보기: 표시한 내용은 저장되지 않고, 새로고침하거나 로그아웃하면 사라져요.")
+        for key, label in PROGRESS_ITEMS:
+            st.checkbox(label, key=prefix + key)
+        if st.session_state[prefix + "submitted"]:
+            st.text_input(
+                "제출한 곳 (선택)", key=prefix + "to", max_chars=PROGRESS_PLACE_MAX_CHARS,
+                placeholder="예: ○○경찰서, 경찰청 사이버범죄 신고시스템",
+            )
+            st.date_input("제출한 날 (선택)", key=prefix + "on", format="YYYY-MM-DD")
+        st.text_area(
+            "다음에 할 일 메모 (선택)", key=prefix + "note", max_chars=PROGRESS_NOTE_MAX_CHARS, height=70,
+            placeholder="예: 담당 수사관 연락 기다리기, 추가 자료 내기",
+        )
 
 def show_new_draft(case_entry: dict, draft_text: str) -> None:
     st.session_state.case_draft = draft_text
@@ -2114,9 +2234,10 @@ def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str)
     saved = st.session_state.get(f"{editor_key}_saved")
     st.markdown("#### 고소장 초안")
     st.caption(
-        "AI가 입력하신 내용만으로 만든 참고용 초안입니다. 꼭 직접 읽고 고쳐 주세요. "
-        "고친 내용은 칸 바깥을 한 번 누르거나 Ctrl+Enter(맥은 ⌘+Enter)를 누르면 저장·내려받기에 반영됩니다."
+        "AI가 입력하신 내용만으로 만든 참고용 초안이에요. 제출 전 사실관계와 내용을 직접 확인하고, 법률 전문가의 검토를 받아 주세요."
     )
+    if assist_preview():
+        render_legal_terms("draft", "📖 초안에 나오는 말 풀이")
     if editor_key not in st.session_state:
         st.session_state[editor_key] = saved["text"] if saved else original
 
@@ -2128,7 +2249,8 @@ def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str)
         )
 
     edited = st.text_area(
-        "초안 내용 (직접 고칠 수 있어요)", key=editor_key, height=420, max_chars=CASE_DRAFT_MAX_CHARS
+        "초안 내용 (직접 고칠 수 있어요)", key=editor_key, height=420, max_chars=CASE_DRAFT_MAX_CHARS,
+        help="고친 뒤 칸 바깥을 한 번 누르거나 Ctrl+Enter(맥은 ⌘+Enter)를 누르면 저장·내려받기에 반영돼요. 내려받는 문서 끝에는 참고용 초안 안내가 한 번 붙어요.",
     )
 
     unsupported = find_unsupported_details(edited, case, datetime.datetime.now(KST).date().isoformat())
@@ -2167,7 +2289,7 @@ def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str)
     with col_txt_download:
         st.download_button(
             "TXT로 내려받기",
-            data=edited,
+            data=with_draft_disclaimer(edited),
             file_name=f"{file_stem}.txt",
             mime="text/plain",
             key=f"{editor_key}_txt",
@@ -2658,6 +2780,29 @@ def render_chat_proposal() -> None:
             st.button("넣지 않기", key="chat_cancel_proposal_btn", on_click=cancel_chat_proposal, width="stretch")
 
 
+def render_answer_summary(message: dict, index: int, busy: bool) -> None:
+    """긴 답변의 '핵심만 보기'. 원래 답변만 근거로 요약하고, 답변에 없는 숫자가 섞이면 보여 주지 않는다."""
+    summary = message.get("summary")
+    if summary:
+        with st.container(border=True):
+            st.markdown("**핵심만 보기**  \n" + md_escape(summary).replace("\n", "  \n"))
+            st.caption("AI가 위 답변만 줄여 쓴 것이에요. 자세한 내용은 위 답변을 확인해 주세요.")
+        return
+    if st.button("핵심만 보기", key=f"chat_sum_{index}", icon=":material/summarize:", type="tertiary", disabled=busy):
+        try:
+            with st.spinner("답변을 줄이고 있어요."):
+                raw = call_gemini([{"role": "user", "parts": [{"text": summary_prompt(message["content"])}]}])
+        except Exception as error:
+            st.error(ai_error_message(error, "요약하지 못했어요. 잠시 후 다시 눌러 주세요."))
+            return
+        text = clean_summary(raw)
+        if not text or not summary_supported(text, message["content"]):
+            st.warning(SUMMARY_FAILED)
+            return
+        message["summary"] = text
+        st.rerun()
+
+
 def render_chat_details() -> None:
     st.markdown(f"- {CHAT_LIMITS_NOTE}\n- {CHAT_RETENTION_NOTE}\n- {VOICE_MIC_NOTE}\n- {SPEECH_NOTE}")
 
@@ -2682,6 +2827,9 @@ def render_chat_text(voice_ok: bool) -> None:
                 extract = st.button("사건 정보로 정리하기", key="chat_extract_btn", icon=":material/assignment:",
                                     disabled=busy or not has_user_text, width="stretch",
                                     help="대화에서 직접 말씀하신 내용만 모아 고소장 작성 칸에 넣을 제안을 만들어요. 확인 전에는 아무것도 바뀌지 않아요.")
+                if assist_preview():
+                    with st.expander("용어 풀이"):
+                        render_legal_terms_search("chat_terms_query")
                 with st.expander("안내 자세히"):
                     render_chat_details()
 
@@ -2693,9 +2841,11 @@ def render_chat_text(voice_ok: bool) -> None:
     with history_box:
         with st.chat_message("assistant"):
             st.markdown(CHAT_WELCOME)
-        for message in messages:
+        for index, message in enumerate(messages):
             with st.chat_message(message["role"]):
                 st.markdown(("🎤 " if message.get("voice") else "") + message["content"])
+                if message["role"] == "assistant" and assist_preview() and len(message["content"]) >= SUMMARY_MIN_CHARS:
+                    render_answer_summary(message, index, busy)
 
     failed = st.session_state.get("chat_failed")
     if failed and not busy:
@@ -3419,6 +3569,8 @@ with tab_case:
             render_damage_type_guide(case_type_choice, show_qa=False)
         else:
             st.info("먼저 피해 유형을 골라 주세요. 유형에 맞는 작성 예시가 아래 입력칸에 나타납니다.")
+        if assist_preview():
+            render_legal_terms("case")
 
         guide_type = case_type_choice or ""
         # 폼(st.form)을 쓰지 않는다: 폼 안에 적은 글은 제출 전까지 앱이 볼 수 없어,
@@ -3653,6 +3805,9 @@ with tab_case_list:
                     if st.session_state.get(list_draft_key):
                         render_draft_panel(list_editor_key, st.session_state[list_draft_key], case, case_id)
 
+                if assist_preview():
+                    render_case_progress(case_id)
+
                 if EVIDENCE_UPLOAD_ENABLED:
                     render_case_evidence_manager(case_id)
 
@@ -3688,22 +3843,29 @@ with tab_qa:
         key="victim_qa_type",
     )
     render_damage_type_guide(selected_qa_type, show_qa=True)
+    if assist_preview():
+        render_precedent_finder(selected_qa_type)
     st.caption("위 내용은 일반 정보입니다. 실제 신고 방법과 보호조치는 담당 기관의 안내를 확인해 주세요.")
 
 with tab_terms:
-    st.subheader("어려운 법률 용어, 쉽게 보기")
-    st.caption("형사 사건에서 자주 보이는 말의 일반적인 뜻을 설명합니다. 개별 사건의 결과를 판단하는 내용은 아닙니다.")
-    term_query = st.text_input("용어 검색", placeholder="예: 고소, 피고소인, 기소", key="legal_terms_query").strip().casefold()
-    matching_terms = [
-        (term, explanation) for term, explanation in LEGAL_TERMS
-        if term_query in term.casefold() or term_query in explanation.casefold()
-    ]
-    if not matching_terms:
-        st.info("찾는 용어가 없습니다. 다른 단어로 검색하시거나 검색칸을 비우면 전체 목록을 볼 수 있습니다.")
-    for term, explanation in matching_terms:
-        with st.expander(term):
-            st.write(explanation)
-    st.markdown(f"[설명 근거: 대검찰청 사건처리절차 안내]({LEGAL_TERMS_SOURCE})")
+    if assist_preview():
+        st.subheader("어려운 법률 용어, 쉽게 보기")
+        st.caption("자주 보이는 말을 쉬운 말과 예시로 풀었어요. 내 사건의 결과를 판단하는 내용은 아니에요.")
+        render_legal_terms_search("legal_terms_query_v2")
+    else:
+        st.subheader("어려운 법률 용어, 쉽게 보기")
+        st.caption("형사 사건에서 자주 보이는 말의 일반적인 뜻을 설명합니다. 개별 사건의 결과를 판단하는 내용은 아닙니다.")
+        term_query = st.text_input("용어 검색", placeholder="예: 고소, 피고소인, 기소", key="legal_terms_query").strip().casefold()
+        matching_terms = [
+            (term, explanation) for term, explanation in LEGAL_TERMS
+            if term_query in term.casefold() or term_query in explanation.casefold()
+        ]
+        if not matching_terms:
+            st.info("찾는 용어가 없습니다. 다른 단어로 검색하시거나 검색칸을 비우면 전체 목록을 볼 수 있습니다.")
+        for term, explanation in matching_terms:
+            with st.expander(term):
+                st.write(explanation)
+        st.markdown(f"[설명 근거: 대검찰청 사건처리절차 안내]({LEGAL_TERMS_SOURCE})")
 
 with tab_chat:
     if chat_v2_available():
