@@ -34,16 +34,22 @@ class FakeQuery:
     def __init__(self, table):
         self.table_name = table
         self.op = "select"
+        self.filters = {}
 
     def __getattr__(self, name):
         def method(*args, **kwargs):
             if name in ("insert", "upsert", "update", "delete"):
                 self.op = name
                 WRITES.append((self.table_name, name, args))
+            if name == "eq" and len(args) == 2:
+                self.filters[args[0]] = str(args[1])
             return self
         return method
 
     def execute(self):
+        if self.table_name == "cases" and self.op == "delete" and "case_id" in self.filters:
+            CASES[:] = [c for c in CASES if str(c.get("case_id")) != self.filters["case_id"]]
+            return SimpleNamespace(data=[])
         if self.table_name == "consent_records" and self.op == "select":
             return SimpleNamespace(data=[{"terms_version": "x"}])
         if self.table_name == "cases" and self.op == "select":
@@ -64,9 +70,38 @@ class FakeAuth:
         return SimpleNamespace(session=object())
 
 
+FILES = {}  # 가짜 파일 저장소 {경로: 바이트}
+
+
+class FakeBucket:
+    def list(self, folder, *args, **kwargs):
+        prefix = folder.rstrip("/") + "/"
+        return [{"name": path[len(prefix):], "metadata": {"size": len(data)}} for path, data in FILES.items()
+                if path.startswith(prefix)]
+
+    def upload(self, path, data, *args, **kwargs):
+        FILES[path] = bytes(data)
+        WRITES.append(("storage", "upload", (path,)))
+
+    def remove(self, paths):
+        for path in paths:
+            FILES.pop(path, None)
+        WRITES.append(("storage", "remove", tuple(paths)))
+        return []
+
+    def download(self, path):
+        return FILES.get(path, b"")
+
+
+class FakeStorage:
+    def from_(self, bucket):
+        return FakeBucket()
+
+
 class FakeSupabase:
     def __init__(self, *args, **kwargs):
         self.auth = FakeAuth()
+        self.storage = FakeStorage()
         self.postgrest = SimpleNamespace(auth=lambda token: None)
 
     def table(self, name):
@@ -99,6 +134,7 @@ def reset():
     REPLIES.clear()
     WRITES.clear()
     CASES.clear()
+    FILES.clear()
 
 
 def contents_text(call) -> str:

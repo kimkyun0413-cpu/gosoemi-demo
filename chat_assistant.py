@@ -208,17 +208,17 @@ def clean_summary(summary: str) -> str:
 VOICE_CHAT_CSS = """
 .gv { display:flex; flex-direction:column; align-items:center; gap:14px; padding:18px 8px 6px; font-family:inherit; color:#0B1F3A; }
 .gv-mic { width:112px; height:112px; border-radius:50%; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center;
-  background:#C9D3E3; color:#fff; box-shadow:0 6px 18px rgba(11,31,58,.18); transition:background .2s, transform .1s; -webkit-tap-highlight-color:transparent; }
+  background:#2F80ED; color:#fff; box-shadow:0 6px 18px rgba(11,31,58,.18); transition:background .2s, transform .1s; -webkit-tap-highlight-color:transparent; }
 .gv-mic:active { transform:scale(.96); }
 .gv-mic svg { width:46px; height:46px; }
 .gv[data-phase="listening"] .gv-mic { background:#1F9D55; animation:gvpulse 1.6s infinite; }
 .gv[data-phase="hearing"] .gv-mic { background:#14803F; animation:gvpulse .8s infinite; }
 .gv[data-phase="thinking"] .gv-mic { background:#E0A100; }
-.gv[data-phase="speaking"] .gv-mic { background:#2F80ED; }
+.gv[data-phase="speaking"] .gv-mic { background:#1B4F9C; }
 .gv[data-phase="starting"] .gv-mic { background:#8FA3C0; }
 @keyframes gvpulse { 0% { box-shadow:0 0 0 0 rgba(31,157,85,.45); } 70% { box-shadow:0 0 0 22px rgba(31,157,85,0); } 100% { box-shadow:0 0 0 0 rgba(31,157,85,0); } }
 .gv-status { font-size:22px; font-weight:700; text-align:center; min-height:30px; }
-.gv-hint { font-size:15px; color:#4A5A75; text-align:center; max-width:460px; line-height:1.5; min-height:22px; }
+.gv-hint { font-size:16px; color:#3E4C61; text-align:center; max-width:460px; line-height:1.5; min-height:22px; }
 .gv-hint.warn { color:#B42318; }
 .gv-row { display:flex; gap:8px; flex-wrap:wrap; justify-content:center; width:100%; }
 .gv-btn { flex:1 1 110px; max-width:160px; min-height:46px; padding:10px 12px; font-size:15px; border-radius:12px; border:1px solid #C8D3E6;

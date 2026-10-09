@@ -131,6 +131,7 @@ ENV = {
     "ADMIN_USER_IDS": fake.ADMIN_ID, "PRIVACY_POLICY_EFFECTIVE_DATE": "2026-09-27", "AI_CALLS_PER_HOUR": "30",
     "ASSIST_V2_ENABLED": "", "AI_CHAT_V2_ENABLED": "", "LAW_OPEN_API_OC": "",
 }
+CASE_ID = "11111111-1111-4111-8111-111111111111"
 LONG_ANSWER = ("먼저 거래 내용을 시간 순서대로 정리해 보세요. " * 12) + "112에 신고할 수 있어요. 45만 원 이체 내역을 보관하세요."
 
 
@@ -146,34 +147,49 @@ class AssistAppTest(unittest.TestCase):
             patch.start()
         self.addCleanup(lambda: [patch.stop() for patch in reversed(patches)])
 
-    def start(self, user_id=fake.ADMIN_ID):
+    def start(self, user_id=fake.ADMIN_ID, page="chat", **state):
         at = AppTest.from_file(os.path.join(ROOT, "app.py"), default_timeout=60)
         at.session_state["supabase_session"] = fake.session_for(user_id, "x@example.com")
         at.session_state["browser_login_checked"] = True
+        at.session_state["nav_page"] = page
         at.run()
+        if state:  # 첫 실행은 계정이 바뀐 것으로 보고 화면 상태를 비우므로, 그 뒤에 넣는다.
+            for key, value in state.items():
+                at.session_state[key] = value
+            at.run()
         self.assertEqual([e.value for e in at.exception], [])
         return at
 
     def labels(self, at):
         return [e.label for e in at.expander]
 
+    def pages(self, user_id):
+        """사건 작성·도움말·내 사건(사건 열기) 화면의 펼쳐 보기 제목과 링크 버튼을 모은다."""
+        labels, links = [], []
+        case = self.start(user_id, "case", case_type_choice="중고거래 사기")
+        labels += self.labels(case)
+        help_page = self.start(user_id, "help")
+        labels += self.labels(help_page)
+        links += [b.proto.url for b in help_page.get("link_button")]
+        cases = self.start(user_id, "cases", open_case_id=CASE_ID)
+        labels += self.labels(cases)
+        return labels, links
+
     def test_admin_sees_new_helpers_and_regular_user_does_not(self):
-        at = self.start()
-        labels = self.labels(at)
+        labels, links = self.pages(fake.ADMIN_ID)
         self.assertIn("📖 어려운 말 풀이", labels)
         self.assertIn("🔎 판례 찾아보기 (외부 공식 사이트)", labels)
-        self.assertTrue(any(l.startswith("✅ 진행 체크리스트") for l in labels))
+        self.assertIn("✅ 진행 체크리스트", labels)
         self.assertTrue(any("상대방 이름이나 연락처를 모르면" in l for l in labels))
-        self.assertTrue(any(b.proto.url.startswith("https://www.law.go.kr/") for b in at.get("link_button")))
-        user = self.start(fake.USER_ID)
-        ulabels = self.labels(user)
-        for hidden in ("📖 어려운 말 풀이", "🔎 판례 찾아보기 (외부 공식 사이트)"):
+        self.assertTrue(any(u.startswith("https://www.law.go.kr/") for u in links))
+        fake.CASES[0]["user_id"] = fake.USER_ID
+        ulabels, _ = self.pages(fake.USER_ID)
+        for hidden in ("📖 어려운 말 풀이", "🔎 판례 찾아보기 (외부 공식 사이트)", "✅ 진행 체크리스트"):
             self.assertNotIn(hidden, ulabels)
-        self.assertFalse(any(l.startswith("✅ 진행 체크리스트") for l in ulabels))
 
     def test_checklist_is_not_saved(self):
-        at = self.start()
-        at.checkbox(key="prog_11111111-1111-4111-8111-111111111111_story").check().run()
+        at = self.start(page="cases", open_case_id=CASE_ID)
+        at.checkbox(key=f"prog_{CASE_ID}_story").check().run()
         self.assertIn(f"**1/{len(g.PROGRESS_ITEMS)}개 표시함**", [m.value for m in at.markdown])
         self.assertIn("✅ 진행 체크리스트", self.labels(at))
         self.assertFalse(fake.WRITES)

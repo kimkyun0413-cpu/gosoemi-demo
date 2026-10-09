@@ -48,6 +48,7 @@ class ChatAppTest(unittest.TestCase):
         at = AppTest.from_file(APP, default_timeout=60)
         at.session_state["supabase_session"] = fake.session_for(user_id, email)
         at.session_state["browser_login_checked"] = True
+        at.session_state["nav_page"] = "chat"
         at.run()
         self.assertEqual([e.value for e in at.exception], [])
         return at
@@ -183,6 +184,7 @@ class ChatAppTest(unittest.TestCase):
         at.session_state["supabase_session"] = fake.session_for(fake.ADMIN_ID, "admin@example.com")
         at.run()
         self.send(at, "다시 질문")
+        self.button(at, "account_btn").click().run()  # 로그아웃은 '내 계정' 화면에 있다
         self.button(at, "logout_btn_main").click().run()
         self.assertNotIn("chat_messages", at.session_state)
         self.assertIsNone(at.session_state["supabase_session"])
