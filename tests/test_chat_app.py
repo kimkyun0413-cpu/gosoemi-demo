@@ -106,7 +106,7 @@ class ChatAppTest(unittest.TestCase):
         self.assertNotIn("첫 질문입니다", fake.contents_text(fake.CALLS[-1]))
         self.button(at, "chat_clear_btn").click().run()
         self.assertNotIn("새 대화 질문입니다", " ".join(self.texts(at)))
-        self.assertIn("지웠습니다", " ".join(i.value for i in at.info))
+        self.assertIn("지웠어요", " ".join(i.value for i in at.info))
 
     # ── 실패·재시도 ──
     def test_failure_keeps_question_and_retry_works(self):
@@ -130,17 +130,23 @@ class ChatAppTest(unittest.TestCase):
         self.assertEqual(at.text_area(key="chat_retry_text").value, "두 번째 질문")
         self.assertEqual(len(fake.CALLS), 1)
 
-    # ── 음성 질문(변환된 글 확인 후 전송) ──
-    def test_voice_question_flow_and_speech_toggle(self):
+    # ── 글 채팅 ↔ 음성 대화 전환(같은 대화 이어 가기) ──
+    def test_switching_to_voice_and_back_keeps_conversation(self):
         at = self.start()
-        self.assertTrue(at.toggle(key="chat_speak_on").value)
-        at.session_state["chat_voice_editor"] = "9월 2일에 45만 원을 보냈어요"
-        at.run()
-        self.button(at, "chat_voice_send_btn").click().run()
+        self.send(at, "중고거래로 45만 원을 보냈어요")
+        self.button(at, "chat_voice_open_btn").click().run()
         self.assertEqual([e.value for e in at.exception], [])
-        self.assertTrue(at.session_state["chat_messages"][0]["voice"])
-        self.assertIn("🎤 9월 2일에 45만 원을 보냈어요", self.texts(at))
-        self.assertNotIn("chat_voice_editor", at.session_state)
+        self.assertEqual(at.session_state["chat_mode"], "voice")
+        self.assertFalse(at.chat_input)  # 음성 대화 화면에는 글 입력창이 없다
+        self.assertTrue(any(b.key == "chat_back_to_text" for b in at.button))
+        self.button(at, "chat_back_to_text").click().run()
+        self.assertEqual(at.session_state["chat_mode"], "text")
+        self.send(at, "이어서 질문해요")
+        self.assertIn("45만 원을 보냈어요", fake.contents_text(fake.CALLS[-1]))
+
+    def test_voice_button_hidden_for_regular_user(self):
+        at = self.start(fake.USER_ID, "user@example.com")
+        self.assertFalse(any(b.key == "chat_voice_open_btn" for b in at.button))
 
     # ── 사건 정보 정리 ──
     def test_extract_uses_only_user_words_and_protects_existing_input(self):

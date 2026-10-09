@@ -66,12 +66,60 @@ class SpeechTest(unittest.TestCase):
         self.assertLessEqual(len(text), c.SPEECH_MAX_CHARS + 40)
         self.assertTrue(text.endswith("화면의 글로 확인해 주세요."))
 
-    def test_speech_component_uses_only_local_korean_voices_and_no_mic(self):
-        js = c.SPEECH_COMPONENT_JS
-        self.assertIn("v.localService", js)
-        self.assertNotIn("getUserMedia", js)
-        self.assertIn("synth.cancel()", js)
+    def test_voice_component_rules(self):
+        js = c.VOICE_CHAT_JS
+        self.assertIn("v.localService", js)                       # 기기 안 음성만
+        self.assertEqual(js.count("getUserMedia("), 1)              # 마이크 요청은 start() 한 곳뿐
+        start = js.index("async function start(")
+        self.assertGreater(js.index("getUserMedia("), start)
+        self.assertIn("S.el.mic.onclick", js)                       # start()는 마이크 버튼에서만 부른다
+        self.assertEqual(js.count(" start(S);"), 1)
+        speak = js[js.index("function speak("):js.index("function downsample(")]
+        self.assertIn("micEnabled(S, false)", speak)                # 답변 중에는 마이크 입력을 끈다
+        finish = js[js.index("function finishTurn("):js.index("function onFrame(")]
+        self.assertIn("micEnabled(S, false)", finish)
+        end = js[js.index("function endAll("):js.index("function build(")]
+        for call in ("stopSpeech(S)", "stopStream(S)"):
+            self.assertIn(call, end)                                # 종료하면 마이크·읽기 모두 멈춤
+        self.assertIn("t.stop()", js)
+        self.assertIn("echoCancellation: true", js)
         self.assertNotIn("fetch(", js)
+        self.assertNotIn("innerHTML = data", js)
+
+
+class VoiceTurnTest(unittest.TestCase):
+    def wav(self, n=4000):
+        import struct
+        body = b"\x00\x00" * n
+        return b"RIFF" + struct.pack("<I", 36 + len(body)) + b"WAVEfmt " + b"\x00" * 20 + b"data" + struct.pack("<I", len(body)) + body
+
+    def payload(self, **kw):
+        import base64
+        data = {"sid": "abc123", "seq": 1, "audio": base64.b64encode(self.wav()).decode()}
+        data.update(kw)
+        return data
+
+    def test_valid_turn(self):
+        sid, seq, data = c.decode_voice_turn(self.payload())
+        self.assertEqual((sid, seq), ("abc123", 1))
+        self.assertTrue(data.startswith(b"RIFF"))
+
+    def test_rejects_bad_input(self):
+        import base64
+        bad = [
+            None, "x", self.payload(sid="../x"), self.payload(seq="1"), self.payload(seq=0),
+            self.payload(audio="!!!"), self.payload(audio=base64.b64encode(b"x" * 100).decode()),
+            self.payload(audio=base64.b64encode(b"ID3" + b"0" * 5000).decode()),
+            self.payload(audio="A" * (c.VOICE_TURN_MAX_BYTES * 2)),
+        ]
+        for item in bad:
+            with self.assertRaises(ValueError):
+                c.decode_voice_turn(item)
+
+    def test_voice_instruction_is_short_and_keeps_legal_rules(self):
+        text = c.voice_system_instruction("정체성", "안전")
+        self.assertIn("2~4문장", text)
+        self.assertIn("단정하지 마라", text)
 
 
 if __name__ == "__main__":

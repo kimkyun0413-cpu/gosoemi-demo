@@ -53,6 +53,9 @@ class PrivacyPolicyV3Test(unittest.TestCase):
             "약 2분",
             "AI 답변 제외",
             "기기 안에서 읽습니다",
+            "마이크 버튼을 누른 뒤에만 마이크를 켜고",
+            "AI가 답변을 읽는 동안에는 마이크 입력을 끕니다",
+            "임시파일을 거치지 않습니다",
             "음성 입력·음성 대화 이용 시",
         ]:
             self.assertIn(phrase, self.text)

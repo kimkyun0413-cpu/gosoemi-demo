@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [case_guide.py](case_guide.py) — Streamlit-free data and helpers: damage types and official source links, field guides, draft prompt, draft checks, Word export.
 - [policy_text.py](policy_text.py) — privacy policy text per version. Never edit a version users already consented to; add a new version instead.
 - [voice_input.py](voice_input.py) — voice input rules: allowed audio formats/limits, transcription and field-extraction prompts, checks that flag unstated amounts/dates/numbers. Audio is never stored.
-- [chat_assistant.py](chat_assistant.py) — AI chat (text and voice) rules: chat system instruction, history trimming, duplicate-send guard, user-only text for case extraction, on-device-only answer read-aloud component. Chat history is never stored in the DB.
+- [chat_assistant.py](chat_assistant.py) — AI chat rules (system instructions, history trimming, duplicate-send guard, user-only text for case extraction) and the hands-free voice conversation browser component (`VOICE_CHAT_JS`: mic only after the user taps, end-of-speech detection, mic muted while the answer is read, on-device Korean voices only). Chat history is never stored in the DB.
 - [billing.py](billing.py) — paid-plan settings and display rules only. No payment provider is integrated; sales stay closed. DB/Edge Function drafts live in `supabase/proposals/billing/` and are not applied.
 - [auth_ip.py](auth_ip.py) — when to forward the user's IP to Supabase Auth (Sb-Forwarded-For).
 - [scripts/](scripts/) — Free-plan backup/restore, voice smoke test, privacy review packet builder. None of them run automatically.
