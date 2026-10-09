@@ -49,6 +49,20 @@ class PromptTest(unittest.TestCase):
         for key in v.EXTRACT_FIELDS:
             self.assertIn(key, prompt)
 
+    def test_extraction_prompt_treats_stated_online_place_as_location(self):
+        # 운영 시험(2026-10-10)에서 말한 '온라인 중고거래'가 장소 칸에 들어가지 않았다.
+        prompt = v.extraction_prompt(TRANSCRIPT, TYPES)
+        self.assertIn("incident_location에는 피해자가 말한 장소", prompt)
+        self.assertIn("온라인 중고거래", prompt)
+        self.assertIn("덧붙이지 마세요", prompt)
+
+    def test_stated_online_location_is_kept(self):
+        transcript = "온라인 중고거래로 태블릿을 사려고 45만 원을 보냈어요."
+        result = v.parse_extraction(
+            json.dumps({"incident_location": "온라인 중고거래"}, ensure_ascii=False), transcript, TYPES
+        )
+        self.assertEqual(result["incident_location"], "온라인 중고거래")
+
     def test_empty_transcript(self):
         self.assertTrue(v.is_empty_transcript(" [음성 없음] "))
         self.assertTrue(v.is_empty_transcript(""))
