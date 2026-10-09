@@ -66,6 +66,13 @@ class SpeechTest(unittest.TestCase):
         self.assertLessEqual(len(text), c.SPEECH_MAX_CHARS + 40)
         self.assertTrue(text.endswith("화면의 글로 확인해 주세요."))
 
+    def test_first_screen_texts(self):
+        self.assertEqual(c.CHAT_WELCOME, "무엇이 궁금하신가요?")
+        self.assertEqual(c.CHAT_INPUT_PLACEHOLDER, "질문을 입력해 주세요")
+        self.assertIn(f"idle: '{c.VOICE_WELCOME}'", c.VOICE_CHAT_JS)
+        for old in ("어떤 일이 있으셨는지", "하나씩 여쭤"):
+            self.assertNotIn(old, c.CHAT_WELCOME + c.VOICE_CHAT_JS)
+
     def test_voice_component_rules(self):
         js = c.VOICE_CHAT_JS
         self.assertIn("v.localService", js)                       # 기기 안 음성만

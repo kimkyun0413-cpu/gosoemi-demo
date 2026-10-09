@@ -38,10 +38,9 @@ CHAT_STYLE_INSTRUCTION = (
     "- 상황이 어느 정도 정리되면 '이 대화로 사건 정보 정리하기' 버튼으로 고소장 작성 화면에 옮길 수 있다고 한 번 알려 줘도 된다."
 )
 
-CHAT_WELCOME = (
-    "안녕하세요. 어떤 일이 있으셨는지 편하게 말씀해 주세요. "
-    "필요한 내용은 제가 하나씩 여쭤볼게요."
-)
+CHAT_WELCOME = "무엇이 궁금하신가요?"
+CHAT_INPUT_PLACEHOLDER = "질문을 입력해 주세요"
+VOICE_WELCOME = "무엇이 궁금하신가요? 편하게 말씀해 주세요."
 
 CHAT_LIMITS_NOTE = (
     "AI 답변은 일반 정보이며 법률 자문이 아닙니다. 인터넷 검색을 하지 않아 최신 법·제도와 다를 수 있고, "
@@ -206,11 +205,11 @@ VOICE_CHAT_CSS = """
 VOICE_CHAT_JS = """
 const MIC_SVG = '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V22h2v-3.08A7 7 0 0 0 19 12h-2z"/></svg>';
 const LABEL = {
-  idle: '마이크를 눌러 시작하세요', starting: '마이크를 켜는 중…', listening: '듣는 중', hearing: '듣는 중',
+  idle: '무엇이 궁금하신가요? 편하게 말씀해 주세요.', starting: '마이크를 켜는 중…', listening: '듣는 중', hearing: '듣는 중',
   thinking: '생각 중', speaking: '답변 중', off: '마이크 꺼짐', error: '마이크를 켜지 못했어요',
 };
 const HINT = {
-  idle: '편하게 말씀하시고 잠시 멈추면 자동으로 전달돼요.', starting: '브라우저가 마이크 사용을 물으면 허용해 주세요.',
+  idle: '마이크를 누르고 말씀하세요. 잠시 멈추면 자동으로 전달돼요.', starting: '브라우저가 마이크 사용을 물으면 허용해 주세요.',
   listening: '말씀하세요. 말을 마치고 잠시 멈추면 자동으로 전달돼요.', hearing: '듣고 있어요…',
   thinking: '말씀을 글로 바꾸고 답변을 만들고 있어요.', speaking: '답변을 읽는 동안에는 마이크를 잠시 꺼 둬요.',
   off: '다시 말하려면 마이크를 누르세요.', error: '',

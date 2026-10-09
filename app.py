@@ -42,7 +42,7 @@ from voice_input import (
     extraction_prompt, is_empty_transcript, merge_rows, parse_extraction, transcription_prompt, validate_audio,
 )
 from chat_assistant import (
-    CHAT_LIMITS_NOTE, CHAT_MAX_INPUT_CHARS, CHAT_RETENTION_NOTE, CHAT_WELCOME, SPEECH_NOTE, VOICE_CHAT_CSS, VOICE_CHAT_JS,
+    CHAT_INPUT_PLACEHOLDER, CHAT_LIMITS_NOTE, CHAT_MAX_INPUT_CHARS, CHAT_RETENTION_NOTE, CHAT_WELCOME, SPEECH_NOTE, VOICE_CHAT_CSS, VOICE_CHAT_JS,
     VOICE_MIC_NOTE, VOICE_TURN_MAX_SECONDS, append_exchange, decode_voice_turn, is_duplicate_submit, model_contents,
     normalize_question, question_digest, speech_text, system_instruction as chat_system_instruction, user_statements,
     voice_system_instruction,
@@ -2719,7 +2719,7 @@ def render_chat_text(voice_ok: bool) -> None:
             col_input, col_mic = st.container(), None
         with col_input:
             prompt = st.chat_input(
-                "답변을 만들고 있어요…" if busy else "메시지를 입력하세요",
+                "답변을 만들고 있어요…" if busy else CHAT_INPUT_PLACEHOLDER,
                 max_chars=CHAT_MAX_INPUT_CHARS, key="chat_input_box", disabled=busy,
             )
         if col_mic is not None:
