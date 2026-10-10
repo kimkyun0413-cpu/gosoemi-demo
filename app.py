@@ -1645,6 +1645,15 @@ h3 { font-size: 1.2rem !important; color: var(--dgo-navy); padding-top: 0.8rem !
 .st-key-top_bar [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; }
 .st-key-top_bar [data-testid="stColumn"] { min-width: 0 !important; }
 .st-key-top_bar [data-testid="stColumn"]:last-child { display: flex; justify-content: flex-end; }
+.st-key-top_bar [data-testid="stColumn"]:last-child [data-testid="stVerticalBlock"] { align-items: flex-end; }
+.st-key-account_btn { display: flex; justify-content: flex-end; width: 100%; }
+.st-key-account_btn [data-testid="stButton"], .st-key-account_btn button { width: auto !important; }
+/* 처음 화면 카드 세 개의 높이를 맞춘다(PC). */
+[data-testid="stHorizontalBlock"]:has([class*="st-key-home_card_"]) { align-items: stretch; }
+[data-testid="stHorizontalBlock"]:has([class*="st-key-home_card_"]) [data-testid="stColumn"] > [data-testid="stVerticalBlock"],
+[data-testid="stLayoutWrapper"]:has(> [class*="st-key-home_card_"]),
+[class*="st-key-home_card_"] { height: 100%; }
+[class*="st-key-home_card_"] { justify-content: space-between; }
 .st-key-brand_home_btn button { font-size: 1.35rem !important; font-weight: 800 !important; color: var(--dgo-navy) !important; padding-left: 0; }
 .st-key-brand_home_btn button p { font-size: 1.35rem !important; font-weight: 800 !important; }
 /* 화면 이동 막대·도움말 종류: 고른 칸은 파란 바탕+흰 글자로 분명하게 */
@@ -3542,6 +3551,9 @@ def render_account_page(identity: str, method: str) -> None:
                 + (", 증거파일" if EVIDENCE_UPLOAD_ENABLED else "") + "이 모두 삭제돼요. 누르면 삭제할 내용을 한 번 더 보여 드려요.")
     if st.button("회원탈퇴", key="delete_account_main", type="secondary", icon=":material/person_remove:"):
         render_delete_account_dialog()
+    if is_admin():
+        st.markdown("### 운영자")
+        render_admin_diagnostics()
 
 
 def render_top_bar(identity: str, method: str) -> str:
@@ -3558,6 +3570,8 @@ def render_top_bar(identity: str, method: str) -> str:
     if page not in PAGES and page != "account":
         page = "home"
     st.session_state.nav_page = page
+    if page == "home":
+        return page  # 처음 화면에서는 이동 막대 없이 카드 세 개로 고른다
     st.session_state.nav_choice = page if page in PAGES else None
     st.segmented_control(
         "화면 이동", list(PAGES), format_func=PAGES.get, key="nav_choice", label_visibility="collapsed",
@@ -3569,10 +3583,10 @@ def render_top_bar(identity: str, method: str) -> str:
 def render_home_page() -> None:
     st.markdown("## 무엇을 도와드릴까요?")
     choices = [
-        ("chat", "AI에게 질문하기", "궁금한 점을 글이나 말로 물어보세요." if voice_chat_available() else "궁금한 점을 물어보세요.",
+        ("chat", "AI에게 질문하기", "궁금한 점을 글이나 말로 물어보세요." if voice_chat_available() else "궁금한 점을 글로 물어보세요.",
          ":material/chat:"),
-        ("case", "고소장 작성하기", "피해 내용을 적으면 참고용 초안을 만들어 드려요.", ":material/edit_document:"),
-        ("cases", "내 사건 보기", "저장한 사건과 초안을 다시 봐요.", ":material/folder_open:"),
+        ("case", "고소장 작성하기", "사건 내용을 바탕으로 초안을 만들어요.", ":material/edit_document:"),
+        ("cases", "내 사건 보기", "저장한 사건을 확인하세요.", ":material/folder_open:"),
     ]
     columns = st.columns(3)
     for column, (page, title, desc, icon) in zip(columns, choices):
@@ -3950,7 +3964,8 @@ def render_cases_page() -> None:
     if opened:
         render_case_detail(opened, draft_index.get(str(opened.get("case_id"))), can_save_drafts)
         return
-    st.caption(f"저장한 사건 {len(unique)}건 · 사건을 열면 초안" + (" · 증거파일" if EVIDENCE_UPLOAD_ENABLED else "") + "을 볼 수 있어요.")
+    opened_items = ["저장한 초안" if can_save_drafts else "새 초안 만들기"] + (["증거파일"] if EVIDENCE_UPLOAD_ENABLED else [])
+    st.caption(f"저장한 사건 {len(unique)}건 · 사건을 열면 " + "·".join(opened_items) + "을 이용할 수 있어요.")
     for case in unique:
         case_id = case.get("case_id", "")
         with st.container(border=True):
@@ -4063,8 +4078,6 @@ else:
         "home": render_home_page, "chat": render_chat_page, "case": render_case_page,
         "cases": render_cases_page, "help": render_help_page,
     }[current_page]()
-if is_admin() and current_page == "home":
-    render_admin_diagnostics()
 render_footer()
 # 다른 화면(또는 고소장 작성 단계·사건 열기·음성 대화)으로 바뀌었을 때만 새 화면의 맨 위로 올린다.
 current_view = "|".join(str(x) for x in (

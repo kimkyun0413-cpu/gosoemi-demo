@@ -124,6 +124,29 @@ class NavigationTest(unittest.TestCase):
         self.at.text_area(key="case_field_reporter_info").input("홍길동").run()
         self.assertFalse(self.scroll_marks())       # 같은 화면에서 입력할 때는 올리지 않는다
 
+    def nav_shown(self):
+        return any(getattr(e, "key", None) == "nav_choice" or "nav_choice" in str(getattr(e, "proto", ""))[:400]
+                   for e in self.at.get("button_group"))
+
+    def test_home_hides_navigation_and_cards_use_short_texts(self):
+        self.assertFalse(self.nav_shown())
+        texts = " ".join(m.value for m in self.at.markdown)
+        self.assertIn("궁금한 점을 글로 물어보세요.", texts)  # 음성이 꺼진 일반 계정
+        self.assertIn("사건 내용을 바탕으로 초안을 만들어요.", texts)
+        self.assertIn("저장한 사건을 확인하세요.", texts)
+        self.assertNotIn("초안을 다시", texts)
+        self.click("home_go_case")
+        self.assertTrue(self.nav_shown())
+
+    def test_cases_caption_does_not_promise_saved_drafts_when_saving_is_off(self):
+        fake.CASES.append({"case_id": "33333333-3333-4333-8333-333333333333", "user_id": fake.USER_ID,
+                           "case_type": "투자 사기", "created_at": "2026-10-02T00:00:00+00:00"})
+        self.click("home_go_cases")
+        captions = " ".join(c.value for c in self.at.caption)
+        self.assertIn("새 초안 만들기", captions)
+        self.assertNotIn("저장한 초안", captions)
+        self.assertFalse(any(b.key and b.key.startswith("list_draft_open_") for b in self.at.button))
+
 
 if __name__ == "__main__":
     unittest.main()

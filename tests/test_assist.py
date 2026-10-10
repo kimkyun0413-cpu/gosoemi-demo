@@ -187,6 +187,13 @@ class AssistAppTest(unittest.TestCase):
         for hidden in ("📖 어려운 말 풀이", "🔎 판례 찾아보기 (외부 공식 사이트)", "✅ 진행 체크리스트"):
             self.assertNotIn(hidden, ulabels)
 
+    def test_admin_diagnostics_only_on_account_page(self):
+        home = self.start(page="home")
+        self.assertNotIn("🛠 운영자 진단 (관리자에게만 보임)", self.labels(home))
+        account = self.start(page="account")
+        self.assertIn("🛠 운영자 진단 (관리자에게만 보임)", self.labels(account))
+        self.assertIn("궁금한 점을 글이나 말로 물어보세요.", " ".join(m.value for m in home.markdown))
+
     def test_checklist_is_not_saved(self):
         at = self.start(page="cases", open_case_id=CASE_ID)
         at.checkbox(key=f"prog_{CASE_ID}_story").check().run()
