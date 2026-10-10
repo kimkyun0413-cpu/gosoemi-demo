@@ -211,6 +211,17 @@ class WorkspaceSaveTest(unittest.TestCase):
         self.assertFalse(any(b.key == f"ws_save_{CID}" for b in at.button))   # v3 시행 전에는 저장 버튼 없음
         self.assertTrue(any("저장되지 않아요" in c.value for c in at.caption))
 
+    def test_regular_user_gets_no_draft_or_workspace_saving_before_v3(self):
+        fake.CASES[0]["user_id"] = fake.USER_ID
+        fake.REPLIES[:] = ["고소장\n범죄 사실\n9월 2일"]
+        at = self.open(user_id=fake.USER_ID)                       # 일반 이용자: 기존 사건 화면
+        at.button(key=f"list_draft_btn_{CID}").click().run()
+        keys = {b.key for b in at.button}
+        self.assertNotIn(f"list_draft_editor_{CID}_save", keys)    # 초안 저장 버튼 없음
+        self.assertNotIn(f"ws_save_{CID}", keys)                   # 작업 저장 버튼 없음
+        self.assertEqual(fake.TABLES["case_drafts"], [])
+        self.assertEqual(fake.TABLES["case_workspace"], [])
+
     def test_preview_note_when_saving_is_off(self):
         os.environ["CASE_WORKSPACE_SAVE_ENABLED"] = ""
         at = self.open(step="check")

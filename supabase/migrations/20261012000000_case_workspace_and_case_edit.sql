@@ -1,4 +1,6 @@
--- [준비, 운영 미적용] 사건 작업 공간 저장 + 저장한 사건 수정
+-- 사건 작업 공간 저장 + 저장한 사건 수정
+-- 운영 적용: 2026-10-11 (운영자 승인, Supabase SQL Editor에서 begin/commit으로 실행).
+--   적용 전 점검 supabase/checks/preflight_case_workspace_and_case_edit.sql 12/12, 적용 후 점검 postapply_… 13/13 통과.
 -- 1) public.cases: 본인 사건의 내용 칸만 고칠 수 있게 한다(update 권한·정책 추가). 동시에 고친 것을 알아채도록
 --    edit_version(고칠 때마다 1씩 증가, 트리거)과 updated_at을 더한다. case_id·user_id·created_at은 고칠 수 없다(열 단위 권한).
 -- 2) public.case_workspace: 사건마다 1개. 사건 경위(timeline)·증거 설명(evidence_notes)·일정(schedules)·준비 체크(checklist).
