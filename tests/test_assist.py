@@ -171,7 +171,7 @@ class AssistAppTest(unittest.TestCase):
         help_page = self.start(user_id, "help")
         labels += self.labels(help_page)
         links += [b.proto.url for b in help_page.get("link_button")]
-        cases = self.start(user_id, "cases", open_case_id=CASE_ID)
+        cases = self.start(user_id, "cases", open_case_id=CASE_ID, **{f"ws_step_{CASE_ID}": "next"})
         labels += self.labels(cases)
         return labels, links
 
@@ -195,7 +195,7 @@ class AssistAppTest(unittest.TestCase):
         self.assertIn("궁금한 점을 글이나 말로 물어보세요.", " ".join(m.value for m in home.markdown))
 
     def test_checklist_is_not_saved(self):
-        at = self.start(page="cases", open_case_id=CASE_ID)
+        at = self.start(page="cases", open_case_id=CASE_ID, **{f"ws_step_{CASE_ID}": "next"})
         at.checkbox(key=f"prog_{CASE_ID}_story").check().run()
         self.assertIn(f"**1/{len(g.PROGRESS_ITEMS)}개 표시함**", [m.value for m in at.markdown])
         self.assertIn("✅ 진행 체크리스트", self.labels(at))

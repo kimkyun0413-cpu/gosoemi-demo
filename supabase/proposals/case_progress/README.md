@@ -1,5 +1,7 @@
 # [제안, 운영 미적용] 사건 진행 체크리스트 저장
 
+> 이 제안은 `supabase/proposals/case_workspace/`로 대신합니다(하나만 적용).
+
 지금 앱의 체크리스트는 관리자 미리보기이며 **저장하지 않습니다**(이 탭의 서버 메모리에만 있고 새로고침·로그아웃 시 사라짐).
 저장하려면 이 폴더의 SQL을 적용해야 하며, **운영 DB에 적용하지 않았습니다.** 접근 제한·삭제 검사는
 `supabase/tests/local_case_progress_test.py`(로컬 임시 Postgres 전용)로 준비했지만, 이 Mac에 Postgres가 없어 아직 실행하지 않았습니다.

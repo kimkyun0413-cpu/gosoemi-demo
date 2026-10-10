@@ -76,7 +76,7 @@ FILES = {}  # 가짜 파일 저장소 {경로: 바이트}
 class FakeBucket:
     def list(self, folder, *args, **kwargs):
         prefix = folder.rstrip("/") + "/"
-        return [{"name": path[len(prefix):], "metadata": {"size": len(data)}} for path, data in FILES.items()
+        return [{"name": path[len(prefix):], "id": path, "metadata": {"size": len(data)}} for path, data in FILES.items()
                 if path.startswith(prefix)]
 
     def upload(self, path, data, *args, **kwargs):

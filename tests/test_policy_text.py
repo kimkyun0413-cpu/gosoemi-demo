@@ -59,6 +59,9 @@ class PrivacyPolicyV3Test(unittest.TestCase):
             "'핵심만 보기'",
             "사건 진행 체크리스트 이용 시",
             "검색어를 보내거나 저장하지 않습니다",
+            "사건 정리 기능 이용 시",
+            "일정 파일(.ics)",
+            "표현 바꾸기",
             "음성 입력·음성 대화 이용 시",
         ]:
             self.assertIn(phrase, self.text)
