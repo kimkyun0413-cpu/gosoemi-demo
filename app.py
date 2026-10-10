@@ -1647,7 +1647,21 @@ h3 { font-size: 1.2rem !important; color: var(--dgo-navy); padding-top: 0.8rem !
 .st-key-top_bar [data-testid="stColumn"]:last-child { display: flex; justify-content: flex-end; }
 .st-key-brand_home_btn button { font-size: 1.35rem !important; font-weight: 800 !important; color: var(--dgo-navy) !important; padding-left: 0; }
 .st-key-brand_home_btn button p { font-size: 1.35rem !important; font-weight: 800 !important; }
-.st-key-nav_page button { min-height: 44px; font-size: 1rem; }
+/* 화면 이동 막대·도움말 종류: 고른 칸은 파란 바탕+흰 글자로 분명하게 */
+.st-key-nav_choice [data-testid="stButtonGroup"] > div, .st-key-help_section [data-testid="stButtonGroup"] > div { gap: 6px; }
+.st-key-nav_choice button, .st-key-help_section button {
+    min-height: 46px; margin: 0 !important; border-radius: 10px !important; border: 1px solid #9FB3D1 !important;
+    background: #FFFFFF; color: var(--dgo-navy); font-size: 1rem;
+}
+.st-key-nav_choice button[aria-checked="true"], .st-key-help_section button[aria-checked="true"] {
+    background: var(--dgo-blue) !important; border-color: var(--dgo-blue) !important; color: #FFFFFF !important;
+}
+.st-key-nav_choice button[aria-checked="true"] p, .st-key-help_section button[aria-checked="true"] p { color: #FFFFFF !important; font-weight: 700; }
+@media (max-width: 640px) {
+    /* 휴대폰: 세 칸씩 같은 너비로 두 줄에 배치 */
+    .st-key-nav_choice [data-testid="stButtonGroup"] > div { display: grid !important; grid-template-columns: repeat(3, 1fr); }
+    .st-key-nav_choice button { width: 100%; padding: 0 4px; font-size: 0.95rem; }
+}
 
 /* ── 처음 화면 카드 ── */
 [class*="st-key-home_card_"] { background: #F6F9FE; border-radius: 14px; }
@@ -3466,6 +3480,20 @@ if not consent_status:
 
 # ── 화면 구성: 처음 · AI에게 질문 · 고소장 작성 · 내 사건 · 도움말 ─────────────────
 # 탭 대신 한 번에 한 화면만 그린다. 다른 화면으로 옮겨도 적던 내용이 사라지지 않게 입력칸 값은 keep_widget_values()로 붙잡아 둔다.
+_scroll_top_component = st.components.v2.component(
+    "gosoemi_scroll_top",
+    js="""
+export default function() {
+  const top = () => {
+    const main = document.querySelector('[data-testid="stMain"]');
+    if (main) main.scrollTo({top: 0});
+    window.scrollTo(0, 0);
+  };
+  top();
+  requestAnimationFrame(top);
+}
+""",
+)
 PAGES = {"home": "처음", "chat": "AI에게 질문", "case": "고소장 작성", "cases": "내 사건", "help": "도움말"}
 
 
@@ -3983,42 +4011,45 @@ def render_terms_section() -> None:
         st.markdown(f"[설명 근거: 대검찰청 사건처리절차 안내]({LEGAL_TERMS_SOURCE})")
 
 
+def render_public_chat() -> None:
+    """일반 이용자용 AI 상담(기존 기능). 새 대화 화면과 같은 첫 문구·입력창 문구·모양으로 보여 준다. 새 기능은 넣지 않는다."""
+    st.caption("일반 법률 정보를 안내해요. 법률 자문은 아니에요.")
+    history_box = st.container()
+    with history_box:
+        with st.chat_message("assistant"):
+            st.markdown(CHAT_WELCOME)
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+    with st.container(key="public_chat_input_row"):  # 입력창을 대화 바로 아래에 둔다(화면 맨 아래 고정이 아니라)
+        prompt = st.chat_input(CHAT_INPUT_PLACEHOLDER, max_chars=3000, key="public_chat_input")
+    with st.expander("대화는 어떻게 처리되나요?"):
+        st.markdown(
+            "- 대화 내용은 이 서비스에 저장하지 않아요. 새로고침하거나 로그아웃하면 사라져요.\n"
+            "- 답변을 만들기 위해 질문이 Google Gemini로 전송돼요. Google은 오남용 방지를 위해 입력 기록을 일정 기간 보관할 수 있어요.\n"
+            "- AI 답변은 일반 정보예요. 인터넷 검색을 하지 않아 최신 법·제도와 다를 수 있고, 범죄가 되는지나 결과는 수사기관·법원이 판단해요."
+        )
+    if prompt:
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with history_box:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+            with st.chat_message("assistant"):
+                try:
+                    with st.spinner("답변을 만들고 있어요…"):
+                        answer = process_question(prompt, st.session_state.model_history)
+                except Exception as error:
+                    answer = ai_error_message(error, "답변을 만들지 못했어요. 잠시 후 다시 질문해 주세요.")
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+        st.rerun()
+
+
 def render_chat_page() -> None:
     st.markdown("## AI에게 질문하기")
     if chat_v2_available():
         render_chat_v2()
     else:
-        st.caption(
-            "피해 상황을 편하게 이야기하면 핵심 사실을 정리하도록 도와드려요. 대화 내용은 저장되지 않고, "
-            "새로고침하거나 로그아웃하면 사라집니다. 답변은 일반 정보이며 법률 자문이 아닙니다."
-        )
-
-        if not st.session_state.messages:
-            st.info(
-                "이렇게 물어보세요:\n\n"
-                "- 중고거래로 돈을 보냈는데 연락이 끊겼어요. 무엇부터 정리할까요?\n"
-                "- 고소장에 상대방 이름을 모르면 어떻게 쓰나요?\n"
-                "- 증거로 어떤 자료를 모아 두면 좋을까요?"
-            )
-
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-
-        if prompt := st.chat_input("궁금한 점이나 상황을 적어 주세요", max_chars=3000):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            with st.chat_message("user"):
-                st.markdown(prompt)
-
-            try:
-                with st.spinner("답변을 만들고 있습니다."):
-                    answer = process_question(prompt, st.session_state.model_history)
-            except Exception as error:
-                answer = ai_error_message(error, "답변을 만들지 못했습니다. 잠시 후 다시 질문해 주세요.")
-
-            st.session_state.messages.append({"role": "assistant", "content": answer})
-            with st.chat_message("assistant"):
-                st.markdown(answer)
+        render_public_chat()
 
 
 keep_widget_values()
@@ -4035,3 +4066,12 @@ else:
 if is_admin() and current_page == "home":
     render_admin_diagnostics()
 render_footer()
+# 다른 화면(또는 고소장 작성 단계·사건 열기·음성 대화)으로 바뀌었을 때만 새 화면의 맨 위로 올린다.
+current_view = "|".join(str(x) for x in (
+    current_page, bool(st.session_state.get("case_review")), bool(st.session_state.get("case_draft")),
+    bool(st.session_state.get("pending_draft_entry")), st.session_state.get("open_case_id"),
+    st.session_state.get("chat_mode"),
+))
+if st.session_state.get("_last_view") != current_view:
+    st.session_state._last_view = current_view
+    _scroll_top_component(key="scroll_top", data={"view": current_view}, height=0)

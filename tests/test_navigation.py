@@ -104,6 +104,26 @@ class NavigationTest(unittest.TestCase):
         self.at.run()
         self.assertEqual([e.value for e in self.at.exception], [])
 
+    def test_public_chat_uses_agreed_texts_and_still_answers(self):
+        fake.REPLIES[:] = ["가짜 답변입니다."]
+        self.click("home_go_chat")
+        self.assertEqual(self.at.chat_message[0].markdown[0].value, "무엇이 궁금하신가요?")
+        self.assertEqual(self.at.chat_input(key="public_chat_input").proto.placeholder, "질문을 입력해 주세요")
+        self.assertFalse(any(b.key == "chat_new_btn" for b in self.at.button))  # 새 기능은 켜지 않는다
+        self.at.chat_input(key="public_chat_input").set_value("중고거래 사기를 당했어요").run()
+        texts = [m.markdown[0].value for m in self.at.chat_message if m.markdown]
+        self.assertIn("중고거래 사기를 당했어요", texts)
+        self.assertIn("가짜 답변입니다.", texts)
+
+    def scroll_marks(self):
+        return [e for e in self.at.get("bidi_component") if "gosoemi_scroll_top" in str(e.proto)]
+
+    def test_scroll_to_top_only_when_view_changes(self):
+        self.click("home_go_case")
+        self.assertTrue(self.scroll_marks())        # 화면이 바뀐 실행에서만 맨 위로 올리는 부품을 그린다
+        self.at.text_area(key="case_field_reporter_info").input("홍길동").run()
+        self.assertFalse(self.scroll_marks())       # 같은 화면에서 입력할 때는 올리지 않는다
+
 
 if __name__ == "__main__":
     unittest.main()
