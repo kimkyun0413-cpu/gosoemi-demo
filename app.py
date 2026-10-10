@@ -4414,12 +4414,26 @@ def ws_dirty(case_id: str, case: dict, ws: dict, draft_key: str, editor_key: str
     return bool(ws["answers"]) or ws_snapshot(ws_payload(case_id, case, ws)) != ws["snapshot"] or ws_draft_dirty(draft_key, editor_key)
 
 
+SAVE_PART_LABELS = {"case": "사건 정보", "workspace": "정리 내용(경위·증거·일정·체크)", "draft": "초안"}
+
+
+def ws_partial_note(done: list, failed: str) -> str:
+    """일부만 저장됐을 때 무엇이 저장됐고 무엇이 남았는지 알려 준다."""
+    if not done:
+        return ""
+    return (" 저장한 것: " + ", ".join(SAVE_PART_LABELS[p] for p in done)
+            + " / 아직 저장 못 한 것: " + SAVE_PART_LABELS[failed] + ". 다시 누르면 남은 것만 저장해요.")
+
+
 def ws_save(case: dict, case_id: str, draft_key: str, editor_key: str, overwrite: str = "") -> None:
-    """사건 수정 → 작업 공간 → 초안 순서로 저장한다. 실패하면 화면 값은 그대로 두고, 먼저 저장된 내용이 있으면 멈춘다."""
+    """사건 정보 → 정리 내용 → 초안 순서로, 바뀐 것만 저장한다.
+
+    하나라도 실패하면 '저장했어요'를 띄우지 않고, 이미 저장한 부분과 남은 부분을 알려 준다. 저장한 부분은
+    저장된 상태로 표시해 다시 누르면 남은 것만 저장한다. 화면의 입력은 지우지 않는다.
+    """
     ws = ws_state(case_id)
-    ws["save_error"] = ws["saved_ok"] = None
-    ws["conflict"] = None
-    base_case = {k: v for k, v in case.items() if k not in ws["answers"]}
+    ws["save_error"] = ws["saved_ok"] = ws["conflict"] = None
+    done, step = [], "case"
     try:
         if ws["answers"]:
             if overwrite == "case":
@@ -4428,27 +4442,38 @@ def ws_save(case: dict, case_id: str, draft_key: str, editor_key: str, overwrite
             ws["case_version"] = row.get("edit_version")
             if st.session_state.get("case_draft_id") == case_id and st.session_state.get("case_draft_case"):
                 st.session_state.case_draft_case = {**st.session_state.case_draft_case, **ws["answers"]}
+            ws["case_saved_values"] = {**(ws.get("case_saved_values") or {}), **ws["answers"]}
             ws["answers"] = {}
-        payload = ws_payload(case_id, {**base_case, **case}, ws)
-        if overwrite == "workspace":
-            remote = load_workspace_row(case_id)
-            ws["version"] = remote.get("version") if remote else None
-        row = save_workspace_row(case_id, payload, ws["version"])
-        ws["version"], ws["saved_at"] = row.get("version"), row.get("updated_at")
-        ws["snapshot"] = ws_snapshot(payload)
+            done.append("case")
+        step = "workspace"
+        payload = ws_payload(case_id, case, ws)
+        if overwrite == "workspace" or ws_snapshot(payload) != ws["snapshot"]:
+            if overwrite == "workspace":
+                remote = load_workspace_row(case_id)
+                ws["version"] = remote.get("version") if remote else None
+            row = save_workspace_row(case_id, payload, ws["version"])
+            ws["version"], ws["saved_at"] = row.get("version"), row.get("updated_at")
+            ws["snapshot"] = ws_snapshot(payload)
+            done.append("workspace")
+        step = "draft"
         if ws_draft_dirty(draft_key, editor_key):
             text = (st.session_state.get(editor_key) or st.session_state.get(draft_key) or "").strip()
             saved = st.session_state.get(f"{editor_key}_saved")
             expected = False if overwrite == "draft" else (saved or {}).get("at")
             at = save_case_draft(case_id, text, expected_at=expected)
             st.session_state[f"{editor_key}_saved"] = {"text": text, "at": at}
+            ws["saved_at"] = at or ws["saved_at"]
+            done.append("draft")
     except SaveConflict as conflict:
         ws["conflict"] = str(conflict)
+        ws["conflict_note"] = ws_partial_note(done, step)
         return
     except Exception as error:
         log_auth_error(error)
-        ws["save_error"] = map_draft_save_error(error) if isinstance(error, ValueError) else map_workspace_save_error(error)
+        message = map_draft_save_error(error) if isinstance(error, ValueError) else map_workspace_save_error(error)
+        ws["save_error"] = message + ws_partial_note(done, step)
         return
+    ws["conflict_note"] = ""
     ws["saved_ok"] = format_created_at(ws["saved_at"]) if ws["saved_at"] else "방금"
 
 
@@ -4484,7 +4509,8 @@ CONFLICT_TEXT = {
 
 def render_ws_save_bar(case: dict, case_id: str, ws: dict, draft_key: str, editor_key: str) -> None:
     if ws["conflict"]:
-        st.warning(CONFLICT_TEXT.get(ws["conflict"], "먼저 저장된 내용이 있어요.") + " 어떻게 할까요? 확인 없이 덮어쓰지 않았어요.")
+        st.warning(CONFLICT_TEXT.get(ws["conflict"], "먼저 저장된 내용이 있어요.") + " 어떻게 할까요? 확인 없이 덮어쓰지 않았어요."
+                   + (ws.get("conflict_note") or ""))
         col_take, col_mine = st.columns(2)
         with col_take:
             st.button("먼저 저장된 내용 불러오기", key=f"ws_take_{case_id}", width="stretch", on_click=ws_take_remote,

@@ -164,6 +164,53 @@ class WorkspaceSaveTest(unittest.TestCase):
         self.assertTrue(any("초안을 먼저 저장했어요" in w.value for w in at.warning))
         self.assertNotIn("고친 내용", fake.TABLES["case_drafts"][0]["draft_text"])
 
+    def test_partial_save_case_ok_workspace_failed_then_retry_only_rest(self):
+        at = self.open(step="check")
+        at.text_input(key=f"ws_edit_{CID}_witness").input("친구").run()
+        at.session_state[f"ws_step_{CID}"] = "next"
+        at.run()
+        at.checkbox(key=f"prog_{CID}_story").check().run()
+        fake.FAIL_NEXT.append(("case_workspace", "insert"))
+        self.save_button(at).click().run()
+        error = " ".join(e.value for e in at.error)
+        self.assertIn("저장한 것: 사건 정보", error)
+        self.assertIn("아직 저장 못 한 것: 정리 내용(경위·증거·일정·체크)", error)
+        self.assertNotIn("저장했어요 ·", self.texts(at))
+        self.assertEqual(fake.CASES[0]["witness"], "친구")
+        self.assertEqual(self.workspace_rows(), [])
+        self.assertTrue(at.checkbox(key=f"prog_{CID}_story").value)  # 입력 그대로
+        self.save_button(at).click().run()                           # 다시 누르면 남은 것만
+        self.assertEqual(fake.CASES[0]["edit_version"], 2)            # 사건은 다시 저장하지 않음
+        self.assertTrue(self.workspace_rows()[0]["checklist"]["story"])
+        self.assertIn("저장했어요", self.texts(at))
+
+    def test_partial_save_draft_failed_is_not_reported_as_saved(self):
+        fake.REPLIES[:] = ["고소장\n범죄 사실\n9월 2일 45만 원 송금"]
+        at = self.open(step="draft")
+        at.button(key=f"ws_make_{CID}").click().run()
+        at.session_state[f"ws_step_{CID}"] = "next"
+        at.run()
+        at.checkbox(key=f"prog_{CID}_draft").check().run()
+        fake.FAIL_NEXT.append(("case_drafts", "upsert"))
+        self.save_button(at).click().run()
+        error = " ".join(e.value for e in at.error)
+        self.assertIn("아직 저장 못 한 것: 초안", error)
+        self.assertIn("저장한 것: 정리 내용", error)
+        self.assertNotIn("저장했어요 ·", self.texts(at))
+        self.assertEqual(len(self.workspace_rows()), 1)
+        self.assertEqual(fake.TABLES["case_drafts"], [])
+        self.save_button(at).click().run()
+        self.assertEqual(len(fake.TABLES["case_drafts"]), 1)
+        self.assertEqual(self.workspace_rows()[0]["version"], 1)      # 정리 내용은 다시 저장하지 않음
+        self.assertIn("저장했어요", self.texts(at))
+
+    def test_saving_requires_admin_before_policy_v3_even_with_flag_on(self):
+        fake.CASES[0]["user_id"] = fake.USER_ID
+        os.environ["ASSIST_V2_ENABLED"] = "true"          # 일반 이용자에게 작업 공간을 보여도
+        at = self.open(user_id=fake.USER_ID, step="check")
+        self.assertFalse(any(b.key == f"ws_save_{CID}" for b in at.button))   # v3 시행 전에는 저장 버튼 없음
+        self.assertTrue(any("저장되지 않아요" in c.value for c in at.caption))
+
     def test_preview_note_when_saving_is_off(self):
         os.environ["CASE_WORKSPACE_SAVE_ENABLED"] = ""
         at = self.open(step="check")
