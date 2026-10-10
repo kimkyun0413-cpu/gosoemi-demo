@@ -50,6 +50,9 @@
 | 3 | Streamlit Secrets에 `PRIVACY_POLICY_UPCOMING_DATE = "시행일"` | Streamlit 로그인 필요 | 값 삭제 |
 | 4 | 시행일에 `PRIVACY_POLICY_EFFECTIVE_DATE = "시행일"`, `DRAFT_SAVE_ENABLED = "true"`, `VOICE_INPUT_ENABLED = "true"` | Streamlit | 세 값을 이전 값(`2026-09-27`, 삭제, 삭제)으로 되돌리면 v2와 기존 동작으로 복귀. 이미 받은 v3 동의 기록은 남지만 해가 없음 |
 | 5 | 테스트 계정 A·B로 초안 저장 → 새로고침 → 다시 열기 확인 | 운영자 또는 Claude | — |
+| 6 | (사건 정리 저장) 운영자 승인 후 Supabase SQL Editor에서 `supabase/migrations/20261012000000_case_workspace_and_case_edit.sql` 실행. 실행 전 로컬 검사 `supabase/tests/local_case_workspace_edit_test.py` 통과 확인(2026-10-11 33/33) | Claude (Supabase 로그인·승인 필요) | `supabase/rollbacks/20261012000000_case_workspace_and_case_edit_rollback.sql` (저장된 정리 기록 삭제, 고친 사건 내용은 그대로) |
+| 7 | `CASE_WORKSPACE_SAVE_ENABLED = "true"` (켜면 관리자는 시행 전에도 시험 가능, 일반 이용자는 시행일 이후) + `ASSIST_V2_ENABLED`(사건 정리 화면을 일반 이용자에게 보이려면) | Streamlit | 값 삭제 |
+| 8 | 테스트 계정 A로 사건 정리 → 작업 저장 → 새로고침 → 다시 열기, B 계정에서 A 사건이 보이지 않는지 확인 | 운영자 또는 Claude | — |
 
 ## 6. Supabase 플랜을 바꾸면 고칠 문구
 - Pro 이상으로 올리면 "프로젝트 백업 기능이 없어" 문장을 백업 보관 기간(대시보드 표시값)에 맞게 바꾸고, 로그 조회 기간(1일)도 바뀐 값으로 고칩니다.

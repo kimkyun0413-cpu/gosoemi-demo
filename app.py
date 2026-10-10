@@ -14,6 +14,7 @@ from io import BytesIO
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+import pandas as pd
 import streamlit as st
 from streamlit.runtime.scriptrunner_utils.script_run_context import get_script_run_ctx
 from google import genai
@@ -116,6 +117,9 @@ AI_CHAT_V2_ENABLED = os.environ.get("AI_CHAT_V2_ENABLED") == "true"
 VOICE_CHAT_ENABLED = os.environ.get("VOICE_CHAT_ENABLED") == "true"
 # 용어 풀이·유형별 Q&A 보강·진행 체크리스트(미리보기)·핵심만 보기·판례 찾기. 켜기 전에는 관리자에게만 보인다.
 ASSIST_V2_ENABLED = os.environ.get("ASSIST_V2_ENABLED") == "true"
+# 사건 작업 공간 저장·저장한 사건 수정. DB 변경(20261012000000_case_workspace_and_case_edit) 적용 후에 켠다.
+# 켜면 관리자는 v3 시행 전에도 시험할 수 있고, 일반 이용자는 v3 시행 후에만 쓸 수 있다.
+CASE_WORKSPACE_SAVE_ENABLED = os.environ.get("CASE_WORKSPACE_SAVE_ENABLED") == "true"
 # 법제처 국가법령정보 Open API 사용자 ID(OC). 사용 신청·서버 IP 등록 전에는 비워 둔다. 값은 화면·로그에 내지 않는다.
 LAW_OPEN_API_OC = (os.environ.get("LAW_OPEN_API_OC") or "").strip()
 # 관리자(운영자) 계정의 Supabase 사용자 ID 목록(쉼표로 구분). 공개 기능을 켜지 않고 음성 입력 시험과
@@ -1263,7 +1267,12 @@ def privacy_v3_in_effect() -> bool:
 
 
 def draft_save_available() -> bool:
-    return DRAFT_SAVE_ENABLED and privacy_v3_in_effect()
+    return DRAFT_SAVE_ENABLED and (privacy_v3_in_effect() or is_admin())
+
+
+def workspace_save_available() -> bool:
+    """사건 작업 공간 저장과 저장한 사건 수정. 플래그가 꺼져 있으면 누구에게도 저장하지 않는 미리보기로 보인다."""
+    return CASE_WORKSPACE_SAVE_ENABLED and (privacy_v3_in_effect() or is_admin())
 
 
 def verified_user_id(session: dict):
@@ -1382,8 +1391,19 @@ def load_case_draft(case_id: str):
     return (response.data or [None])[0]
 
 
-def save_case_draft(case_id: str, draft_text: str) -> str:
-    """초안을 저장(이미 있으면 덮어쓰기)하고 서버에 기록된 저장 시각을 돌려준다."""
+class SaveConflict(RuntimeError):
+    """다른 곳(다른 탭·기기)에서 먼저 저장해, 확인 없이 덮어쓰지 않으려고 멈춘 경우."""
+
+
+def save_case_draft(case_id: str, draft_text: str, expected_at=False) -> str:
+    """초안을 저장(이미 있으면 덮어쓰기)하고 서버에 기록된 저장 시각을 돌려준다.
+
+    expected_at을 주면(None 포함) 서버의 마지막 저장 시각이 그 값과 같을 때만 저장하고, 다르면 SaveConflict.
+    """
+    if expected_at is not False:
+        current = load_case_draft(case_id)
+        if (current or {}).get("updated_at") != expected_at:
+            raise SaveConflict("draft")
     session = ensure_active_session()
     if not session or not session.get("user_id"):
         raise RuntimeError("로그인이 만료되었습니다. 다시 로그인해 주세요.")
@@ -1418,6 +1438,67 @@ def map_draft_save_error(error: Exception) -> str:
 
 def count_user_drafts() -> int:
     return len(load_draft_index())
+
+
+WORKSPACE_TABLE = "case_workspace"
+CASE_EDIT_FIELDS = [key for _, key in CASE_FIELDS]
+
+
+def load_workspace_row(case_id: str):
+    session = st.session_state.get("supabase_session") or {}
+    response = (
+        get_authed_client().table(WORKSPACE_TABLE).select("*")
+        .eq("user_id", session.get("user_id", "")).eq("case_id", str(case_id)).limit(1).execute()
+    )
+    return (response.data or [None])[0]
+
+
+def save_workspace_row(case_id: str, payload: dict, version) -> dict:
+    """작업 공간 저장. 처음이면 만들고, 아니면 읽어 둔 version과 같을 때만 고친다(아니면 SaveConflict)."""
+    session = ensure_active_session()
+    if not session or not session.get("user_id"):
+        raise RuntimeError("로그인이 만료되었습니다. 다시 로그인해 주세요.")
+    table = get_authed_client().table(WORKSPACE_TABLE)
+    if version is None:
+        try:
+            rows = table.insert({**payload, "user_id": session["user_id"], "case_id": str(case_id)}).execute().data
+        except Exception as error:
+            if "23505" in str(error) or "duplicate" in str(error).lower():
+                raise SaveConflict("workspace") from error
+            raise
+    else:
+        rows = (
+            table.update(payload).eq("user_id", session["user_id"]).eq("case_id", str(case_id))
+            .eq("version", int(version)).execute().data
+        )
+    if not rows:
+        raise SaveConflict("workspace")
+    return rows[0]
+
+
+def update_case_row(case_id: str, values: dict, edit_version) -> dict:
+    """저장한 사건의 내용 칸 고치기. 읽어 둔 edit_version과 같을 때만 고친다(아니면 SaveConflict)."""
+    session = ensure_active_session()
+    if not session or not session.get("user_id"):
+        raise RuntimeError("로그인이 만료되었습니다. 다시 로그인해 주세요.")
+    clean = {k: (v or "").strip()[: CASE_FIELD_MAX_CHARS[k]] for k, v in values.items() if k in CASE_EDIT_FIELDS}
+    rows = (
+        get_authed_client().table(CASES_TABLE).update(clean)
+        .eq("user_id", session["user_id"]).eq("case_id", str(case_id)).eq("edit_version", int(edit_version or 1))
+        .execute().data
+    )
+    if not rows:
+        raise SaveConflict("case")
+    return rows[0]
+
+
+def map_workspace_save_error(error: Exception) -> str:
+    text = str(getattr(error, "message", None) or error).lower()
+    if "로그인" in str(error) or "jwt" in text:
+        return "로그인이 만료되어 저장하지 못했어요. 고친 내용은 화면에 그대로 있어요. 다시 로그인한 뒤 저장해 주세요."
+    if "does not exist" in text or "pgrst205" in text or "schema cache" in text:
+        return "저장 공간이 아직 준비되지 않았어요(운영자 설정 필요). 고친 내용은 화면에 그대로 있어요."
+    return "저장하지 못했어요. 고친 내용은 화면에 그대로 있으니 잠시 후 '작업 저장'을 다시 눌러 주세요." + contact_hint()
 
 
 GEMINI_MODEL = "gemini-3.5-flash-lite"
@@ -2231,7 +2312,10 @@ def render_case_progress(case_id: str) -> None:
     with st.expander("✅ 진행 체크리스트"):
         st.markdown(f"**{done}/{total}개 표시함**")
         st.caption(PROGRESS_NOTICE)
-        st.caption("🧪 미리보기: 표시한 내용은 저장되지 않고, 새로고침하거나 로그아웃하면 사라져요.")
+        if workspace_save_available():
+            st.caption("표시한 내용은 위쪽 '작업 저장'을 누르면 저장돼요.")
+        else:
+            st.caption("🧪 미리보기: 표시한 내용은 저장되지 않고, 새로고침하거나 로그아웃하면 사라져요.")
         for key, label in PROGRESS_ITEMS:
             st.checkbox(label, key=prefix + key)
         if st.session_state[prefix + "submitted"]:
@@ -2294,8 +2378,9 @@ def save_draft_from_editor(editor_key: str, case_id: str) -> None:
         st.session_state.pop(f"{editor_key}_error", None)
 
 
-def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str) -> None:
-    can_save = draft_save_available()
+def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str, show_save: bool = True) -> None:
+    # 사건 작업 공간에서는 위쪽 '작업 저장' 버튼 하나로 초안까지 저장하므로 이 패널의 저장 버튼은 숨긴다.
+    can_save = draft_save_available() and show_save
     saved = st.session_state.get(f"{editor_key}_saved")
     st.markdown("#### 고소장 초안")
     st.caption(
@@ -3950,14 +4035,19 @@ def close_case() -> None:
 
 
 # ── 사건 작업 공간(관리자 미리보기): 빠진 정보 → 경위·증거 → 초안 → 내려받기 → 다음 할 일 ──────────
-# 지금은 저장하지 않는다(이 탭의 서버 메모리). 저장안: supabase/proposals/case_workspace/ (운영 미적용).
+# CASE_WORKSPACE_SAVE_ENABLED가 켜져 있으면 '작업 저장'으로 case_workspace·cases·case_drafts에 저장한다
+# (migrations/20261012000000, 운영 미적용). 꺼져 있으면 이 탭의 서버 메모리에만 있는 미리보기다.
 WS_STEPS = {"check": "빠진 정보", "story": "경위·증거", "draft": "초안", "download": "내려받기", "next": "다음 할 일"}
 
 
 def ws_state(case_id: str) -> dict:
     return st.session_state.setdefault(f"ws_{case_id}", {
-        "answers": {}, "timeline": None, "timeline_ver": 0, "evidence": None, "evidence_ver": 0,
+        "answers": {}, "timeline": None, "timeline_ver": 0, "timeline_base": None,
+        "evidence": None, "evidence_ver": 0, "evidence_base": None,
         "history": [], "schedules": [], "notice": None,
+        # 저장: loaded(불러왔는지)·version(작업 공간)·case_version(사건)·snapshot(마지막 저장 내용)·saved_at·conflict·save_error
+        "loaded": False, "version": None, "case_version": None, "snapshot": None, "saved_at": None,
+        "conflict": None, "save_error": None, "saved_ok": None,
     })
 
 
@@ -3985,6 +4075,7 @@ def ws_answer(case_id: str, key: str, unknown: bool, value: str = "") -> None:
     ws["answers"][key] = value[: CASE_FIELD_MAX_CHARS[key]]
     ws["notice"] = None
     st.session_state.pop(f"ws_ans_{case_id}_{key}", None)
+    st.session_state[f"ws_edit_{case_id}_{key}"] = ws["answers"][key]
 
 
 def render_ws_check(case_id: str, case: dict, ws: dict) -> None:
@@ -4021,7 +4112,8 @@ def render_ws_check(case_id: str, case: dict, ws: dict) -> None:
         with st.expander(f"여기서 채운 내용 {len(ws['answers'])}개"):
             for key, value in ws["answers"].items():
                 st.markdown(f"**{CASE_FIELD_LABELS[key]}**: {md_escape(value)}")
-            st.caption("여기서 채운 내용은 이 화면의 초안·내려받기 자료에만 쓰여요. 저장한 사건 내용은 바뀌지 않아요.")
+            st.caption("'작업 저장'을 누르면 저장한 사건 내용에 반영돼요." if workspace_save_available()
+                       else "여기서 채운 내용은 이 화면의 초안·내려받기 자료에만 쓰여요. 저장한 사건 내용은 바뀌지 않아요.")
 
 
 def ws_rows(df) -> list:
@@ -4029,35 +4121,50 @@ def ws_rows(df) -> list:
     return [{k: ("" if v is None or (isinstance(v, float) and v != v) else str(v)) for k, v in row.items()} for row in rows]
 
 
+NO_LINK = "연결 안 함"  # 표의 빈 선택 칸에 'None'이 보이지 않게 쓰는 값(저장할 때는 빈 값)
+
+
+def ws_table(case_id: str, ws: dict, name: str, initial) -> tuple:
+    """표 편집기의 처음 값과 key. 편집 중에는 key와 처음 값을 바꾸지 않아 커서가 튀지 않게 하고,
+    화면을 떠났다가 다시 그릴 때(편집기 상태가 없을 때)만 마지막으로 고친 값으로 다시 시작한다."""
+    key = f"ws_{name}_{case_id}_{ws[name + '_ver']}"
+    if ws[name] is None:
+        ws[name] = initial()
+    if key not in st.session_state or ws.get(name + "_base") is None:
+        ws[name + "_base"] = [dict(r) for r in ws[name]]
+    return ws[name + "_base"], key
+
+
+def ws_reset_table(ws: dict, name: str) -> None:
+    ws[name], ws[name + "_base"], ws[name + "_ver"] = None, None, ws[name + "_ver"] + 1
+
+
 def render_ws_story(case_id: str, case: dict, ws: dict, file_names: list) -> None:
-    if ws["timeline"] is None:
-        ws["timeline"] = build_timeline(case)
-    if ws["evidence"] is None:
-        ws["evidence"] = evidence_items(case, file_names)
+    evidence_base, evidence_key = ws_table(case_id, ws, "evidence", lambda: evidence_items(case, file_names))
+    timeline_base, timeline_key = ws_table(case_id, ws, "timeline", lambda: build_timeline(case))
     st.markdown("#### 사건 경위")
     st.caption("적은 경위를 나눠 놓았어요. 날짜는 적힌 글자만 옮겼고, 비어 있으면 모르는 거예요. 고치거나 줄을 더하고 지울 수 있어요.")
     names = [e["name"] for e in ws["evidence"]]
+    shown = [{**r, "evidence": r.get("evidence") or NO_LINK} for r in timeline_base]
     edited = st.data_editor(
-        ws["timeline"], key=f"ws_tl_{case_id}_{ws['timeline_ver']}", num_rows="dynamic", width="stretch", hide_index=True,
+        pd.DataFrame(shown, columns=["when", "what", "evidence"]), key=timeline_key, num_rows="dynamic", width="stretch", hide_index=True,
         column_order=["when", "what", "evidence"],
         column_config={
             "when": st.column_config.TextColumn("언제", help="모르면 비워 두세요", max_chars=40),
             "what": st.column_config.TextColumn("무슨 일", width="large", max_chars=300),
-            # 맨 앞의 빈 값("")을 고르면 '연결 안 함'(표에 None 글자가 보이지 않게 빈 값도 선택지로 둔다)
-            "evidence": st.column_config.SelectboxColumn("관련 자료", options=[""] + names, help="이 일을 보여 주는 자료"),
+            "evidence": st.column_config.SelectboxColumn("관련 자료", options=[NO_LINK] + names, help="이 일을 보여 주는 자료"),
         },
     )
-    rows = [r for r in ws_rows(edited) if r.get("what") or r.get("when")]
-    if rows != ws["timeline"]:
-        ws["timeline"], ws["timeline_ver"] = rows, ws["timeline_ver"] + 1
-        st.rerun()
+    ws["timeline"] = [{**r, "evidence": "" if r.get("evidence") in ("", NO_LINK) else r["evidence"]}
+                      for r in ws_rows(edited) if r.get("what") or r.get("when")]
     st.button("경위 처음 상태로 다시 나누기", key=f"ws_tl_reset_{case_id}", type="tertiary",
-              on_click=lambda: ws.update(timeline=None, timeline_ver=ws["timeline_ver"] + 1))
+              on_click=ws_reset_table, args=(ws, "timeline"))
 
     st.markdown("#### 증거 자료")
     st.caption("자료마다 무엇을 보여 주는지 적어 주세요. 고소음이는 파일 내용을 열어 보지 않아요.")
     edited_ev = st.data_editor(
-        ws["evidence"], key=f"ws_ev_{case_id}_{ws['evidence_ver']}", num_rows="dynamic", width="stretch", hide_index=True,
+        # 자료가 하나도 없어도 칸 제목이 보이도록 열을 정해 둔다.
+        pd.DataFrame(evidence_base, columns=["name", "shows", "source"]), key=evidence_key, num_rows="dynamic", width="stretch", hide_index=True,
         column_order=["name", "shows", "source"],
         column_config={
             "name": st.column_config.TextColumn("자료", max_chars=60),
@@ -4065,10 +4172,7 @@ def render_ws_story(case_id: str, case: dict, ws: dict, file_names: list) -> Non
             "source": st.column_config.TextColumn("출처", disabled=True),
         },
     )
-    ev_rows = [{**r, "source": r.get("source") or "직접 추가"} for r in ws_rows(edited_ev) if r.get("name")]
-    if ev_rows != ws["evidence"]:
-        ws["evidence"], ws["evidence_ver"] = ev_rows, ws["evidence_ver"] + 1
-        st.rerun()
+    ws["evidence"] = [{**r, "source": r.get("source") or "직접 추가"} for r in ws_rows(edited_ev) if r.get("name")]
 
     issues = link_issues(ws["timeline"], ws["evidence"])
     todo = (
@@ -4121,7 +4225,7 @@ def render_ws_draft(case_id: str, case: dict, ws: dict, draft_key: str, editor_k
                   on_click=lambda: (st.session_state.__setitem__(editor_key, ws["history"].pop()), ws.pop("rewrite_notes", None)))
     for note in ws.get("rewrite_notes") or []:
         st.warning(note + " 바뀐 부분을 꼭 확인하거나 '바로 전 초안으로'를 눌러 주세요.")
-    render_draft_panel(editor_key, draft, case, case_id)
+    render_draft_panel(editor_key, draft, case, case_id, show_save=not workspace_save_available())
 
 
 def render_ws_download(case_id: str, ws: dict, editor_key: str, draft_key: str, case: dict) -> None:
@@ -4186,7 +4290,9 @@ def render_ws_next(case_id: str, case: dict, ws: dict) -> None:
             st.text_input("할 일", key=p + "title", max_chars=60, placeholder="예: ○○경찰서에 고소장 제출")
         col_date, col_time = st.columns(2)
         with col_date:
-            st.date_input("날짜", key=p + "date", value=None, format="YYYY-MM-DD")
+            # 비워 두면 '날짜를 골라 주세요'에서 막히기 쉬워 오늘로 시작한다. 글자로 고친 뒤 Enter나 칸 밖을 누르면 확정된다.
+            st.date_input("날짜", key=p + "date", value=datetime.date.today(), format="YYYY-MM-DD",
+                          help="달력에서 고르거나 2026-10-20처럼 적고 Enter를 누르세요.")
         with col_time:
             has_time = st.checkbox("시간 정하기", key=p + "has_time")
             if has_time:
@@ -4210,8 +4316,228 @@ def render_ws_next(case_id: str, case: dict, ws: dict) -> None:
                    "일정 앱에서 시간과 알림을 확인해 주세요. 고소음이가 직접 알림을 보내지는 않아요.")
 
 
+def ws_payload(case_id: str, case: dict, ws: dict) -> dict:
+    """저장할 작업 공간 내용(사건 경위·증거 설명·일정·준비 체크). 초안 본문은 case_drafts에 따로 저장한다."""
+    timeline = ws["timeline"] if ws["timeline"] is not None else build_timeline(case)
+    evidence = ws["evidence"] if ws["evidence"] is not None else evidence_items(case)
+    schedules = []
+    for event in ws["schedules"]:
+        schedules.append({
+            "kind": event["kind"], "title": event["title"], "date": event["date"].isoformat(),
+            "time": event["time"].strftime("%H:%M") if event["time"] else None,
+            "alarm": event["alarm"], "memo": event["memo"], "uid": event["uid"],
+        })
+    p = f"prog_{case_id}_"
+    on = st.session_state.get(p + "on")
+    checklist = {key: bool(st.session_state.get(p + key)) for key, _ in PROGRESS_ITEMS}
+    checklist.update({
+        "submitted_to": (st.session_state.get(p + "to") or "")[:PROGRESS_PLACE_MAX_CHARS],
+        "submitted_on": on.isoformat() if isinstance(on, datetime.date) else "",
+        "next_note": (st.session_state.get(p + "note") or "")[:PROGRESS_NOTE_MAX_CHARS],
+    })
+    return {
+        "timeline": [{"when": r.get("when", ""), "what": r.get("what", ""), "evidence": r.get("evidence") or ""} for r in timeline],
+        "evidence_notes": [{"name": e["name"], "shows": e.get("shows", ""), "source": e.get("source", "")} for e in evidence],
+        "schedules": schedules,
+        "checklist": checklist,
+    }
+
+
+def ws_snapshot(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def ws_apply_row(case_id: str, ws: dict, row: dict) -> None:
+    """저장된 작업 공간을 화면 상태로 불러온다(위젯을 그리기 전에만 부른다)."""
+    ws["timeline"] = [dict(r) for r in row.get("timeline") or []]
+    ws["evidence"] = [dict(r) for r in row.get("evidence_notes") or []]
+    ws["timeline_base"] = ws["evidence_base"] = None
+    ws["timeline_ver"] += 1
+    ws["evidence_ver"] += 1
+    events = []
+    for event in row.get("schedules") or []:
+        try:
+            events.append(clean_event({
+                **event, "date": datetime.date.fromisoformat(event["date"]),
+                "time": datetime.time.fromisoformat(event["time"]) if event.get("time") else None,
+            }))
+        except (KeyError, ValueError, TypeError):
+            continue
+    ws["schedules"] = events
+    checklist = row.get("checklist") or {}
+    p = f"prog_{case_id}_"
+    for key, _ in PROGRESS_ITEMS:
+        st.session_state[p + key] = bool(checklist.get(key))
+    st.session_state[p + "to"] = checklist.get("submitted_to") or ""
+    try:
+        st.session_state[p + "on"] = datetime.date.fromisoformat(checklist["submitted_on"]) if checklist.get("submitted_on") else None
+    except ValueError:
+        st.session_state[p + "on"] = None
+    st.session_state[p + "note"] = checklist.get("next_note") or ""
+    ws["version"] = row.get("version")
+    ws["saved_at"] = row.get("updated_at")
+
+
+def ws_load(case: dict, case_id: str, ws: dict, draft_key: str, editor_key: str) -> None:
+    ws["loaded"] = True
+    ws["case_version"] = case.get("edit_version") or 1
+    try:
+        row = load_workspace_row(case_id)
+    except Exception as error:
+        log_auth_error(error)
+        ws["save_error"] = map_workspace_save_error(error)
+        return
+    if row:
+        ws_apply_row(case_id, ws, row)
+    ws["snapshot"] = ws_snapshot(ws_payload(case_id, case, ws))
+    if draft_save_available() and not st.session_state.get(draft_key):
+        try:
+            draft_row = load_case_draft(case_id)
+        except Exception as error:
+            log_auth_error(error)
+            draft_row = None
+        if draft_row:
+            st.session_state[draft_key] = draft_row["draft_text"]
+            st.session_state[editor_key] = draft_row["draft_text"]
+            st.session_state[f"{editor_key}_saved"] = {"text": draft_row["draft_text"].strip(), "at": draft_row.get("updated_at")}
+
+
+def ws_draft_dirty(draft_key: str, editor_key: str) -> bool:
+    if not draft_save_available():
+        return False
+    text = (st.session_state.get(editor_key) or st.session_state.get(draft_key) or "").strip()
+    saved = st.session_state.get(f"{editor_key}_saved")
+    return bool(text) and (not saved or saved["text"] != text)
+
+
+def ws_dirty(case_id: str, case: dict, ws: dict, draft_key: str, editor_key: str) -> bool:
+    return bool(ws["answers"]) or ws_snapshot(ws_payload(case_id, case, ws)) != ws["snapshot"] or ws_draft_dirty(draft_key, editor_key)
+
+
+def ws_save(case: dict, case_id: str, draft_key: str, editor_key: str, overwrite: str = "") -> None:
+    """사건 수정 → 작업 공간 → 초안 순서로 저장한다. 실패하면 화면 값은 그대로 두고, 먼저 저장된 내용이 있으면 멈춘다."""
+    ws = ws_state(case_id)
+    ws["save_error"] = ws["saved_ok"] = None
+    ws["conflict"] = None
+    base_case = {k: v for k, v in case.items() if k not in ws["answers"]}
+    try:
+        if ws["answers"]:
+            if overwrite == "case":
+                ws["case_version"] = case.get("edit_version") or ws["case_version"]
+            row = update_case_row(case_id, ws["answers"], ws["case_version"])
+            ws["case_version"] = row.get("edit_version")
+            if st.session_state.get("case_draft_id") == case_id and st.session_state.get("case_draft_case"):
+                st.session_state.case_draft_case = {**st.session_state.case_draft_case, **ws["answers"]}
+            ws["answers"] = {}
+        payload = ws_payload(case_id, {**base_case, **case}, ws)
+        if overwrite == "workspace":
+            remote = load_workspace_row(case_id)
+            ws["version"] = remote.get("version") if remote else None
+        row = save_workspace_row(case_id, payload, ws["version"])
+        ws["version"], ws["saved_at"] = row.get("version"), row.get("updated_at")
+        ws["snapshot"] = ws_snapshot(payload)
+        if ws_draft_dirty(draft_key, editor_key):
+            text = (st.session_state.get(editor_key) or st.session_state.get(draft_key) or "").strip()
+            saved = st.session_state.get(f"{editor_key}_saved")
+            expected = False if overwrite == "draft" else (saved or {}).get("at")
+            at = save_case_draft(case_id, text, expected_at=expected)
+            st.session_state[f"{editor_key}_saved"] = {"text": text, "at": at}
+    except SaveConflict as conflict:
+        ws["conflict"] = str(conflict)
+        return
+    except Exception as error:
+        log_auth_error(error)
+        ws["save_error"] = map_draft_save_error(error) if isinstance(error, ValueError) else map_workspace_save_error(error)
+        return
+    ws["saved_ok"] = format_created_at(ws["saved_at"]) if ws["saved_at"] else "방금"
+
+
+def ws_take_remote(case: dict, case_id: str, draft_key: str, editor_key: str) -> None:
+    """먼저 저장된 내용 불러오기(여기서 고친 내용은 버린다)."""
+    ws = ws_state(case_id)
+    kind, ws["conflict"] = ws["conflict"], None
+    if kind == "case":
+        ws["answers"] = {}
+        ws["case_version"] = case.get("edit_version") or ws["case_version"]
+        for key in list(st.session_state.keys()):
+            if key.startswith(f"ws_edit_{case_id}_"):
+                del st.session_state[key]
+    elif kind == "workspace":
+        row = load_workspace_row(case_id)
+        if row:
+            ws_apply_row(case_id, ws, row)
+        ws["snapshot"] = ws_snapshot(ws_payload(case_id, case, ws))
+    elif kind == "draft":
+        row = load_case_draft(case_id)
+        if row:
+            st.session_state[draft_key] = row["draft_text"]
+            st.session_state[editor_key] = row["draft_text"]
+            st.session_state[f"{editor_key}_saved"] = {"text": row["draft_text"].strip(), "at": row.get("updated_at")}
+
+
+CONFLICT_TEXT = {
+    "case": "다른 탭이나 기기에서 이 사건 내용을 먼저 고쳤어요.",
+    "workspace": "다른 탭이나 기기에서 이 사건의 정리 내용을 먼저 저장했어요.",
+    "draft": "다른 탭이나 기기에서 이 사건의 초안을 먼저 저장했어요.",
+}
+
+
+def render_ws_save_bar(case: dict, case_id: str, ws: dict, draft_key: str, editor_key: str) -> None:
+    if ws["conflict"]:
+        st.warning(CONFLICT_TEXT.get(ws["conflict"], "먼저 저장된 내용이 있어요.") + " 어떻게 할까요? 확인 없이 덮어쓰지 않았어요.")
+        col_take, col_mine = st.columns(2)
+        with col_take:
+            st.button("먼저 저장된 내용 불러오기", key=f"ws_take_{case_id}", width="stretch", on_click=ws_take_remote,
+                      args=(case, case_id, draft_key, editor_key), help="여기서 고친 내용은 버려요.")
+        with col_mine:
+            st.button("내 내용으로 덮어쓰기", key=f"ws_mine_{case_id}", width="stretch", type="primary", on_click=ws_save,
+                      args=(case, case_id, draft_key, editor_key, ws["conflict"]))
+        return
+    dirty = ws_dirty(case_id, case, ws, draft_key, editor_key)
+    col_status, col_button = st.columns([3, 2], vertical_alignment="center")
+    with col_status:
+        if ws["save_error"]:
+            st.error(ws["save_error"])
+        elif dirty:
+            st.markdown("**저장하지 않은 변경이 있어요.**")
+        elif ws["saved_ok"]:
+            st.markdown(f"저장했어요 · {ws['saved_ok']}")
+        elif ws["saved_at"]:
+            st.markdown(f"마지막 저장 · {format_created_at(ws['saved_at'])}")
+        else:
+            st.markdown("아직 저장하지 않았어요.")
+    with col_button:
+        st.button("작업 저장", key=f"ws_save_{case_id}", type="primary", width="stretch", icon=":material/save:",
+                  disabled=not dirty and not ws["save_error"], on_click=ws_save, args=(case, case_id, draft_key, editor_key))
+
+
+def ws_edit_field(case_id: str, key: str, original: str) -> None:
+    ws = ws_state(case_id)
+    value = (st.session_state.get(f"ws_edit_{case_id}_{key}") or "").strip()
+    if value == (original or "").strip():
+        ws["answers"].pop(key, None)
+    else:
+        ws["answers"][key] = value
+
+
+def render_case_edit(case_id: str, case: dict, ws: dict) -> None:
+    """저장한 사건 내용 고치기. 고친 칸은 '작업 저장'을 눌러야 저장된다."""
+    with st.expander("저장한 사건 내용 고치기" + (f" (고친 칸 {len(ws['answers'])}개)" if ws["answers"] else "")):
+        st.caption("고친 칸은 위쪽 '작업 저장'을 눌러야 저장돼요.")
+        for label, key in CASE_FIELDS:
+            original = case.get(key) or ""
+            widget_key = f"ws_edit_{case_id}_{key}"
+            st.session_state.setdefault(widget_key, ws["answers"].get(key, original))
+            widget = st.text_area if key in CASE_LONG_TEXT_FIELDS else st.text_input
+            widget(label, key=widget_key, max_chars=CASE_FIELD_MAX_CHARS[key], on_change=ws_edit_field,
+                   args=(case_id, key, original))
+
+
 def render_case_workspace(case: dict, case_id: str, draft_key: str, editor_key: str, file_names=None) -> None:
     ws = ws_state(case_id)
+    can_save = workspace_save_available()
+    if can_save and not ws["loaded"]:
+        ws_load(case, case_id, ws, draft_key, editor_key)
     effective = ws_case(case, ws)
     has_draft = bool(st.session_state.get(draft_key))
     progress = {key: st.session_state.get(f"prog_{case_id}_{key}") for key, _ in PROGRESS_ITEMS}
@@ -4220,12 +4546,17 @@ def render_case_workspace(case: dict, case_id: str, draft_key: str, editor_key: 
     step = st.session_state.setdefault(f"ws_step_{case_id}", default_step)
     with st.container(border=True, key=f"ws_head_{case_id}"):
         st.markdown(f"**다음 할 일: {action}**")
-        st.caption("🧪 미리보기: 이 화면에서 정리한 경위·증거 설명·일정·체크는 저장되지 않아요. 새로고침하거나 로그아웃하면 사라져요.")
+        # 저장 상태는 아래 화면(표 편집 등)을 그린 뒤에 채운다. 먼저 그리면 방금 고친 내용이 반영되지 않는다.
+        save_slot = st.container()
+        if not can_save:
+            st.caption("🧪 미리보기: 이 화면에서 정리한 경위·증거 설명·일정·체크는 저장되지 않아요. 새로고침하거나 로그아웃하면 사라져요.")
     st.session_state[f"ws_nav_{case_id}"] = step
     st.segmented_control("정리 단계", list(WS_STEPS), format_func=WS_STEPS.get, key=f"ws_nav_{case_id}",
                          label_visibility="collapsed", width="stretch", on_change=ws_on_nav, args=(case_id,))
     if step == "check":
         render_ws_check(case_id, effective, ws)
+        if can_save:
+            render_case_edit(case_id, case, ws)
     elif step == "story":
         render_ws_story(case_id, effective, ws, file_names or [])
     elif step == "draft":
@@ -4234,7 +4565,9 @@ def render_case_workspace(case: dict, case_id: str, draft_key: str, editor_key: 
         render_ws_download(case_id, ws, editor_key, draft_key, effective)
     else:
         render_ws_next(case_id, effective, ws)
-
+    if can_save:
+        with save_slot:
+            render_ws_save_bar(case, case_id, ws, draft_key, editor_key)
 
 def render_case_detail(case: dict, saved_at, can_save_drafts: bool) -> None:
     case_id = case.get("case_id", "")

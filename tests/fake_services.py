@@ -30,30 +30,89 @@ def session_for(user_id: str, email: str) -> dict:
     }
 
 
+TABLES = {"cases": CASES, "case_workspace": [], "case_drafts": []}
+FAIL_NEXT = []  # 다음 요청을 실패시킬 (표, 동작) 목록. 예: [("case_workspace", "update")]
+_CLOCK = [0]
+
+
+def _now_iso() -> str:
+    _CLOCK[0] += 1
+    return f"2026-10-11T00:00:{_CLOCK[0] % 60:02d}.{_CLOCK[0]:06d}+00:00"
+
+
 class FakeQuery:
+    """supabase-py 표 요청 흉내. 저장 기능이 있는 표(cases·case_workspace·case_drafts)는 메모리에 행을 둔다.
+    RLS(본인만)는 로컬 Postgres 시험에서 검사하고, 여기서는 앱이 user_id로 거르는지만 본다."""
+
     def __init__(self, table):
         self.table_name = table
         self.op = "select"
         self.filters = {}
+        self.payload = None
 
     def __getattr__(self, name):
         def method(*args, **kwargs):
             if name in ("insert", "upsert", "update", "delete"):
                 self.op = name
+                self.payload = args[0] if args else None
                 WRITES.append((self.table_name, name, args))
             if name == "eq" and len(args) == 2:
                 self.filters[args[0]] = str(args[1])
             return self
         return method
 
+    def _match(self, row):
+        return all(str(row.get(k)) == v for k, v in self.filters.items())
+
     def execute(self):
-        if self.table_name == "cases" and self.op == "delete" and "case_id" in self.filters:
-            CASES[:] = [c for c in CASES if str(c.get("case_id")) != self.filters["case_id"]]
-            return SimpleNamespace(data=[])
+        if (self.table_name, self.op) in FAIL_NEXT:
+            FAIL_NEXT.remove((self.table_name, self.op))
+            raise RuntimeError("fake network error")
         if self.table_name == "consent_records" and self.op == "select":
             return SimpleNamespace(data=[{"terms_version": "x"}])
-        if self.table_name == "cases" and self.op == "select":
-            return SimpleNamespace(data=[dict(c) for c in CASES])
+        rows = TABLES.get(self.table_name)
+        if rows is None:
+            return SimpleNamespace(data=[])
+        if self.op == "select":
+            return SimpleNamespace(data=[dict(r) for r in rows if self._match(r)])
+        if self.op == "delete":
+            gone = [r for r in rows if self._match(r)]
+            rows[:] = [r for r in rows if not self._match(r)]
+            if self.table_name == "cases":  # 사건 삭제 트리거 흉내
+                for r in gone:
+                    for other in ("case_workspace", "case_drafts"):
+                        TABLES[other][:] = [x for x in TABLES[other] if str(x.get("case_id")) != str(r.get("case_id"))]
+            return SimpleNamespace(data=gone)
+        if self.op == "insert":
+            row = dict(self.payload)
+            if self.table_name == "case_workspace":
+                if any(r["user_id"] == row["user_id"] and r["case_id"] == row["case_id"] for r in rows):
+                    raise RuntimeError('duplicate key value violates unique constraint "case_workspace_pkey" (23505)')
+                row.setdefault("version", 1)
+                row["updated_at"] = _now_iso()
+            rows.append(row)
+            return SimpleNamespace(data=[dict(row)])
+        if self.op == "upsert":
+            row = dict(self.payload)
+            row["updated_at"] = _now_iso()
+            for r in rows:
+                if r["user_id"] == row["user_id"] and str(r["case_id"]) == str(row["case_id"]):
+                    r.update(row)
+                    return SimpleNamespace(data=[dict(r)])
+            rows.append(row)
+            return SimpleNamespace(data=[dict(row)])
+        if self.op == "update":
+            out = []
+            for r in rows:
+                if self._match(r):
+                    r.update(self.payload)
+                    if self.table_name == "case_workspace":
+                        r["version"] = int(r.get("version") or 1) + 1
+                        r["updated_at"] = _now_iso()
+                    if self.table_name == "cases":
+                        r["edit_version"] = int(r.get("edit_version") or 1) + 1
+                    out.append(dict(r))
+            return SimpleNamespace(data=out)
         return SimpleNamespace(data=[])
 
 
@@ -135,6 +194,9 @@ def reset():
     WRITES.clear()
     CASES.clear()
     FILES.clear()
+    TABLES["case_workspace"].clear()
+    TABLES["case_drafts"].clear()
+    FAIL_NEXT.clear()
 
 
 def contents_text(call) -> str:

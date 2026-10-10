@@ -26,7 +26,7 @@
 |---|---|
 | 0 본인 사건 / 증거파일 조회 (대조군) | 1 이상. 0이면 테스트 자료가 없어 결과를 믿을 수 없음 |
 | 1 다른 사용자 사건 읽기 | 0 |
-| 2 다른 사용자 사건 수정 | 거부: `permission denied for table cases` |
+| 2 다른 사용자 사건 수정 | 거부: `permission denied for table cases`. `20261012000000_case_workspace_and_case_edit` 적용 후에는 본인 사건만 고칠 수 있어 **0건**(역시 차단)이 정상 |
 | 3 다른 사용자 사건 삭제 | 0건 |
 | 4 다른 사용자 이름으로 사건 생성 | 거부: `new row violates row-level security policy` |
 | 5 다른 사용자 증거파일 조회 | 0 |
@@ -84,3 +84,26 @@ LOCAL_PG="host=127.0.0.1 port=54329 user=postgres" python3 supabase/tests/local_
 - 대상: 테스트 계정 A(`53bf9e60-…`, 2026-10-06 가입, 사건 3건)와 B(`088bd25e-…`, 2026-10-04 테스트 계정, 사건 2건). 실행 전 두 계정 모두 초안 0건임을 조회로 확인했다. 다른 사용자 3명은 대상에서 제외했다.
 - 결과: A→B, B→A, 비로그인 13개 항목이 모두 기대 결과와 같았다. 상대 계정 초안을 임시로 만든 대조 조건에서도 읽기·수정·삭제가 0건이었다.
 - 실행 후 초안 0건, 두 계정의 사건 수(3건, 2건)와 전체 사용자 수(5명)가 그대로임을 확인했다. 실행한 SQL은 저장소 파일과 SHA-256이 같음을 확인했다.
+
+
+## 로컬 임시 Postgres 검사 (운영 DB에 접속하지 않음)
+
+`local_*_test.py`는 로컬 Postgres에 Supabase 비슷한 역할·auth 스키마를 만들고 마이그레이션을 적용해 접근 제한·삭제·되돌리기를 검사한다.
+Homebrew·Docker가 없는 Mac에서도 아래처럼 할 수 있다(2026-10-11 이 방식으로 실행).
+
+1. EDB가 배포하는 PostgreSQL macOS 바이너리(zip, postgresql.org 다운로드 안내의 공식 배포처)를 빈 임시 폴더에 받아 푼다.
+   `https://get.enterprisedb.com/postgresql/postgresql-17.6-1-osx-binaries.zip`
+2. `pgsql/bin/initdb -D <임시폴더>/pgdata -U postgres --auth=trust -E UTF8 --locale=C`
+3. `pgsql/bin/pg_ctl -D <임시폴더>/pgdata -o "-p 54329 -k '' -c listen_addresses=127.0.0.1" -l <임시폴더>/pg.log start`
+   (`-k ''`: 임시 폴더 경로가 길면 유닉스 소켓을 만들 수 없어 TCP만 쓴다)
+4. `python3 -m venv <임시폴더>/venv && <임시폴더>/venv/bin/pip install "psycopg[binary]"`
+5. `LOCAL_PG="host=127.0.0.1 port=54329 user=postgres" <임시폴더>/venv/bin/python supabase/tests/local_case_workspace_edit_test.py`
+6. 끝나면 `pg_ctl -D <임시폴더>/pgdata stop`
+
+| 스크립트 | 검사 대상 | 2026-10-11 결과 |
+|---|---|---|
+| local_case_drafts_test.py | 초안 표·동의 함수 | 23/23 |
+| local_billing_test.py | 결제 제안(미적용) | 30/30 |
+| local_case_workspace_edit_test.py | 사건 수정·작업 공간 저장(미적용): 본인만, 고칠 수 없는 열, 동시 수정 충돌, 사건 삭제·탈퇴 시 삭제, 되돌리기·재적용 | 33/33 |
+
+주의: 로컬 `cases` 표는 운영 표를 흉내 낸 것이다(열·정책은 기존 시험과 같은 가정). 운영 적용 전에 운영 `cases`의 실제 열·정책을 한 번 더 확인한다.
