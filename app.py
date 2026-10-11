@@ -45,8 +45,10 @@ for _module in (
 ):
     try:
         importlib.reload(_module)
-    except ImportError:
-        if _module.__name__ in sys.modules:
+    except ImportError as _error:
+        # 다른 세션이 이 모듈을 비운 경우만 건너뛴다. 그 사이 또 다른 세션이 다시 불러와 sys.modules에 있을 수도 있으므로
+        # (2026-10-12 운영 로그: auth_ip) 모듈이 지금 있는지가 아니라 오류 종류로 판단한다.
+        if "not in sys.modules" not in str(_error):
             raise
 
 from voice_input import (

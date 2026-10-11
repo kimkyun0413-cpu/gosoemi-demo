@@ -23,9 +23,15 @@ _evicted = []
 
 def reload_after_other_session_evicted(module):
     # 다른 세션이 막 비운 것처럼, 처음 reload하는 순간 그 모듈을 sys.modules에서 지운다.
-    if not _evicted:
+    # 두 번째 모듈은 지운 직후 또 다른 세션이 다시 불러온 경우(오류는 나지만 지금은 sys.modules에 있음)를 흉내 낸다.
+    if len(_evicted) < 2:
         _evicted.append(module.__name__)
-        sys.modules.pop(module.__name__, None)
+        saved = sys.modules.pop(module.__name__, None)
+        try:
+            return _real_reload(module)
+        finally:
+            if len(_evicted) == 2 and saved is not None:
+                sys.modules[module.__name__] = saved
     return _real_reload(module)
 
 importlib.reload = reload_after_other_session_evicted
