@@ -107,11 +107,14 @@ class HelperTest(unittest.TestCase):
 HARNESS = """
 import runpy, streamlit as st
 g = runpy.run_path({app!r}, run_name="__main__")
+if st.session_state.pop("_clear_preview_cache", False):
+    g["preview_audio_cache"].clear()   # 시험끼리 미리듣기 캐시가 섞이지 않게
 call = st.session_state.pop("_test_call", None)
 if call:
     name, arg = call
     st.session_state["_test_result"] = g[name](arg) if arg is not None else g[name]()
 st.session_state["_server_tts"] = g["server_tts_available"]()
+st.session_state["_preview_cache"] = dict(g["preview_audio_cache"]())
 """
 
 
@@ -131,7 +134,7 @@ class AppVoiceTest(unittest.TestCase):
         self.admin = str(uuid.uuid4())
         self.env["ADMIN_USER_IDS"] = f"{self.admin},{TTS_LIMIT_ADMIN_ID}"
 
-    def start(self, user_id=None, **env):
+    def start(self, user_id=None, keep_cache=False, **env):
         user_id = user_id or self.admin
         self.env.update(env)
         patches = [mock.patch.dict(os.environ, self.env), mock.patch("supabase.create_client", fake.fake_create_client),
@@ -144,6 +147,7 @@ class AppVoiceTest(unittest.TestCase):
         at.session_state["browser_login_checked"] = True
         at.session_state["nav_page"] = "chat"
         at.session_state["chat_mode"] = "voice"
+        at.session_state["_clear_preview_cache"] = not keep_cache
         at.run()
         self.assertEqual([e.value for e in at.exception], [])
         return at
@@ -252,6 +256,24 @@ class AppVoiceTest(unittest.TestCase):
         self.assertEqual(len(tts_calls()), first)                         # 같은 목소리는 다시 만들지 않는다
         self.assertIn("audio", at.session_state["chat_voice_preview"])
         self.assertEqual(at.session_state["chat_voice_preview"]["n"], 2)
+
+    def test_answer_audio_never_goes_to_shared_preview_cache(self):
+        """공용 캐시에는 고정 예시 문장의 미리듣기만 들어간다. 대화 답변 음성은 그 사람의 세션에만 있다."""
+        fake.REPLIES[:] = ["9월 2일에 45만 원을 보냈어요", "이체 내역을 준비해 두세요."]
+        fake.TTS_REPLIES[:] = [fake.fake_wav(0.7)]                         # 답변 음성(미리듣기와 길이가 다름)
+        at = self.start()
+        self.call(at, "handle_voice_turn", self.utterance(voice="Sulafat"))
+        answer_audio = at.session_state["chat_voice_reply"]["audio"]
+        self.call(at, "handle_voice_preview", {"sid": "abc123", "n": 1, "voice": "Sulafat"})
+        cache = at.session_state["_preview_cache"]
+        self.assertTrue(cache)
+        self.assertTrue(all(key[1] in c.SERVER_VOICES and len(key) == 2 for key in cache))
+        self.assertNotIn(answer_audio, cache.values())
+        preview_bodies = [b for b in tts_calls() if b["input"][0]["content"][0]["text"] == c.VOICE_PREVIEW_TEXT]
+        self.assertLessEqual(len(preview_bodies), 1)
+        other = self.start(user_id=str(__import__("uuid").uuid4()), keep_cache=True)  # 다른 사람(새 세션)
+        self.assertNotIn("chat_voice_reply", other.session_state)
+        self.assertNotIn(answer_audio, other.session_state["_preview_cache"].values())
 
     def test_no_startup_self_test(self):
         with open(os.path.join(ROOT, "app.py"), encoding="utf-8") as f:

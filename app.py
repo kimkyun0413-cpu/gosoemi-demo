@@ -7,6 +7,7 @@ import datetime
 import unicodedata
 import uuid
 import hashlib
+import sys
 import httpx
 import html
 import secrets
@@ -35,11 +36,18 @@ import calendar_ics as _calendar_ics_module
 # Streamlit Cloud는 git push 뒤 app.py만 새로 실행하고, 이미 불러온 보조 모듈(case_guide, voice_input 등)은
 # 예전 버전을 메모리에 그대로 둘 수 있다. 그러면 새로 추가한 이름을 못 찾아 ImportError로 앱이 멈춘다
 # (2026-10-06 실제 발생). 의존 순서대로 다시 불러와 항상 배포된 파일과 같은 내용을 쓰게 한다.
+# 배포 직후에는 다른 세션이 실행을 시작하면서 이 모듈들을 sys.modules에서 비울 수 있다(Streamlit 파일 감시).
+# 그 사이에 reload하면 ImportError가 나므로(2026-10-12 운영 로그), 비워진 모듈은 건너뛴다.
+# 바로 아래의 from-import가 디스크의 새 파일로 다시 불러오므로 예전 버전이 남지 않는다.
 for _module in (
     _case_guide_module, _policy_text_module, _billing_module, _auth_ip_module, _voice_input_module,
     _chat_assistant_module, _precedent_search_module, _case_workspace_module, _calendar_ics_module,
 ):
-    importlib.reload(_module)
+    try:
+        importlib.reload(_module)
+    except ImportError:
+        if _module.__name__ in sys.modules:
+            raise
 
 from voice_input import (
     NEEDS_CHECK, SOURCE_CHAT, TEST_PHRASE_KEYWORDS, VOICE_UPLOAD_TYPES, test_phrase_check, audio_mime_type, clean_transcript,
