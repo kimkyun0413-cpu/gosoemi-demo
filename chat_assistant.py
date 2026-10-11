@@ -4,8 +4,11 @@
 - 사건 정보 정리는 이용자가 쓴 말만 근거로 한다. AI 답변에 나온 예시나 추측은 사실로 쓰지 않는다.
 - 음성 대화는 브라우저 부품(VOICE_CHAT_JS)이 마이크를 듣다가 말이 끝나면 그 구간만 WAV로 보내고,
   서버가 기존 Gemini 받아쓰기·답변으로 처리한 뒤 답변을 기기 음성으로 읽는다. 읽는 동안에는 마이크 입력을 끈다.
-- 답변 읽기는 브라우저가 '기기 안의 음성(localService)'이라고 알려 주는 한국어 음성만 쓴다.
+- 답변 읽기는 기본으로 브라우저가 '기기 안의 음성(localService)'이라고 알려 주는 한국어 음성만 쓴다.
   원격 음성(예: 일부 데스크톱 Chrome의 'Google 한국의')은 답변 글이 외부 음성 서버로 갈 수 있어 쓰지 않는다.
+- '고소미 서버 목소리'(VOICE_SERVER_TTS_ENABLED, 관리자 시험)를 고르면 답변 글을 Gemini 음성 생성(TTS)으로 보내
+  WAV를 받아 재생한다. 만든 음성은 DB·파일에 저장하지 않고 다음 답변이 오거나 대화를 끝내면 서버 메모리에서 지운다.
+- 목소리 설정(고른 목소리·속도)은 이 기기의 브라우저 저장소에만 둔다.
 """
 
 import base64
@@ -56,7 +59,14 @@ CHAT_RETENTION_NOTE = (
 
 SPEECH_NOTE = (
     "답변은 이 기기(브라우저·운영체제)에 들어 있는 한국어 음성으로 기기 안에서 읽어 드립니다. "
-    "답변 글을 외부 음성 서비스로 보내지 않으며, 기기에 한국어 음성이 없으면 글로만 보여 드립니다."
+    "답변 글을 외부 음성 서비스로 보내지 않으며, 기기에 한국어 음성이 없으면 글로만 보여 드립니다. "
+    "'목소리 설정'에서 고른 목소리와 속도는 이 기기의 브라우저에만 저장합니다."
+)
+
+SERVER_SPEECH_NOTE = (
+    "'고소미 서버 목소리'를 고르면 답변 글(앞부분 약 1분 분량)을 Google Gemini로 보내 음성으로 바꿉니다. "
+    "만든 음성은 저장하지 않고, 다음 답변이 오거나 대화를 끝내면 서버 메모리에서 지웁니다. "
+    "기기 목소리를 고르면 답변 글을 음성용으로 따로 보내지 않습니다."
 )
 
 VOICE_MIC_NOTE = (
@@ -69,6 +79,80 @@ VOICE_STYLE_INSTRUCTION = (
     "- 지금은 음성으로 대화 중이다. 답변은 소리로 듣기 좋게 2~4문장으로 짧게 하고, 목록·표·기호·링크·영문 약어를 쓰지 마라.\n"
     "- 받아쓰기라 단어가 틀렸을 수 있다. 뜻이 분명하지 않으면 추측하지 말고 짧게 다시 물어보라."
 )
+
+# ── 답변 목소리 ─────────────────────────────────────────────────
+# Gemini 음성 생성 모델(공식 문서 2026-10 기준). 한국어 지원, 24kHz 모노 WAV. 운영에서 GEMINI_TTS_MODEL로 바꿀 수 있다.
+GEMINI_TTS_DEFAULT_MODEL = "gemini-3.8-flash-lite-tts"
+# 서버 음성으로 읽는 글자 수 상한(약 1분). 길면 앞부분만 읽고 나머지는 화면 글로 안내한다(비용·전송 크기).
+SERVER_SPEECH_MAX_CHARS = 600
+# Google 문서가 붙인 특징 중 상담 안내에 어울릴 만한 것만 고른 후보. 한국어로 어떻게 들리는지는 직접 들어 보고 고른다.
+SERVER_VOICES = {
+    "Iapetus": "또렷함", "Erinome": "또렷함", "Charon": "정보 전달", "Rasalgethi": "정보 전달",
+    "Schedar": "고른 말투", "Kore": "단단함", "Sulafat": "따뜻함", "Achernar": "부드러움",
+}
+SERVER_TTS_STYLE = ("Calm, clear and articulate Korean speech for a legal-information helper. "
+                    "Pronounce names, dates, amounts of money and legal terms precisely, without rushing.")
+VOICE_PREVIEW_TEXT = "안녕하세요, 고소미예요. 홍길동 님, 2026년 10월 20일까지 45만 원 송금 내역과 고소장 사본을 준비해 주세요."
+
+_ISO_DATE_RE = re.compile(r"(?<!\d)(\d{4})[-./](\d{1,2})[-./](\d{1,2})(?!\d)")
+_RANGE_RE = re.compile(r"(?<=\d)\s*~\s*(?=\d)")
+
+
+def tts_text(text: str) -> str:
+    """소리로 읽을 때 헷갈리기 쉬운 표기만 바꾼다: 2026-10-20 → 2026년 10월 20일, 3~5일 → 3에서 5일."""
+    def date(m):
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        return f"{y}년 {mo}월 {d}일" if 1 <= mo <= 12 and 1 <= d <= 31 else m.group(0)
+    text = _ISO_DATE_RE.sub(date, text or "")
+    return _RANGE_RE.sub("에서 ", text)
+
+
+def server_speech_text(text: str) -> str:
+    """서버 음성으로 읽을 부분(앞에서 약 1분)."""
+    if len(text) <= SERVER_SPEECH_MAX_CHARS:
+        return text
+    cut = text[:SERVER_SPEECH_MAX_CHARS]
+    end = max(cut.rfind("."), cut.rfind("요"), cut.rfind("다"))
+    return (cut[: end + 1] if end > SERVER_SPEECH_MAX_CHARS // 2 else cut) + " 나머지는 화면의 글로 확인해 주세요."
+
+
+def tts_request(text: str, voice: str, model: str) -> dict:
+    """Gemini Interactions API 음성 생성 요청(공식 문서의 단일 화자 예시 형식)."""
+    if voice not in SERVER_VOICES:
+        raise ValueError("voice")
+    return {
+        "model": model,
+        "input": [{"type": "user_input", "content": [{
+            "type": "text", "text": text, "annotations": [{"type": "speech_metadata", "style": SERVER_TTS_STYLE}],
+        }]}],
+        "response_format": {"type": "audio", "mime_type": "audio/wav", "sample_rate": 24000},
+        "generation_config": {"speech_config": [{"voice": voice}]},
+    }
+
+
+def pcm_to_wav(pcm: bytes, rate: int = 24000) -> bytes:
+    import struct
+    return (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+            + b"data" + struct.pack("<I", len(pcm)) + pcm)
+
+
+def extract_tts_audio(interaction) -> bytes:
+    """응답에서 WAV 바이트를 꺼낸다. 머리말 없는 PCM이 오면 WAV 머리말을 붙인다. 없으면 ValueError."""
+    def get(obj, name):
+        return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+    data = get(get(interaction, "output_audio") or {}, "data")
+    if not data:
+        for step in get(interaction, "steps") or []:
+            for part in get(step, "content") or []:
+                if get(part, "type") == "audio" and get(part, "data"):
+                    data = get(part, "data")
+    if not data:
+        raise ValueError("no audio")
+    raw = base64.b64decode(data) if isinstance(data, str) else bytes(data)
+    if len(raw) < 1000:
+        raise ValueError("audio too short")
+    return raw if raw[:4] == b"RIFF" else pcm_to_wav(raw)
+
 
 # 음성 대화에서 한 번에 받는 말의 길이 상한(초). 브라우저 부품도 이 길이에서 끊어 보낸다.
 VOICE_TURN_MAX_SECONDS = 40
@@ -165,7 +249,7 @@ def speech_text(answer: str) -> str:
     text = _URL_RE.sub("링크", text)
     text = re.sub(r"[*_`#>|]+", "", text)
     text = re.sub(r"^\s*[-•]\s*", "", text, flags=re.M)
-    text = re.sub(r"\n{2,}", "\n", text).strip()
+    text = tts_text(re.sub(r"\n{2,}", "\n", text).strip())
     if len(text) > SPEECH_MAX_CHARS:
         cut = text[:SPEECH_MAX_CHARS]
         end = max(cut.rfind("."), cut.rfind("요"), cut.rfind("다"))
@@ -225,6 +309,14 @@ VOICE_CHAT_CSS = """
   background:#fff; color:#0B1F3A; cursor:pointer; }
 .gv-btn:disabled { opacity:.4; cursor:default; }
 .gv-btn.end { border-color:#F3B4AE; color:#B42318; }
+.gv-set { width:100%; max-width:520px; border:1px solid #DCE3EE; border-radius:12px; padding:0 12px; background:#FAFBFD; }
+.gv-set summary { cursor:pointer; font-size:16px; font-weight:600; padding:12px 0; list-style-position:inside; }
+.gv-set label { display:block; font-size:15px; font-weight:600; margin:6px 0 4px; }
+.gv-set select { width:100%; min-height:44px; font-size:16px; border-radius:10px; border:1px solid #9FB3D1; padding:0 8px; background:#fff; color:#0B1F3A; }
+.gv-set input[type=range] { width:100%; min-height:32px; }
+.gv-set .gv-row { justify-content:flex-start; margin:8px 0 6px; }
+.gv-set-note { font-size:14px; color:#3E4C61; line-height:1.5; padding-bottom:12px; }
+.gv-fail { display:none; }
 .gv-fallback { font-size:15px; background:#F4F7FC; border-radius:10px; padding:10px 12px; max-width:520px; display:none; white-space:pre-wrap; }
 """
 
@@ -269,6 +361,69 @@ function stopStream(S) {
 function stopSpeech(S) {
   S.speakToken++;
   try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (_) {}
+  try { if (S.player) { S.player.onended = S.player.onerror = null; S.player.pause(); } } catch (_) {}
+}
+
+// ── 목소리 설정: 이 기기 브라우저에만 저장(고른 목소리·속도). 저장소를 못 쓰면 이번 화면에서만 기억한다.
+const PREF_KEY = 'gosomi_voice_v1';
+function loadPref() { try { return JSON.parse(localStorage.getItem(PREF_KEY) || '{}') || {}; } catch (_) { return {}; } }
+function savePref(S) { try { localStorage.setItem(PREF_KEY, JSON.stringify(S.pref)); } catch (_) {} }
+
+function koVoices() {
+  const synth = window.speechSynthesis;
+  if (!synth) return [];
+  return synth.getVoices().filter(v => v.localService && (v.lang || '').toLowerCase().replace('_', '-').startsWith('ko'));
+}
+
+function serverVoice(S) {
+  const want = S.pref.voice || '';
+  if (!want.startsWith('server:')) return null;
+  const id = want.slice(7);
+  return (S.serverVoices || []).some(v => v.id === id) ? id : null;
+}
+
+function rate(S) { const r = Number(S.pref.rate); return r >= 0.7 && r <= 1.4 ? r : 1.0; }
+
+function fillSettings(S) {
+  if (!S.el || !S.el.voice) return;
+  const sel = S.el.voice, list = koVoices(), servers = S.serverVoices || [];
+  sel.innerHTML = '';
+  const group = (label) => { const g = document.createElement('optgroup'); g.label = label; sel.appendChild(g); return g; };
+  const add = (g, value, text) => { const o = document.createElement('option'); o.value = value; o.textContent = text; g.appendChild(o); };
+  const gd = group('이 기기 목소리 (기기 안에서 읽음)');
+  if (!list.length) add(gd, 'device:', '이 기기에 한국어 목소리가 없어요');
+  list.forEach(v => add(gd, 'device:' + v.voiceURI, v.name + (v.default ? ' (기본)' : '')));
+  if (servers.length) {
+    const gs = group('고소미 서버 목소리 (관리자 시험 · Google로 전송)');
+    servers.forEach(v => add(gs, 'server:' + v.id, v.id + ' · ' + v.label));
+  }
+  const values = [...sel.options].map(o => o.value);
+  const def = list.find(v => v.default) || list[0];
+  sel.value = values.includes(S.pref.voice) ? S.pref.voice : (def ? 'device:' + def.voiceURI : values[0]);
+  S.el.rate.value = String(rate(S));
+  S.el.rateVal.textContent = rate(S).toFixed(2).replace(/0$/, '') + '배';
+  const server = sel.value.startsWith('server:');
+  S.el.setNote.textContent = server
+    ? '서버 목소리는 답변 글(앞부분 약 1분)을 Google Gemini로 보내 음성으로 바꿔요. 만든 음성은 저장하지 않아요. 만들지 못하면 기기 목소리로 바꿀 수 있어요.'
+    : (list.length
+      ? '답변 글은 기기 밖으로 나가지 않아요. 더 또렷한 한국어 목소리는 기기 설정의 손쉬운 사용 > 읽기 및 말하기에서 내려받을 수 있고, 기기에 따라 이 목록에 나타나요.'
+      : '이 기기에는 한국어 읽기 목소리가 없어 답변을 글로 보여 드려요.');
+}
+
+function pickVoice(S) {
+  const list = koVoices(), want = S.pref.voice || '';
+  if (want.startsWith('device:')) { const found = list.find(v => v.voiceURI === want.slice(7)); if (found) return found; }
+  return list.find(v => v.default) || list[0] || null;
+}
+
+const SILENCE = () => wavBase64(new Float32Array(800), 16000);
+// iPhone Safari는 누른 순간에 재생해 둔 소리 요소만 나중에(답변이 왔을 때) 재생을 허락한다.
+function unlockPlayer(S) {
+  try {
+    S.player = S.player || new Audio();
+    S.player.src = 'data:audio/wav;base64,' + SILENCE();
+    const r = S.player.play(); if (r && r.catch) r.catch(() => {});
+  } catch (_) {}
 }
 
 function resetVad(S) {
@@ -276,6 +431,7 @@ function resetVad(S) {
 }
 
 function listen(S) {
+  showFail(S, false);
   if (!S.stream || S.ended) { setPhase(S, 'off'); return; }
   resetVad(S); S.idleMs = 0;
   micEnabled(S, true);
@@ -289,13 +445,6 @@ function micOff(S, hint) {
   setPhase(S, 'off', hint);
 }
 
-function pickVoice() {
-  const synth = window.speechSynthesis;
-  if (!synth) return null;
-  const ko = synth.getVoices().filter(v => (v.lang || '').toLowerCase().replace('_', '-').startsWith('ko'));
-  return ko.find(v => v.localService && v.default) || ko.find(v => v.localService) || null;
-}
-
 function chunks(text) {
   const parts = text.match(/[^.!?。\\n]+[.!?。]?/g) || [text];
   const out = []; let cur = '';
@@ -306,14 +455,59 @@ function chunks(text) {
 
 function afterSpeak(S, mine) {
   if (mine !== S.speakToken || S.phase !== 'speaking') return;
-  setTimeout(() => { if (S.phase === 'speaking' && mine === S.speakToken) listen(S); }, 600);
+  setTimeout(() => {
+    if (S.phase !== 'speaking' || mine !== S.speakToken) return;
+    if (S.stream) listen(S); else setPhase(S, S.started ? 'off' : 'idle');
+  }, 600);
+}
+
+function showFail(S, on) { if (S.el && S.el.fail) S.el.fail.style.display = on ? 'flex' : 'none'; }
+
+// 서버 목소리 재생. 실패하면 글 답변은 그대로 두고 '다시 시도'·'기기 목소리로 듣기'를 고르게 한다(마이크는 꺼 둔다).
+function playAudio(S, b64, text, onFail) {
+  micEnabled(S, false);
+  showFail(S, false);
+  S.el.fallback.style.display = 'none';
+  stopSpeech(S);
+  const mine = ++S.speakToken;
+  setPhase(S, 'speaking');
+  const p = S.player = S.player || new Audio();
+  const fail = () => { if (mine === S.speakToken) onFail(); };
+  p.onended = () => afterSpeak(S, mine);
+  p.onerror = fail;
+  try { p.preservesPitch = true; } catch (_) {}
+  p.src = 'data:audio/wav;base64,' + b64;
+  p.playbackRate = rate(S);
+  try { const r = p.play(); if (r && r.catch) r.catch(fail); } catch (_) { fail(); }
+}
+
+function ttsFailed(S, reply, hint) {
+  micEnabled(S, false);
+  S.lastReply = reply;
+  S.el.fallback.textContent = String(reply.text || ''); S.el.fallback.style.display = 'block';
+  setPhase(S, 'speaking', hint || '서버 목소리를 만들지 못했어요. 답변은 위 글로 볼 수 있어요.', true);
+  S.speakToken++;
+  showFail(S, true);
+}
+
+function speakReply(S, reply) {
+  const text = String(reply.text || '');
+  if (reply.audio) {
+    playAudio(S, reply.audio, text, () => ttsFailed(S, reply, '서버 목소리를 재생하지 못했어요. 답변은 위 글로 볼 수 있어요.'));
+  } else if (reply.tts_error) {
+    ttsFailed(S, reply, String(reply.tts_error));
+  } else {
+    speak(S, text);
+  }
 }
 
 function speak(S, text) {
   micEnabled(S, false);
+  showFail(S, false);
   S.el.fallback.style.display = 'none';
+  try { if (S.player) S.player.pause(); } catch (_) {}
   const synth = window.speechSynthesis;
-  const voice = pickVoice();
+  const voice = pickVoice(S);
   if (!synth || typeof SpeechSynthesisUtterance === 'undefined' || !voice) {
     S.el.fallback.textContent = text;
     S.el.fallback.style.display = 'block';
@@ -328,7 +522,7 @@ function speak(S, text) {
   const list = chunks(text || '');
   list.forEach((part, i) => {
     const u = new SpeechSynthesisUtterance(part);
-    u.voice = voice; u.lang = voice.lang || 'ko-KR'; u.rate = 1.0;
+    u.voice = voice; u.lang = voice.lang || 'ko-KR'; u.rate = rate(S);
     u.onerror = (e) => {
       if (mine !== S.speakToken || e.error === 'interrupted' || e.error === 'canceled') return;
       S.el.fallback.textContent = text; S.el.fallback.style.display = 'block';
@@ -379,7 +573,8 @@ function finishTurn(S) {
   S.replyTimer = setTimeout(() => {
     if (S.awaiting === S.seq && S.phase === 'thinking') { S.awaiting = 0; listen(S); S.el.hint.textContent = '응답이 늦어요. 다시 말씀해 주세요.'; }
   }, 120000);
-  S.setTrigger('utterance', {sid: S.sid, seq: S.seq, audio});
+  const voice = serverVoice(S);
+  S.setTrigger('utterance', {sid: S.sid, seq: S.seq, audio, tts: voice ? {voice} : null});
 }
 
 function onFrame(S, input) {
@@ -416,10 +611,14 @@ function onFrame(S, input) {
 }
 
 let MAX_MS = 40000;
+let PREVIEW_TEXT = '안녕하세요, 고소미예요.';
 
 async function start(S) {
   S.ended = false;
+  S.started = true;
   S.el.fallback.style.display = 'none';
+  showFail(S, false);
+  unlockPlayer(S);
   // iPhone Safari: 누른 순간에 소리 재생과 오디오 처리를 깨워 둬야 나중에 답변을 읽을 수 있다.
   try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; window.speechSynthesis.speak(u); } catch (_) {}
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -467,13 +666,24 @@ function build(S, root) {
   box.className = 'gv';
   box.innerHTML = '<button class="gv-mic" type="button"></button><div class="gv-status" role="status" aria-live="polite"></div>'
     + '<div class="gv-hint"></div><div class="gv-fallback"></div>'
+    + '<div class="gv-row gv-fail"><button class="gv-btn retry" type="button">서버 목소리 다시 시도</button>'
+    + '<button class="gv-btn device" type="button">기기 목소리로 듣기</button></div>'
     + '<div class="gv-row"><button class="gv-btn micoff" type="button">마이크 끄기</button>'
-    + '<button class="gv-btn stop" type="button">답변 정지</button><button class="gv-btn end" type="button">대화 종료</button></div>';
+    + '<button class="gv-btn stop" type="button">답변 정지</button><button class="gv-btn end" type="button">대화 종료</button></div>'
+    + '<details class="gv-set"><summary>목소리 설정</summary>'
+    + '<label for="gv-voice">목소리</label><select id="gv-voice" class="gv-voice"></select>'
+    + '<label for="gv-rate">말하기 속도 <span class="gv-rate-val"></span></label>'
+    + '<input id="gv-rate" class="gv-rate" type="range" min="0.8" max="1.3" step="0.05">'
+    + '<div class="gv-row"><button class="gv-btn preview" type="button">미리듣기</button></div>'
+    + '<div class="gv-set-note"></div></details>';
   // Streamlit이 넣어 둔 스타일(<style>)은 남기고 부품만 붙인다.
   root.querySelectorAll('.gv').forEach(n => n.remove());
   root.appendChild(box);
   S.el = {root: box, mic: box.querySelector('.gv-mic'), status: box.querySelector('.gv-status'), hint: box.querySelector('.gv-hint'),
-          fallback: box.querySelector('.gv-fallback'), micOff: box.querySelector('.micoff'), stop: box.querySelector('.stop'), end: box.querySelector('.end')};
+          fallback: box.querySelector('.gv-fallback'), micOff: box.querySelector('.micoff'), stop: box.querySelector('.stop'), end: box.querySelector('.end'),
+          fail: box.querySelector('.gv-fail'), retry: box.querySelector('.retry'), device: box.querySelector('.device'),
+          voice: box.querySelector('.gv-voice'), rate: box.querySelector('.gv-rate'), rateVal: box.querySelector('.gv-rate-val'),
+          preview: box.querySelector('.preview'), setNote: box.querySelector('.gv-set-note')};
   S.el.mic.innerHTML = MIC_SVG;
   S.el.mic.onclick = () => {
     if (S.phase === 'speaking') { stopSpeech(S); listen(S); return; }
@@ -483,14 +693,53 @@ function build(S, root) {
   S.el.micOff.onclick = () => { stopSpeech(S); micOff(S); };
   S.el.stop.onclick = () => { stopSpeech(S); if (S.stream) listen(S); else setPhase(S, 'off'); };
   S.el.end.onclick = () => endAll(S, true);
+  S.el.retry.onclick = () => {
+    const reply = S.lastReply, voice = serverVoice(S);
+    if (!reply || !voice) { S.el.device.onclick(); return; }
+    showFail(S, false); unlockPlayer(S);
+    S.ttsTry = (S.ttsTry || 0) + 1; S.awaiting = reply.id;
+    setPhase(S, 'thinking', '서버 목소리를 다시 만들고 있어요.');
+    S.setTrigger('tts', {sid: S.sid, id: reply.id, voice, n: S.ttsTry});
+  };
+  S.el.device.onclick = () => { showFail(S, false); speak(S, String((S.lastReply || {}).text || '')); };
+  S.el.voice.onchange = () => { S.pref.voice = S.el.voice.value; savePref(S); fillSettings(S); };
+  S.el.rate.oninput = () => { S.pref.rate = Number(S.el.rate.value); savePref(S); S.el.rateVal.textContent = rate(S).toFixed(2).replace(/0$/, '') + '배';
+    if (S.player) S.player.playbackRate = rate(S); };
+  S.el.preview.onclick = () => {
+    // 미리듣기 동안에도 마이크를 꺼 둔다. 서버 목소리는 짧은 예시 문장만 보낸다.
+    if (S.phase === 'thinking' || S.phase === 'hearing' || S.awaiting) {
+      S.el.setNote.textContent = '말씀을 듣거나 답변을 만드는 중에는 미리듣기를 할 수 없어요. 답변이 끝난 뒤 눌러 주세요.';
+      return;
+    }
+    const voice = serverVoice(S);
+    if (voice) {
+      unlockPlayer(S); micEnabled(S, false);
+      S.previewN = (S.previewN || 0) + 1;
+      S.el.setNote.textContent = '미리듣기 목소리를 만들고 있어요…';
+      S.setTrigger('preview', {sid: S.sid, n: S.previewN, voice});
+    } else {
+      speak(S, PREVIEW_TEXT);
+    }
+  };
+  if (window.speechSynthesis) {
+    try { window.speechSynthesis.addEventListener('voiceschanged', () => fillSettings(S)); } catch (_) {}
+  }
+  fillSettings(S);
   setPhase(S, 'idle');
 }
 
 function applyData(S, data) {
-  const reply = data && data.reply, notice = data && data.notice;
+  const reply = data && data.reply, notice = data && data.notice, preview = data && data.preview;
+  const servers = (data && data.server_voices) || [];
+  if (JSON.stringify(servers) !== JSON.stringify(S.serverVoices || [])) { S.serverVoices = servers; fillSettings(S); }
+  if (preview && preview.sid === S.sid && preview.n === S.previewN) {
+    S.previewN = -1; fillSettings(S);
+    if (preview.audio) playAudio(S, preview.audio, PREVIEW_TEXT, () => { S.el.setNote.textContent = '미리듣기를 재생하지 못했어요.'; afterSpeak(S, S.speakToken); });
+    else { S.el.setNote.textContent = String(preview.error || '미리듣기 목소리를 만들지 못했어요.'); if (S.stream && S.phase !== 'speaking') micEnabled(S, true); }
+  }
   if (reply && reply.sid === S.sid && reply.id === S.awaiting) {
     S.awaiting = 0; clearTimeout(S.replyTimer);
-    speak(S, String(reply.text || ''));
+    speakReply(S, reply);
   } else if (notice && notice.sid === S.sid && notice.id === S.awaiting) {
     S.awaiting = 0; clearTimeout(S.replyTimer);
     if (notice.kind === 'retry' && S.stream) { listen(S); setPhase(S, 'listening', String(notice.text || ''), true); }
@@ -502,7 +751,8 @@ export default function({data, parentElement, setTriggerValue}) {
   let S = parentElement.__gv;
   if (!S) {
     S = parentElement.__gv = {sid: Math.random().toString(36).slice(2, 12), seq: 0, awaiting: 0, speakToken: 0, floor: 0.008,
-                               frames: [], pre: [], mounted: true, ended: false};
+                               frames: [], pre: [], mounted: true, ended: false, pref: loadPref(), serverVoices: []};
+    if (data && data.preview_text) PREVIEW_TEXT = String(data.preview_text);
     build(S, parentElement);
     S.onHide = () => endAll(S, false);
     window.addEventListener('pagehide', S.onHide);
@@ -510,7 +760,8 @@ export default function({data, parentElement, setTriggerValue}) {
     window.__gosoemiVoiceState = () => ({phase: S.phase, seq: S.seq, awaiting: S.awaiting,
       micLive: !!(S.stream && S.stream.getAudioTracks().some(t => t.readyState === 'live')),
       micOn: !!(S.stream && S.stream.getAudioTracks().some(t => t.enabled)),
-      speaking: !!(window.speechSynthesis && window.speechSynthesis.speaking)});
+      speaking: !!(window.speechSynthesis && window.speechSynthesis.speaking),
+      playing: !!(S.player && !S.player.paused && !S.player.ended), voice: S.pref.voice || '', rate: rate(S)});
   }
   S.setTrigger = setTriggerValue;
   if (data && data.max_seconds) MAX_MS = data.max_seconds * 1000;

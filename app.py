@@ -46,6 +46,7 @@ from voice_input import (
 )
 from chat_assistant import (
     CHAT_INPUT_PLACEHOLDER, CHAT_LIMITS_NOTE, CHAT_MAX_INPUT_CHARS, CHAT_RETENTION_NOTE, CHAT_WELCOME, SPEECH_NOTE, VOICE_CHAT_CSS, VOICE_CHAT_JS,
+    GEMINI_TTS_DEFAULT_MODEL, SERVER_SPEECH_NOTE, SERVER_VOICES, VOICE_PREVIEW_TEXT, extract_tts_audio, server_speech_text, tts_request,
     VOICE_MIC_NOTE, VOICE_TURN_MAX_SECONDS, append_exchange, decode_voice_turn, is_duplicate_submit, model_contents,
     normalize_question, question_digest, speech_text, system_instruction as chat_system_instruction, user_statements,
     voice_system_instruction, SUMMARY_FAILED, SUMMARY_MIN_CHARS, clean_summary, summary_prompt, summary_supported,
@@ -114,6 +115,11 @@ VOICE_INPUT_ENABLED = os.environ.get("VOICE_INPUT_ENABLED") == "true"
 # 새 AI 대화(이어지는 대화·사건 정보 정리)와 음성 대화. v3 방침에 적은 처리라 시행 전에는 관리자 시험 모드에서만 보인다.
 AI_CHAT_V2_ENABLED = os.environ.get("AI_CHAT_V2_ENABLED") == "true"
 VOICE_CHAT_ENABLED = os.environ.get("VOICE_CHAT_ENABLED") == "true"
+# 답변을 Gemini 음성 생성(TTS)으로 읽는 '고소미 서버 목소리'. 답변 글이 음성용으로 한 번 더 Google에 가므로,
+# 이를 적은 방침(v3) 시행 전에는 관리자에게만 보인다. 기본은 꺼짐(비용 발생).
+VOICE_SERVER_TTS_ENABLED = os.environ.get("VOICE_SERVER_TTS_ENABLED") == "true"
+GEMINI_TTS_MODEL = os.environ.get("GEMINI_TTS_MODEL") or GEMINI_TTS_DEFAULT_MODEL
+GEMINI_TTS_TIMEOUT_MS = 60_000
 # 용어 풀이·유형별 Q&A 보강·진행 체크리스트(미리보기)·핵심만 보기·판례 찾기. 켜기 전에는 관리자에게만 보인다.
 ASSIST_V2_ENABLED = os.environ.get("ASSIST_V2_ENABLED") == "true"
 # 사건 작업 공간 저장·저장한 사건 수정. DB 변경(20261012000000_case_workspace_and_case_edit) 적용 후에 켠다.
@@ -1363,6 +1369,10 @@ def voice_chat_available() -> bool:
     return (VOICE_CHAT_ENABLED and chat_v2_public()) or is_admin()
 
 
+def server_tts_available() -> bool:
+    return VOICE_SERVER_TTS_ENABLED and voice_chat_available() and (privacy_v3_in_effect() or is_admin())
+
+
 def load_draft_index() -> dict:
     """이 계정의 저장된 초안 목록 {case_id: 마지막 저장 시각}. 본문은 열 때 따로 불러온다."""
     session = st.session_state.get("supabase_session") or {}
@@ -1542,7 +1552,8 @@ def get_ai_usage_limiter() -> AiUsageLimiter:
     return AiUsageLimiter()
 
 
-def call_gemini(contents, system_instruction=None) -> str:
+def reserve_ai_call() -> None:
+    """계정별·전체 1시간 호출 한도를 하나 쓴다. 넘으면 AiUsageLimitError."""
     session = st.session_state.get("supabase_session") or {}
     limiter = get_ai_usage_limiter()
     if not limiter.allow(session.get("user_id", ""), AI_CALLS_PER_HOUR):
@@ -1554,6 +1565,10 @@ def call_gemini(contents, system_instruction=None) -> str:
         raise AiUsageLimitError(
             "지금 이용자가 많아 AI 기능을 잠시 쉬고 있습니다. 10~20분 뒤에 다시 시도해 주세요. 저장한 사건은 그대로 있습니다."
         )
+
+
+def call_gemini(contents, system_instruction=None) -> str:
+    reserve_ai_call()
     client = genai.Client(
         api_key=os.environ["GEMINI_API_KEY"],
         http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
@@ -1568,6 +1583,24 @@ def call_gemini(contents, system_instruction=None) -> str:
         # 안전 필터 등으로 빈 응답이 오면 'None'이 초안에 들어가지 않도록 실패로 처리한다.
         raise RuntimeError("empty AI response")
     return text
+
+
+def synthesize_speech(text: str, voice: str) -> str:
+    """답변 글을 Gemini 음성 생성으로 WAV(base64)로 바꾼다. 키는 서버에서만 쓰고, 글·음성은 기록하지 않는다."""
+    request = tts_request(text, voice, GEMINI_TTS_MODEL)
+    reserve_ai_call()
+    client = genai.Client(
+        api_key=os.environ["GEMINI_API_KEY"],
+        http_options=types.HttpOptions(timeout=GEMINI_TTS_TIMEOUT_MS),
+    )
+    interaction = client.interactions.create(**request)
+    return base64.b64encode(extract_tts_audio(interaction)).decode("ascii")
+
+
+def tts_error_message(error: Exception) -> str:
+    if isinstance(error, AiUsageLimitError):
+        return str(error) + " 기기 목소리로 들을 수 있어요."
+    return "서버 목소리를 만들지 못했어요. 답변은 글로 볼 수 있어요. 다시 시도하거나 기기 목소리로 들어 주세요."
 
 
 def ai_error_message(error: Exception, default: str) -> str:
@@ -2739,7 +2772,7 @@ def reset_chat(notice: str) -> None:
     for key in list(st.session_state.keys()):
         if key.startswith(("chat_pick_", "chat_edit_")) or key in (
             "chat_messages", "chat_pending", "chat_failed", "chat_last_sent", "chat_proposal",
-            "chat_retry_text", "chat_voice_reply", "chat_voice_notice", "chat_voice_last",
+            "chat_retry_text", "chat_voice_reply", "chat_voice_notice", "chat_voice_last", "chat_voice_preview",
         ):
             del st.session_state[key]
     st.session_state.chat_notice = notice
@@ -2754,8 +2787,9 @@ def open_voice_mode() -> None:
 def close_voice_mode() -> None:
     # 음성 대화 부품이 화면에서 사라지면 브라우저에서 마이크와 읽기를 멈춘다(부품의 정리 함수).
     st.session_state.chat_mode = "text"
-    st.session_state.pop("chat_voice_reply", None)
+    st.session_state.pop("chat_voice_reply", None)   # 서버 목소리 음성도 함께 지운다
     st.session_state.pop("chat_voice_notice", None)
+    st.session_state.pop("chat_voice_preview", None)
 
 
 def queue_chat_question(text: str, via_voice: bool) -> str:
@@ -2872,7 +2906,52 @@ def handle_voice_turn(payload) -> None:
     st.session_state.chat_last_sent = {"digest": question_digest(transcript), "at": time.time()}
     st.session_state.pop("chat_failed", None)
     st.session_state.chat_voice_notice = None
-    st.session_state.chat_voice_reply = {"sid": sid, "id": seq, "text": speech_text(answer)}
+    reply = {"sid": sid, "id": seq, "text": speech_text(answer)}
+    tts = payload.get("tts") if isinstance(payload, dict) else None
+    voice = tts.get("voice") if isinstance(tts, dict) else None
+    if voice in SERVER_VOICES and server_tts_available():
+        add_server_audio(reply, voice)
+    st.session_state.chat_voice_reply = reply
+
+
+def add_server_audio(reply: dict, voice: str) -> None:
+    """답변에 서버 목소리를 붙인다. 실패하면 글 답변은 그대로 두고 다시 시도·기기 목소리 선택을 알린다."""
+    reply.pop("audio", None)
+    reply.pop("tts_error", None)
+    try:
+        reply["audio"] = synthesize_speech(server_speech_text(reply["text"]), voice)
+    except Exception as error:
+        print(f"[voice_chat] stage=tts result={type(error).__name__}", flush=True)
+        reply["tts_error"] = tts_error_message(error)
+
+
+def handle_tts_retry(payload) -> None:
+    """'서버 목소리 다시 시도': 지금 답변 글로 음성을 다시 만든다(질문·답변은 다시 보내지 않는다)."""
+    reply = st.session_state.get("chat_voice_reply")
+    if not isinstance(payload, dict) or not reply or payload.get("sid") != reply.get("sid") or payload.get("id") != reply.get("id"):
+        return
+    voice = payload.get("voice")
+    if voice not in SERVER_VOICES or not server_tts_available():
+        reply.pop("audio", None)
+        reply["tts_error"] = "서버 목소리를 쓸 수 없어요. 기기 목소리로 들어 주세요."
+    else:
+        add_server_audio(reply, voice)
+    reply["try"] = payload.get("n")
+    st.session_state.chat_voice_reply = dict(reply)
+
+
+def handle_voice_preview(payload) -> None:
+    """목소리 설정의 '미리듣기'(서버 목소리): 정해 둔 예시 문장만 음성으로 바꾼다."""
+    if (not isinstance(payload, dict) or payload.get("voice") not in SERVER_VOICES or not server_tts_available()
+            or not isinstance(payload.get("sid"), str) or not isinstance(payload.get("n"), int)):
+        return
+    preview = {"sid": payload["sid"][:32], "n": payload["n"]}
+    try:
+        preview["audio"] = synthesize_speech(VOICE_PREVIEW_TEXT, payload["voice"])
+    except Exception as error:
+        print(f"[voice_chat] stage=preview result={type(error).__name__}", flush=True)
+        preview["error"] = "미리듣기 목소리를 만들지 못했어요. 잠시 후 다시 눌러 주세요." if not isinstance(error, AiUsageLimitError) else str(error)
+    st.session_state.chat_voice_preview = preview
 
 
 def apply_chat_proposal() -> None:
@@ -2989,7 +3068,8 @@ def render_answer_summary(message: dict, index: int, busy: bool) -> None:
 
 
 def render_chat_details() -> None:
-    st.markdown(f"- {CHAT_LIMITS_NOTE}\n- {CHAT_RETENTION_NOTE}\n- {VOICE_MIC_NOTE}\n- {SPEECH_NOTE}")
+    st.markdown(f"- {CHAT_LIMITS_NOTE}\n- {CHAT_RETENTION_NOTE}\n- {VOICE_MIC_NOTE}\n- {SPEECH_NOTE}"
+                + (f"\n- {SERVER_SPEECH_NOTE}" if server_tts_available() else ""))
 
 
 def render_chat_text(voice_ok: bool) -> None:
@@ -3092,10 +3172,15 @@ def render_chat_voice() -> None:
         data={
             "reply": st.session_state.get("chat_voice_reply"),
             "notice": st.session_state.get("chat_voice_notice"),
+            "preview": st.session_state.get("chat_voice_preview"),
             "max_seconds": VOICE_TURN_MAX_SECONDS,
+            "preview_text": VOICE_PREVIEW_TEXT,
+            "server_voices": [{"id": k, "label": v} for k, v in SERVER_VOICES.items()] if server_tts_available() else [],
         },
         on_utterance_change=lambda: None,
         on_end_change=lambda: None,
+        on_tts_change=lambda: None,
+        on_preview_change=lambda: None,
     )
     if getattr(result, "end", None):
         close_voice_mode()
@@ -3104,6 +3189,12 @@ def render_chat_voice() -> None:
     if payload:
         handle_voice_turn(payload)
         del payload
+        st.rerun()
+    if getattr(result, "tts", None):
+        handle_tts_retry(result.tts)
+        st.rerun()
+    if getattr(result, "preview", None):
+        handle_voice_preview(result.preview)
         st.rerun()
 
     messages = chat_messages()

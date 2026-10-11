@@ -183,12 +183,36 @@ class _Models:
         return SimpleNamespace(text=reply)
 
 
+def fake_wav(seconds: float = 0.2, rate: int = 24000) -> bytes:
+    import struct
+    pcm = b"\x00\x00" * int(seconds * rate)
+    return (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+            + b"data" + struct.pack("<I", len(pcm)) + pcm)
+
+
+TTS_CALLS = []    # 음성 생성 요청(Interactions API 본문)
+TTS_REPLIES = []  # 다음 음성 생성 응답(예외를 넣으면 실패)
+
+
+class _Interactions:
+    def create(self, **body):
+        TTS_CALLS.append(body)
+        reply = TTS_REPLIES.pop(0) if TTS_REPLIES else None
+        if isinstance(reply, Exception):
+            raise reply
+        import base64
+        return SimpleNamespace(output_audio=SimpleNamespace(data=base64.b64encode(reply or fake_wav()).decode()))
+
+
 class FakeGenaiClient:
     def __init__(self, *args, **kwargs):
         self.models = _Models()
+        self.interactions = _Interactions()
 
 
 def reset():
+    TTS_CALLS.clear()
+    TTS_REPLIES.clear()
     CALLS.clear()
     REPLIES.clear()
     WRITES.clear()
