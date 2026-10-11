@@ -24,6 +24,12 @@ import fake_services as fake  # noqa: E402
 
 # 사용량 기록은 서버 메모리에 계속 남으므로, 호출 제한 시험은 이 시험만 쓰는 관리자 계정으로 한다.
 TTS_LIMIT_ADMIN_ID = "77777777-7777-4777-8777-777777777777"
+SELFTEST_TEXT = "안녕하세요, 고소미 음성 시험입니다."
+
+
+def tts_calls() -> list:
+    """서버가 처음 뜰 때 한 번 하는 자체 시험(뒤에서 실행)을 뺀 음성 생성 요청 본문."""
+    return [call["body"] for call in fake.TTS_CALLS if call["body"]["input"][0]["content"][0]["text"] != SELFTEST_TEXT]
 
 
 class HelperTest(unittest.TestCase):
@@ -67,6 +73,27 @@ class HelperTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 c.extract_tts_audio(bad)
 
+    def test_error_summary_hides_key_and_text(self):
+        body = '{"error": {"code": 400, "status": "INVALID_ARGUMENT", "message": "Unknown name \\"type\\" key=AIzaSyA1234567890abcdefghijk 홍길동 님 문장"}}'
+        err = c.tts_error_from_response(400, body, hide=("홍길동 님 문장",))
+        self.assertEqual((err.http_status, err.status), (400, "INVALID_ARGUMENT"))
+        self.assertNotIn("AIza", err.detail)
+        self.assertNotIn("홍길동", err.detail)
+        self.assertEqual(c.tts_error_from_response(500, "not json").status, "")
+
+    def test_wav_seconds(self):
+        self.assertEqual(c.wav_seconds(fake.fake_wav(1.5)), 1.5)
+        self.assertEqual(c.wav_seconds(b"nope"), 0.0)
+
+    def test_tts_goes_to_rest_endpoint_not_sdk(self):
+        # SDK(2.17.0)는 speech_metadata 주석을 UNKNOWN으로 바꿔 보내 400이 났다. 본문은 문서 형식 그대로 보낸다.
+        with open(os.path.join(ROOT, "app.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn("interactions.create", src)
+        self.assertEqual(c.TTS_ENDPOINT, "https://generativelanguage.googleapis.com/v1beta/interactions")
+        import json
+        self.assertNotIn("UNKNOWN", json.dumps(c.tts_request("안녕", "Kore", "m")))
+
     def test_component_keeps_safety_rules(self):
         js = c.VOICE_CHAT_JS
         self.assertIn("v.localService", js)                 # 기기 목소리는 기기 안 음성만
@@ -108,7 +135,7 @@ class AppVoiceTest(unittest.TestCase):
         user_id = user_id or self.admin
         self.env.update(env)
         patches = [mock.patch.dict(os.environ, self.env), mock.patch("supabase.create_client", fake.fake_create_client),
-                   mock.patch("google.genai.Client", fake.FakeGenaiClient)]
+                   mock.patch("google.genai.Client", fake.FakeGenaiClient), mock.patch("httpx.post", fake.fake_tts_post)]
         for patch in patches:
             patch.start()
         self.addCleanup(lambda: [patch.stop() for patch in reversed(patches)])
@@ -141,7 +168,11 @@ class AppVoiceTest(unittest.TestCase):
         reply = at.session_state["chat_voice_reply"]
         self.assertEqual(reply["text"], "2026년 10월 20일까지 이체 내역을 준비해 두세요.")
         self.assertEqual(base64.b64decode(reply["audio"])[:4], b"RIFF")
-        body = fake.TTS_CALLS[0]
+        call = [c_ for c_ in fake.TTS_CALLS if c_["body"]["input"][0]["content"][0]["text"] == reply["text"]][0]
+        self.assertEqual(call["url"], c.TTS_ENDPOINT)
+        self.assertTrue(call["has_key"])                                   # 키는 머리말로만 보낸다(본문에 없음)
+        self.assertNotIn("fake-key", str(call["body"]))
+        body = call["body"]
         self.assertEqual(body["model"], "gemini-3.8-flash-lite-tts")
         self.assertEqual(body["generation_config"]["speech_config"], [{"voice": "Kore"}])
         self.assertEqual(body["input"][0]["content"][0]["text"], reply["text"])
@@ -153,7 +184,7 @@ class AppVoiceTest(unittest.TestCase):
         at = self.start()
         self.call(at, "handle_voice_turn", self.utterance(voice=None))
         self.assertNotIn("audio", at.session_state["chat_voice_reply"])
-        self.assertEqual(fake.TTS_CALLS, [])
+        self.assertEqual(tts_calls(), [])
 
     def test_flag_off_or_regular_user_never_uses_server_voice(self):
         fake.REPLIES[:] = ["질문", "답변입니다."]
@@ -161,14 +192,14 @@ class AppVoiceTest(unittest.TestCase):
         self.assertFalse(at.session_state["_server_tts"])
         self.call(at, "handle_voice_turn", self.utterance())
         self.assertNotIn("audio", at.session_state["chat_voice_reply"])
-        self.assertEqual(fake.TTS_CALLS, [])
+        self.assertEqual(tts_calls(), [])
         user = self.start(user_id=fake.USER_ID, VOICE_SERVER_TTS_ENABLED="true", VOICE_CHAT_ENABLED="true",
                           AI_CHAT_V2_ENABLED="true")
         self.assertFalse(user.session_state["_server_tts"])               # 방침 v3 시행 전 일반 이용자
 
     def test_tts_failure_keeps_text_answer_then_retry_works(self):
         fake.REPLIES[:] = ["질문", "답변입니다."]
-        fake.TTS_REPLIES[:] = [RuntimeError("503")]
+        fake.TTS_REPLIES[:] = [(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "overloaded"}})]
         at = self.start()
         self.call(at, "handle_voice_turn", self.utterance())
         reply = at.session_state["chat_voice_reply"]
@@ -183,7 +214,7 @@ class AppVoiceTest(unittest.TestCase):
         self.assertEqual(reply["try"], 1)
         self.assertEqual(len(fake.CALLS), 2)                               # 다시 시도는 질문·답변을 다시 보내지 않는다
         self.call(at, "handle_tts_retry", {"sid": "other", "id": 1, "voice": "Kore", "n": 2})  # 다른 대화의 요청은 무시
-        self.assertEqual(len(fake.TTS_CALLS), 2)
+        self.assertEqual(len(tts_calls()), 2)
 
     def test_preview_uses_fixed_sentence_and_validates_voice(self):
         at = self.start()
@@ -191,15 +222,15 @@ class AppVoiceTest(unittest.TestCase):
         preview = at.session_state["chat_voice_preview"]
         self.assertEqual((preview["sid"], preview["n"]), ("abc123", 1))
         self.assertIn("audio", preview)
-        self.assertEqual(fake.TTS_CALLS[0]["input"][0]["content"][0]["text"], c.VOICE_PREVIEW_TEXT)
+        self.assertEqual(tts_calls()[0]["input"][0]["content"][0]["text"], c.VOICE_PREVIEW_TEXT)
         self.call(at, "handle_voice_preview", {"sid": "abc123", "n": 2, "voice": "<script>"})
-        self.assertEqual(len(fake.TTS_CALLS), 1)
+        self.assertEqual(len(tts_calls()), 1)
 
     def test_tts_counts_toward_hourly_limit(self):
         at = self.start(user_id=TTS_LIMIT_ADMIN_ID, AI_CALLS_PER_HOUR="1")
         self.call(at, "handle_voice_preview", {"sid": "abc123", "n": 1, "voice": "Kore"})
         self.call(at, "handle_voice_preview", {"sid": "abc123", "n": 2, "voice": "Kore"})
-        self.assertEqual(len(fake.TTS_CALLS), 1)
+        self.assertEqual(len(tts_calls()), 1)
         self.assertIn("1시간에 1번", at.session_state["chat_voice_preview"]["error"])
 
     def test_closing_voice_mode_drops_audio(self):
@@ -213,7 +244,8 @@ class AppVoiceTest(unittest.TestCase):
 
     def test_key_not_logged_or_sent_to_browser(self):
         fake.REPLIES[:] = ["질문", "답변입니다."]
-        fake.TTS_REPLIES[:] = [RuntimeError("boom fake-key")]
+        fake.TTS_REPLIES[:] = [(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                                               "message": "bad request fake-key 답변입니다. AIzaSyA1234567890abcdefghijklmn"}})]
         at = self.start()
         with mock.patch("builtins.print") as printed:
             self.call(at, "handle_voice_turn", self.utterance())

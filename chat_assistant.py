@@ -130,6 +130,46 @@ def tts_request(text: str, voice: str, model: str) -> dict:
     }
 
 
+# 음성 생성은 SDK를 거치지 않고 공식 문서의 REST 주소로 직접 보낸다.
+# google-genai 2.17.0은 'speech_metadata' 주석을 모르는 형식(type: UNKNOWN)으로 바꿔 보내 400 오류가 났다(2026-10-12 운영 로그).
+TTS_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions"
+_KEY_RE = re.compile(r"AIza[0-9A-Za-z_\-]{20,}")
+
+
+class TtsError(RuntimeError):
+    """음성 생성 실패. 로그에는 HTTP 상태와 Google 오류 종류·짧은 설명만 남긴다(키·글 제외)."""
+
+    def __init__(self, http_status: int, status: str, detail: str):
+        super().__init__(f"http={http_status} status={status}")
+        self.http_status, self.status, self.detail = http_status, status, detail
+
+
+def tts_error_from_response(http_status: int, body: str, hide: tuple = ()) -> TtsError:
+    """Google 오류 응답을 로그에 남겨도 되는 모양으로 줄인다: 키 모양 문자열과 보낸 글은 지운다."""
+    import json
+    status, message = "", ""
+    try:
+        err = (json.loads(body or "{}") or {}).get("error") or {}
+        status, message = str(err.get("status") or ""), str(err.get("message") or "")
+    except ValueError:
+        message = ""
+    for secret in hide:
+        if secret:
+            message = message.replace(secret, "<hidden>")
+    message = _KEY_RE.sub("<key>", message)
+    message = re.sub(r"[\r\n]+", " ", message)[:240]
+    return TtsError(http_status, status[:40], message)
+
+
+def wav_seconds(wav: bytes) -> float:
+    """WAV 길이(초). 머리말을 읽지 못하면 0."""
+    import struct
+    if len(wav) < 44 or wav[:4] != b"RIFF":
+        return 0.0
+    byte_rate = struct.unpack("<I", wav[28:32])[0]
+    return round((len(wav) - 44) / byte_rate, 2) if byte_rate else 0.0
+
+
 def pcm_to_wav(pcm: bytes, rate: int = 24000) -> bytes:
     import struct
     return (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)

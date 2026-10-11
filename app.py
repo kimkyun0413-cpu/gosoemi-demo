@@ -7,6 +7,7 @@ import datetime
 import unicodedata
 import uuid
 import hashlib
+import httpx
 import html
 import secrets
 import threading
@@ -46,7 +47,8 @@ from voice_input import (
 )
 from chat_assistant import (
     CHAT_INPUT_PLACEHOLDER, CHAT_LIMITS_NOTE, CHAT_MAX_INPUT_CHARS, CHAT_RETENTION_NOTE, CHAT_WELCOME, SPEECH_NOTE, VOICE_CHAT_CSS, VOICE_CHAT_JS,
-    GEMINI_TTS_DEFAULT_MODEL, SERVER_SPEECH_NOTE, SERVER_VOICES, VOICE_PREVIEW_TEXT, extract_tts_audio, server_speech_text, tts_request,
+    GEMINI_TTS_DEFAULT_MODEL, SERVER_SPEECH_NOTE, SERVER_VOICES, TTS_ENDPOINT, VOICE_PREVIEW_TEXT, TtsError, extract_tts_audio,
+    server_speech_text, tts_error_from_response, tts_request, wav_seconds,
     VOICE_MIC_NOTE, VOICE_TURN_MAX_SECONDS, append_exchange, decode_voice_turn, is_duplicate_submit, model_contents,
     normalize_question, question_digest, speech_text, system_instruction as chat_system_instruction, user_statements,
     voice_system_instruction, SUMMARY_FAILED, SUMMARY_MIN_CHARS, clean_summary, summary_prompt, summary_supported,
@@ -1587,14 +1589,48 @@ def call_gemini(contents, system_instruction=None) -> str:
 
 def synthesize_speech(text: str, voice: str) -> str:
     """답변 글을 Gemini 음성 생성으로 WAV(base64)로 바꾼다. 키는 서버에서만 쓰고, 글·음성은 기록하지 않는다."""
-    request = tts_request(text, voice, GEMINI_TTS_MODEL)
     reserve_ai_call()
-    client = genai.Client(
-        api_key=os.environ["GEMINI_API_KEY"],
-        http_options=types.HttpOptions(timeout=GEMINI_TTS_TIMEOUT_MS),
+    return base64.b64encode(request_tts_audio(text, voice)).decode("ascii")
+
+
+def request_tts_audio(text: str, voice: str) -> bytes:
+    """공식 REST 주소로 음성 생성을 요청해 WAV 바이트를 돌려준다. 실패하면 TtsError(로그용 요약만 담음)."""
+    key = os.environ["GEMINI_API_KEY"]
+    response = httpx.post(
+        TTS_ENDPOINT, json=tts_request(text, voice, GEMINI_TTS_MODEL),
+        headers={"x-goog-api-key": key, "Content-Type": "application/json"}, timeout=GEMINI_TTS_TIMEOUT_MS / 1000,
     )
-    interaction = client.interactions.create(**request)
-    return base64.b64encode(extract_tts_audio(interaction)).decode("ascii")
+    if response.status_code != 200:
+        raise tts_error_from_response(response.status_code, response.text, hide=(key, text))
+    try:
+        return extract_tts_audio(response.json())
+    except ValueError as error:
+        raise TtsError(200, "NO_AUDIO", str(error)) from error
+
+
+def log_tts_error(stage: str, error: Exception) -> None:
+    if isinstance(error, TtsError):
+        print(f"[voice_chat] stage={stage} result=TtsError http={error.http_status} status={error.status} "
+              f"model={GEMINI_TTS_MODEL} detail={error.detail}", flush=True)
+    else:
+        print(f"[voice_chat] stage={stage} result={type(error).__name__} model={GEMINI_TTS_MODEL}", flush=True)
+
+
+def run_tts_self_test() -> None:
+    try:
+        wav = request_tts_audio("안녕하세요, 고소미 음성 시험입니다.", "Kore")
+    except Exception as error:
+        log_tts_error("selftest", error)
+        return
+    print(f"[voice_tts_selftest] ok model={GEMINI_TTS_MODEL} bytes={len(wav)} seconds={wav_seconds(wav)}", flush=True)
+
+
+@st.cache_resource
+def start_tts_self_test() -> bool:
+    """서버 목소리를 켠 서버가 처음 뜰 때 한 번, 개인정보 없는 예시 문장으로 실제 음성 생성을 확인해 로그에 남긴다.
+    화면을 기다리게 하지 않도록 뒤에서 실행하고, 이용자 호출 한도에는 세지 않는다."""
+    threading.Thread(target=run_tts_self_test, daemon=True).start()
+    return True
 
 
 def tts_error_message(error: Exception) -> str:
@@ -2921,7 +2957,7 @@ def add_server_audio(reply: dict, voice: str) -> None:
     try:
         reply["audio"] = synthesize_speech(server_speech_text(reply["text"]), voice)
     except Exception as error:
-        print(f"[voice_chat] stage=tts result={type(error).__name__}", flush=True)
+        log_tts_error("tts", error)
         reply["tts_error"] = tts_error_message(error)
 
 
@@ -2949,7 +2985,7 @@ def handle_voice_preview(payload) -> None:
     try:
         preview["audio"] = synthesize_speech(VOICE_PREVIEW_TEXT, payload["voice"])
     except Exception as error:
-        print(f"[voice_chat] stage=preview result={type(error).__name__}", flush=True)
+        log_tts_error("preview", error)
         preview["error"] = "미리듣기 목소리를 만들지 못했어요. 잠시 후 다시 눌러 주세요." if not isinstance(error, AiUsageLimitError) else str(error)
     st.session_state.chat_voice_preview = preview
 
@@ -3476,6 +3512,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 st.markdown(BRAND_CSS, unsafe_allow_html=True)
+if VOICE_SERVER_TTS_ENABLED and os.environ.get("GEMINI_API_KEY"):
+    start_tts_self_test()
 
 if "supabase_session" not in st.session_state:
     st.session_state.supabase_session = None

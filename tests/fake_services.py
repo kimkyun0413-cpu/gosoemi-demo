@@ -190,24 +190,29 @@ def fake_wav(seconds: float = 0.2, rate: int = 24000) -> bytes:
             + b"data" + struct.pack("<I", len(pcm)) + pcm)
 
 
-TTS_CALLS = []    # 음성 생성 요청(Interactions API 본문)
-TTS_REPLIES = []  # 다음 음성 생성 응답(예외를 넣으면 실패)
+TTS_CALLS = []    # 음성 생성 요청 본문(REST)
+TTS_REPLIES = []  # 다음 음성 생성 응답: WAV 바이트, 또는 (HTTP 상태, 오류 본문)
 
 
-class _Interactions:
-    def create(self, **body):
-        TTS_CALLS.append(body)
-        reply = TTS_REPLIES.pop(0) if TTS_REPLIES else None
-        if isinstance(reply, Exception):
-            raise reply
-        import base64
-        return SimpleNamespace(output_audio=SimpleNamespace(data=base64.b64encode(reply or fake_wav()).decode()))
+def fake_tts_post(url, json=None, headers=None, timeout=None):
+    """httpx.post 대신 쓰는 가짜 음성 생성. 공식 문서의 REST 응답 모양(steps[].content[].data)으로 돌려준다."""
+    import base64
+    import json as _json
+    import httpx
+    TTS_CALLS.append({"url": url, "body": json, "has_key": bool((headers or {}).get("x-goog-api-key"))})
+    reply = TTS_REPLIES.pop(0) if TTS_REPLIES else None
+    request = httpx.Request("POST", url)
+    if isinstance(reply, tuple):
+        status, body = reply
+        return httpx.Response(status, text=_json.dumps(body), request=request)
+    data = base64.b64encode(reply or fake_wav()).decode()
+    return httpx.Response(200, json={"steps": [{"type": "model_output", "content": [{"type": "audio", "data": data}]}]},
+                          request=request)
 
 
 class FakeGenaiClient:
     def __init__(self, *args, **kwargs):
         self.models = _Models()
-        self.interactions = _Interactions()
 
 
 def reset():
