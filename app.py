@@ -1563,10 +1563,8 @@ class AiPausedError(AiUsageLimitError):
 # 운영자가 AI 기능(상담·초안·음성 받아쓰기·정리·요약·표현 바꾸기·서버 목소리)을 잠시 멈추는 설정.
 # 예: Gemini를 유료 등급으로 바꾸기 전, 방침과 실제 처리가 다른 동안. 사건 저장·내 사건·내려받기는 그대로 쓴다.
 AI_FEATURES_PAUSED = os.environ.get("AI_FEATURES_PAUSED") == "true"
-AI_PAUSED_MESSAGE = (
-    "AI 기능(상담·초안 만들기·음성)을 잠시 멈췄어요. 개인정보 처리 방식을 점검하는 중이에요. "
-    "적은 사건 내용 저장, 내 사건 보기, 내려받기는 그대로 쓸 수 있어요."
-)
+AI_PAUSED_MESSAGE = "AI 기능을 점검 중입니다. 저장한 사건은 계속 확인할 수 있습니다."
+AI_PAUSED_CASE_NOTE = "사건 내용은 지금도 저장할 수 있어요. 점검이 끝나면 '내 사건'에서 초안을 만들 수 있어요."
 
 
 class AiUsageLimiter:
@@ -1642,6 +1640,8 @@ def synthesize_speech(text: str, voice: str) -> str:
 
 def request_tts_audio(text: str, voice: str) -> bytes:
     """공식 REST 주소로 음성 생성을 요청해 WAV 바이트를 돌려준다. 실패하면 TtsError(로그용 요약만 담음)."""
+    if AI_FEATURES_PAUSED:
+        raise AiPausedError(AI_PAUSED_MESSAGE)
     key = os.environ["GEMINI_API_KEY"]
     response = httpx.post(
         TTS_ENDPOINT, json=tts_request(text, voice, GEMINI_TTS_MODEL),
@@ -3165,7 +3165,8 @@ def render_answer_summary(message: dict, index: int, busy: bool) -> None:
             st.markdown("**핵심만 보기**  \n" + md_escape(summary).replace("\n", "  \n"))
             st.caption("AI가 위 답변만 줄여 쓴 것이에요. 자세한 내용은 위 답변을 확인해 주세요.")
         return
-    if st.button("핵심만 보기 (짧게 요약)", key=f"chat_sum_{index}", icon=":material/summarize:", type="secondary", disabled=busy,
+    if st.button("핵심만 보기 (짧게 요약)", key=f"chat_sum_{index}", icon=":material/summarize:", type="secondary",
+                 disabled=busy or AI_FEATURES_PAUSED,
                  help="긴 답변을 핵심과 다음에 할 일로 짧게 줄여 보여 드려요."):
         try:
             with st.spinner("답변을 줄이고 있어요."):
@@ -3215,8 +3216,9 @@ def render_chat_text(voice_ok: bool) -> None:
 
     history_box = st.container()
     with history_box:
-        with st.chat_message("assistant"):
-            st.markdown(CHAT_WELCOME)
+        if not AI_FEATURES_PAUSED:
+            with st.chat_message("assistant"):
+                st.markdown(CHAT_WELCOME)
         for index, message in enumerate(messages):
             with st.chat_message(message["role"]):
                 st.markdown(("🎤 " if message.get("voice") else "") + message["content"])
@@ -3234,7 +3236,7 @@ def render_chat_text(voice_ok: bool) -> None:
             with col_x:
                 st.button("보내지 않기", key="chat_drop_failed_btn", on_click=drop_failed_question, width="stretch")
 
-    if has_user_text and not busy and not st.session_state.get("chat_proposal"):
+    if has_user_text and not busy and not st.session_state.get("chat_proposal") and not AI_FEATURES_PAUSED:
         extract = st.button("이 대화로 사건 정리하기", key="chat_extract_btn", icon=":material/assignment:", type="secondary",
                             help="대화에서 직접 말씀하신 내용만 모아 고소장 작성 칸에 넣을 제안을 만들어요. 확인 전에는 아무것도 바뀌지 않아요.")
     if extract:
@@ -3248,8 +3250,8 @@ def render_chat_text(voice_ok: bool) -> None:
             col_input, col_mic = st.container(), None
         with col_input:
             prompt = st.chat_input(
-                "답변을 만들고 있어요…" if busy else CHAT_INPUT_PLACEHOLDER,
-                max_chars=CHAT_MAX_INPUT_CHARS, key="chat_input_box", disabled=busy,
+                "지금은 질문을 보낼 수 없어요" if AI_FEATURES_PAUSED else "답변을 만들고 있어요…" if busy else CHAT_INPUT_PLACEHOLDER,
+                max_chars=CHAT_MAX_INPUT_CHARS, key="chat_input_box", disabled=busy or AI_FEATURES_PAUSED,
             )
         if col_mic is not None:
             with col_mic:
@@ -3328,7 +3330,7 @@ def render_chat_voice() -> None:
 
 def render_chat_v2() -> None:
     st.markdown(CHAT_CSS, unsafe_allow_html=True)
-    voice_ok = voice_chat_available()
+    voice_ok = voice_chat_available() and not AI_FEATURES_PAUSED   # AI 점검 중에는 음성 대화를 열지 않는다
     if voice_ok and st.session_state.get("chat_mode") == "voice":
         render_chat_voice()
     else:
@@ -4037,9 +4039,11 @@ def render_top_bar(identity: str, method: str) -> str:
 def render_home_page() -> None:
     st.markdown("## 무엇을 도와드릴까요?")
     choices = [
-        ("chat", "AI에게 질문하기", "궁금한 점을 글이나 말로 물어보세요." if voice_chat_available() else "궁금한 점을 글로 물어보세요.",
+        ("chat", "AI에게 질문하기", "AI 기능을 점검 중입니다." if AI_FEATURES_PAUSED
+         else "궁금한 점을 글이나 말로 물어보세요." if voice_chat_available() else "궁금한 점을 글로 물어보세요.",
          ":material/chat:"),
-        ("case", "고소장 작성하기", "사건 내용을 바탕으로 초안을 만들어요.", ":material/edit_document:"),
+        ("case", "고소장 작성하기", "사건 내용을 정리해 저장해요. (초안 만들기는 점검 중)" if AI_FEATURES_PAUSED
+         else "사건 내용을 바탕으로 초안을 만들어요.", ":material/edit_document:"),
         ("cases", "내 사건 보기", "저장한 사건을 확인하세요.", ":material/folder_open:"),
     ]
     columns = st.columns(3)
@@ -4055,7 +4059,7 @@ def render_home_page() -> None:
 
 
 def render_steps(current: int) -> None:
-    names = ["내용 적기", "확인하기", "정리·초안" if assist_preview() else "초안 받기"]
+    names = ["내용 적기", "확인하기", "저장" if AI_FEATURES_PAUSED else "정리·초안" if assist_preview() else "초안 받기"]
     items = []
     for i, name in enumerate(names, 1):
         state = "now" if i == current else ("done" if i < current else "")
@@ -4097,7 +4101,7 @@ def start_from_chat(voice: bool) -> None:
 
 
 def render_case_form() -> None:
-    if assist_preview():
+    if assist_preview() and not AI_FEATURES_PAUSED:
         with st.container(key="case_start_choice"):
             st.markdown("**어떻게 시작할까요?** 이야기로 시작하면 대화 내용을 이 칸에 옮길 수 있어요(옮기기 전에 확인해요).")
             options = [("AI와 글로 이야기하기", ":material/chat:", False)]
@@ -4109,7 +4113,7 @@ def render_case_form() -> None:
                     st.button(label, key=f"case_start_{'voice' if voice else 'text'}", icon=icon, width="stretch",
                               on_click=start_from_chat, args=(voice,))
             st.caption("직접 적으려면 아래 칸을 채워 주세요.")
-    if voice_input_available():
+    if voice_input_available() and not AI_FEATURES_PAUSED:
         render_voice_input()
     st.markdown("### 1. 어떤 피해인가요?")
     type_options = list(DAMAGE_TYPES) + [OTHER_TYPE]
@@ -4175,7 +4179,9 @@ def render_case_form() -> None:
     if any((st.session_state.get(f"case_field_{key}") or "").strip() for _, key in CASE_FIELDS):
         # 적던 내용은 다른 화면에 다녀와도 남지만, 새로고침·탭 닫기 때는 사라지므로 브라우저 확인 창을 띄운다.
         st.session_state["_unsaved_form"] = True
-        st.caption("적은 내용은 '입력한 내용 확인하기' → '저장하고 초안 만들기'를 눌러야 저장돼요. 새로고침하거나 탭을 닫으면 사라져요.")
+        st.caption("적은 내용은 '입력한 내용 확인하기' → '"
+                   + ("사건 저장하기" if AI_FEATURES_PAUSED else "저장하고 초안 만들기")
+                   + "'를 눌러야 저장돼요. 새로고침하거나 탭을 닫으면 사라져요.")
     submitted = st.button("입력한 내용 확인하기", type="primary", key="case_form_submit", width="stretch",
                           icon=":material/fact_check:")
 
@@ -4254,7 +4260,8 @@ def render_case_review(review: dict) -> None:
     st.markdown("### 입력한 내용을 확인해 주세요")
     if assist_preview():
         render_review_questions(review)
-    st.caption("이대로 저장하고 초안을 만들어요. 고칠 곳이 있으면 '고치러 가기'를 눌러 주세요. 적은 내용은 그대로 남아 있어요.")
+    st.caption(("이대로 사건을 저장해요(초안 만들기는 AI 점검이 끝난 뒤). " if AI_FEATURES_PAUSED else "이대로 저장하고 초안을 만들어요. ")
+               + "고칠 곳이 있으면 '고치러 가기'를 눌러 주세요. 적은 내용은 그대로 남아 있어요.")
     with st.container(border=True):
         for label, key in CASE_FIELDS:
             value = review["values"][key]
@@ -4262,7 +4269,8 @@ def render_case_review(review: dict) -> None:
             st.markdown(f"**{label}**  \n{shown}")
     col_confirm, col_back = st.columns(2)
     with col_confirm:
-        confirm_clicked = st.button("저장하고 초안 만들기", key="case_review_confirm", type="primary", width="stretch",
+        confirm_clicked = st.button("사건 저장하기" if AI_FEATURES_PAUSED else "저장하고 초안 만들기", key="case_review_confirm",
+                                    type="primary", width="stretch",
                                     icon=":material/auto_awesome:")
     with col_back:
         if st.button("고치러 가기", key="case_review_cancel", width="stretch", type="secondary", icon=":material/edit:"):
@@ -4332,13 +4340,38 @@ def render_case_review(review: dict) -> None:
     st.rerun()
 
 
+def open_saved_pending_case() -> None:
+    """AI 점검 중 사건을 저장한 뒤 '내 사건에서 보기': 방금 저장한 사건을 연다."""
+    entry = st.session_state.get("pending_draft_entry") or {}
+    st.session_state.pending_draft_entry = None
+    reset_case_form()
+    st.session_state.nav_page = "cases"
+    st.session_state.open_case_id = entry.get("case_id")
+
+
+def start_new_case_after_pending() -> None:
+    st.session_state.pending_draft_entry = None
+    reset_case_form()
+
+
 def render_pending_draft() -> None:
+    if AI_FEATURES_PAUSED:
+        # AI 점검 중: 사건은 저장됐다. 누를 수 없는 '초안 다시 만들기' 대신 다음에 할 일만 보여 준다.
+        st.success("사건을 저장했어요. AI 기능 점검이 끝나면 '내 사건'에서 초안을 만들 수 있어요.")
+        col_open, col_new = st.columns(2)
+        with col_open:
+            st.button("내 사건에서 보기", key="pending_open_case", type="primary", width="stretch",
+                      icon=":material/folder_open:", on_click=open_saved_pending_case)
+        with col_new:
+            st.button("새 사건 작성하기", key="pending_new_case", width="stretch", icon=":material/add:",
+                      on_click=start_new_case_after_pending)
+        return
     st.warning("사건은 저장했지만 초안을 만들지 못했어요. 잠시 후 '초안 다시 만들기'를 눌러 주세요.")
     if st.session_state.get("pending_draft_reason"):
         st.caption(st.session_state.pending_draft_reason)
     col_retry, col_cancel = st.columns(2)
     with col_retry:
-        if st.button("초안 다시 만들기", key="retry_draft_button", type="primary", width="stretch"):
+        if st.button("초안 다시 만들기", key="retry_draft_button", type="primary", width="stretch", disabled=AI_FEATURES_PAUSED):
             entry = st.session_state.pending_draft_entry
             try:
                 with st.spinner("고소장 초안을 만들고 있어요. 보통 10~30초 걸려요."):
@@ -4359,7 +4392,8 @@ def render_pending_draft() -> None:
 def render_case_page() -> None:
     st.markdown("## 고소장 작성하기")
     if AI_FEATURES_PAUSED:
-        st.info(AI_PAUSED_MESSAGE + " 사건을 저장해 두면 AI가 다시 열린 뒤 '내 사건'에서 초안을 만들 수 있어요.")
+        st.info(AI_PAUSED_MESSAGE)
+        st.caption(AI_PAUSED_CASE_NOTE)
     review = st.session_state.get("case_review")
     pending = st.session_state.pending_draft_entry
     has_draft = bool(st.session_state.case_draft) and not pending
@@ -4809,7 +4843,10 @@ def render_ws_draft(case_id: str, case: dict, ws: dict, draft_key: str, editor_k
     draft = st.session_state.get(draft_key)
     if not draft:
         st.markdown("아직 초안이 없어요. 채운 내용으로 참고용 초안을 만들어요.")
-        if st.button("초안 만들기", key=f"ws_make_{case_id}", type="primary", icon=":material/auto_awesome:"):
+        if AI_FEATURES_PAUSED:
+            st.caption(AI_PAUSED_MESSAGE)
+        if st.button("초안 만들기", key=f"ws_make_{case_id}", type="primary", icon=":material/auto_awesome:",
+                     disabled=AI_FEATURES_PAUSED):
             try:
                 with st.spinner("고소장 초안을 만들고 있어요. 보통 10~30초 걸려요."):
                     st.session_state[draft_key] = generate_case_draft(case)
@@ -4827,7 +4864,7 @@ def render_ws_draft(case_id: str, case: dict, ws: dict, draft_key: str, editor_k
     cols = st.columns(3)
     for col, (style, (label, _)) in zip(cols, STYLES.items()):
         with col:
-            if st.button(label, key=f"ws_style_{case_id}_{style}", width="stretch"):
+            if st.button(label, key=f"ws_style_{case_id}_{style}", width="stretch", disabled=AI_FEATURES_PAUSED):
                 try:
                     with st.spinner(f"{label} 바꾸고 있어요."):
                         after = clean_transcript(call_gemini([{"role": "user", "parts": [{"text": rewrite_prompt(current, style)}]}]))
@@ -5126,6 +5163,8 @@ def render_ws_save_bar(case: dict, case_id: str, ws: dict, draft_key: str, edito
                 st.error(ws["save_error"])
             elif dirty:
                 st.markdown("**수정한 내용이 아직 저장되지 않았습니다.**")
+            elif ws.pop("nothing_to_save", False):
+                st.markdown("바뀐 내용이 없어 저장할 것이 없어요.")
             elif ws["saved_ok"]:
                 st.markdown(f"✓ 저장했어요 · {ws['saved_ok']}"
                             + (f" (작성 중이던 {ws['pending_added']} 항목도 넣었어요)" if ws.get("pending_added") else ""))
@@ -5141,11 +5180,15 @@ def render_ws_save_bar(case: dict, case_id: str, ws: dict, draft_key: str, edito
                           icon=":material/edit:", on_click=ws_go_to_form, args=(case_id,))
                 clicked = False
             else:
-                clicked = st.button("작업 저장", key=f"ws_save_{case_id}", type="primary", width="stretch", icon=":material/save:",
-                                    disabled=not dirty and not ws["save_error"])
+                # 항상 누를 수 있게 둔다: 입력칸에 적는 중에는 칸을 벗어나기 전까지 변경이 반영되지 않아,
+                # 버튼을 막아 두면 첫 번째 누름이 '적은 내용 확정'에만 쓰이고 두 번 눌러야 저장됐다(2026-10-12 확인).
+                clicked = st.button("작업 저장", key=f"ws_save_{case_id}", type="primary", width="stretch", icon=":material/save:")
         if clicked:
-            with st.spinner("저장하고 있어요…"):
-                ws_save(case, case_id, draft_key, editor_key)
+            if dirty or ws["save_error"]:
+                with st.spinner("저장하고 있어요…"):
+                    ws_save(case, case_id, draft_key, editor_key)
+            else:
+                ws["nothing_to_save"] = True
             st.rerun()
     return dirty or bool(ws["save_error"])
 
@@ -5239,8 +5282,10 @@ def render_case_detail(case: dict, saved_at, can_save_drafts: bool) -> None:
                 st.caption("아직 저장된 초안이 없어요. 초안을 만든 뒤 '초안 저장'을 눌러 주세요.")
             else:
                 st.caption("저장한 내용으로 초안을 새로 만들어요. 초안은 서버에 저장되지 않으니 필요하면 내려받아 주세요.")
+            if AI_FEATURES_PAUSED:
+                st.caption(AI_PAUSED_MESSAGE)
             if st.button("AI로 새 초안 만들기", key=f"list_draft_btn_{case_id}", type="secondary" if saved_at else "primary",
-                         icon=":material/auto_awesome:"):
+                         icon=":material/auto_awesome:", disabled=AI_FEATURES_PAUSED):
                 try:
                     with st.spinner("고소장 초안을 만들고 있어요. 보통 10~30초 걸려요."):
                         st.session_state[list_draft_key] = generate_case_draft(case)
@@ -5393,20 +5438,22 @@ def render_public_chat() -> None:
     st.caption("일반 법률 정보를 안내해요. 법률 자문은 아니에요.")
     history_box = st.container()
     with history_box:
-        with st.chat_message("assistant"):
-            st.markdown(CHAT_WELCOME)
+        if not AI_FEATURES_PAUSED:
+            with st.chat_message("assistant"):
+                st.markdown(CHAT_WELCOME)
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
     with st.container(key="public_chat_input_row"):  # 입력창을 대화 바로 아래에 둔다(화면 맨 아래 고정이 아니라)
-        prompt = st.chat_input(CHAT_INPUT_PLACEHOLDER, max_chars=3000, key="public_chat_input")
+        prompt = st.chat_input("지금은 질문을 보낼 수 없어요" if AI_FEATURES_PAUSED else CHAT_INPUT_PLACEHOLDER, max_chars=3000,
+                               key="public_chat_input", disabled=AI_FEATURES_PAUSED)
     with st.expander("대화는 어떻게 처리되나요?"):
         st.markdown(
             "- 대화 내용은 이 서비스에 저장하지 않아요. 새로고침하거나 로그아웃하면 사라져요.\n"
             "- 답변을 만들기 위해 질문이 Google Gemini로 전송돼요. Google은 오남용 방지를 위해 입력 기록을 일정 기간 보관할 수 있어요.\n"
             "- AI 답변은 일반 정보예요. 인터넷 검색을 하지 않아 최신 법·제도와 다를 수 있고, 범죄가 되는지나 결과는 수사기관·법원이 판단해요."
         )
-    if prompt:
+    if prompt and not AI_FEATURES_PAUSED:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with history_box:
             with st.chat_message("user"):

@@ -96,32 +96,67 @@ class AgeTest(Base):
 
 
 class AiPauseTest(Base):
-    def test_paused_ai_is_not_called_and_explained(self):
+    MSG = "AI 기능을 점검 중입니다. 저장한 사건은 계속 확인할 수 있습니다."
+
+    def test_chat_is_closed_with_notice_and_no_gemini_call(self):
         at = self.start(user_id=fake.USER_ID, AI_FEATURES_PAUSED="true")
         at.session_state["nav_page"] = "chat"
         at.run()
-        self.assertTrue(any("AI 기능(상담·초안 만들기·음성)을 잠시 멈췄어요" in i.value for i in at.info))
-        at.session_state["nav_page"] = "case"
-        at.run()
-        self.assertTrue(any("잠시 멈췄어요" in i.value for i in at.info))
+        self.assertTrue(any(i.value == self.MSG for i in at.info))
+        self.assertTrue(at.chat_input[0].disabled)
         self.assertEqual(fake.CALLS, [])
 
-    def test_paused_chat_question_does_not_reach_gemini(self):
-        at = self.start(user_id=fake.USER_ID, AI_FEATURES_PAUSED="true")
+    def test_admin_chat_voice_and_ai_buttons_closed(self):
+        at = self.start(user_id=fake.ADMIN_ID, AI_FEATURES_PAUSED="true", ADMIN_USER_IDS=fake.ADMIN_ID)
         at.session_state["nav_page"] = "chat"
+        at.session_state["chat_mode"] = "voice"           # 음성 대화를 열어 둔 상태였어도
         at.run()
-        at.chat_input[0].set_value("상대방 이름을 모르면 어떻게 하나요?").run()
+        self.assertFalse(any(b.key == "chat_voice_open_btn" for b in at.button))
+        self.assertFalse(at.get("bidi_component") and any("voice_chat" in str(e.proto) for e in at.get("bidi_component")))
+        self.assertTrue(at.chat_input[0].disabled)
+        at.session_state["nav_page"] = "case"
+        at.run()
+        self.assertFalse(any(b.key in ("case_start_text", "case_start_voice") for b in at.button))
+
+    def test_case_can_be_saved_viewed_and_downloaded_without_ai(self):
+        at = self.start(user_id=fake.USER_ID, AI_FEATURES_PAUSED="true")
+        at.session_state["nav_page"] = "case"
+        at.run()
+        self.assertTrue(any(i.value == self.MSG for i in at.info))
+        at.selectbox(key="case_type_choice").select("중고거래 사기").run()
+        at.text_area(key="case_field_reporter_info").input("홍길동(시험)").run()
+        at.text_area(key="case_field_incident_description").input("9월 2일 45만 원 송금 후 연락 끊김").run()
+        at.checkbox(key="case_data_consent").check().run()
+        at.button(key="case_form_submit").click().run()
+        confirm = at.button(key="case_review_confirm")
+        self.assertEqual(confirm.label, "사건 저장하기")
+        confirm.click().run()
+        self.assertEqual([e.value for e in at.exception], [])
+        self.assertTrue([w for w in fake.WRITES if w[0] == "cases" and w[1] == "insert"])   # 사건은 저장
+        self.assertEqual(fake.CALLS, [])                                                  # AI는 부르지 않음
+        self.assertTrue(any("사건을 저장했어요" in m.value for m in at.success))
+        self.assertFalse(any(b.key == "retry_draft_button" for b in at.button))    # 누를 수 없는 버튼은 숨김
+        self.assertTrue(any(b.key == "pending_open_case" for b in at.button))
+        # 내 사건에서 저장한 사건 보기·초안 버튼 닫힘
+        saved = [w for w in fake.WRITES if w[0] == "cases" and w[1] == "insert"][0][2][0]
+        fake.CASES.append(dict(saved))
+        at.session_state["nav_page"] = "cases"
+        at.session_state["open_case_id"] = saved["case_id"]
         at.run()
         self.assertEqual([e.value for e in at.exception], [])
-        self.assertEqual(fake.CALLS, [])
-        shown = " ".join(m.value for m in at.markdown) + " ".join(e.value for e in at.error)
-        self.assertIn("잠시 멈췄어요", shown)
+        self.assertTrue(any("9월 2일 45만 원" in m.value for m in at.markdown) or
+                        any("9월 2일 45만 원" in str(t.value) for t in at.text_area))
+        self.assertTrue(at.button(key=f"list_draft_btn_{saved['case_id']}").disabled)
+        at.session_state["nav_page"] = "account"
+        at.run()
+        self.assertTrue(any(b.key == "delete_account_main" for b in at.button))       # 회원탈퇴는 그대로
 
     def test_default_not_paused(self):
         at = self.start(user_id=fake.USER_ID)
         at.session_state["nav_page"] = "chat"
         at.run()
-        self.assertFalse(any("잠시 멈췄어요" in i.value for i in at.info))
+        self.assertFalse(any(i.value == self.MSG for i in at.info))
+        self.assertFalse(at.chat_input[0].disabled)
 
 
 if __name__ == "__main__":

@@ -150,6 +150,13 @@ check("복구 후에도 B는 자기 사건 1건만 보임", dst.execute("select 
 dst.execute("reset role")
 dst.close()
 
+# 가상 자료로 만든 두 DB는 시험이 끝나면 지운다(백업 파일은 임시 폴더라 이미 지워짐).
+admin = psycopg.connect(PG + " dbname=postgres", autocommit=True)
+admin.execute("drop database if exists backup_src")
+admin.execute("drop database if exists backup_dst")
+admin.close()
+check("시험용 DB 삭제", True)
+
 failed = [name for name, ok in results if not ok]
 print(f"\n{len(results) - len(failed)}/{len(results)} 통과")
 sys.exit(1 if failed else 0)

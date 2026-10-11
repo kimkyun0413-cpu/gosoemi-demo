@@ -75,7 +75,10 @@ class WorkspaceSaveTest(unittest.TestCase):
     def test_save_bar_starts_clean_then_shows_unsaved_change(self):
         at = self.open(step="check")
         self.assertIn("아직 저장하지 않았어요.", self.texts(at))
-        self.assertTrue(self.save_button(at).disabled)
+        self.assertFalse(self.save_button(at).disabled)                 # 항상 누를 수 있다(두 번 누르지 않게)
+        self.save_button(at).click().run()
+        self.assertIn("바뀐 내용이 없어 저장할 것이 없어요.", self.texts(at))
+        self.assertEqual(self.workspace_rows(), [])                         # 바뀐 것이 없으면 아무것도 저장하지 않는다
         at.text_input(key=f"ws_edit_{CID}_incident_location").input("○○마켓 앱 채팅").run()
         self.assertIn("수정한 내용이 아직 저장되지 않았습니다.", self.texts(at))
         self.assertFalse(self.save_button(at).disabled)
@@ -101,7 +104,7 @@ class WorkspaceSaveTest(unittest.TestCase):
         self.assertTrue(again.checkbox(key=f"prog_{CID}_story").value)
         self.assertEqual(again.session_state[f"ws_{CID}"]["schedules"][0]["title"], "경찰서 제출")
         self.assertIn("마지막 저장", self.texts(again))
-        self.assertTrue(self.save_button(again).disabled)
+        self.assertNotIn("수정한 내용이 아직 저장되지 않았습니다.", self.texts(again))
 
     def test_save_failure_keeps_input_and_retry_works(self):
         at = self.open(step="check")
@@ -272,7 +275,7 @@ class WorkspaceSaveTest(unittest.TestCase):
         self.assertEqual(self.workspace_rows()[0]["timeline"], timeline)
         again = self.open(step="story")                                        # 다시 열어도 저장한 경위가 보인다
         self.assertIn("판매자 계정이 사라졌어요", self.texts(again))
-        self.assertTrue(self.save_button(again).disabled)
+        self.assertNotIn("수정한 내용이 아직 저장되지 않았습니다.", self.texts(again))
 
     def test_timeline_needs_what_and_keeps_typed_text(self):
         at = self.open(step="story")
@@ -422,10 +425,20 @@ class WorkspaceSaveTest(unittest.TestCase):
         self.assertEqual(self.workspace_rows(), [])
         self.assertTrue(any("먼저 추가해 주세요" in w.value for w in at.warning))
 
+    def test_typing_then_one_click_saves(self):
+        """입력칸에 적고 바로 '작업 저장'을 한 번만 눌러도 저장된다(적은 값과 누름이 같은 실행에 함께 온다)."""
+        at = self.open(step="story")
+        at.button(key=f"ws_add_{CID}_timeline").click().run()
+        at.text_area(key=f"ws_f_{CID}_timeline_what").input("판매글이 삭제됨")      # 아직 실행하지 않음(칸을 벗어나기 전)
+        self.save_button(at).click().run()
+        self.assertEqual(self.workspace_rows()[0]["timeline"][-1]["what"], "판매글이 삭제됨")
+        self.assertIn("저장했어요", self.texts(at))
+
     def test_untouched_open_form_is_not_unsaved(self):
         at = self.open(step="story")
         at.button(key=f"ws_add_{CID}_timeline").click().run()
-        self.assertTrue(self.save_button(at).disabled)
+        self.assertNotIn("수정한 내용이 아직 저장되지 않았습니다.", self.texts(at))
+        self.assertNotIn("작성 중인", self.texts(at))
         at.button(key="brand_home_btn").click().run()
         self.assertEqual(at.session_state["nav_page"], "home")
 
