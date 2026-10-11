@@ -63,6 +63,7 @@ from chat_assistant import (
     normalize_question, question_digest, speech_text, system_instruction as chat_system_instruction, user_statements,
     voice_system_instruction, SUMMARY_FAILED, SUMMARY_MIN_CHARS, clean_summary, summary_prompt, summary_supported,
 )
+from data_export import EXPORT_PART_MAX_BYTES, EXPORT_TOTAL_MAX_BYTES, NOT_INCLUDED_NOTE, build_export
 from case_workspace import (
     STYLES, UNKNOWN, build_timeline, bundle_docx, bundle_text, draft_check_items, evidence_items, inconsistencies,
     link_issues, missing_questions, next_action, rewrite_changes, rewrite_prompt, suggestion_for, unknown_items,
@@ -1496,6 +1497,113 @@ def load_workspace_row(case_id: str):
         .eq("user_id", session.get("user_id", "")).eq("case_id", str(case_id)).limit(1).execute()
     )
     return (response.data or [None])[0]
+
+
+def _table_missing(error: Exception) -> bool:
+    text = str(getattr(error, "message", None) or error).lower()
+    return "does not exist" in text or "pgrst205" in text or "schema cache" in text
+
+
+def collect_my_data() -> dict:
+    """'내 자료 모두 내려받기': 이용자 토큰으로 본인 자료만 불러와 ZIP 묶음을 만든다. AI·DB 변경 없음.
+    불러오지 못한 부분은 '받지 못한 자료'로 적어 두고, 다 담았다고 하지 않는다."""
+    session = ensure_active_session() or st.session_state.get("supabase_session") or {}
+    user_id = session.get("user_id")
+    if not user_id:
+        raise RuntimeError("로그인이 필요합니다.")
+    client = get_authed_client()
+    missing = []
+
+    def fetch(label, query, optional_table=False):
+        try:
+            return query().data or []
+        except Exception as error:
+            if optional_table and _table_missing(error):
+                return []
+            print(f"[export] stage={label} result={type(error).__name__}", flush=True)
+            missing.append(f"{label}을(를) 불러오지 못했습니다")
+            return []
+
+    cases = fetch("사건 목록", lambda: client.table(CASES_TABLE).select("*").eq("user_id", user_id).execute())
+    draft_rows = fetch("저장된 초안", lambda: client.table(CASE_DRAFTS_TABLE).select("case_id, user_id, draft_text, updated_at")
+                       .eq("user_id", user_id).execute(), optional_table=True)
+    ws_rows = fetch("사건 정리 기록(경위·증거 설명·일정·체크)", lambda: client.table(WORKSPACE_TABLE).select("*")
+                    .eq("user_id", user_id).execute(), optional_table=True)
+    consents = fetch("동의 기록", lambda: client.table("consent_records").select("user_id, terms_version, privacy_version, created_at")
+                     .eq("user_id", user_id).execute())
+    files, total = [], 0
+    for case in cases:
+        case_id = str(case.get("case_id"))
+        label = f"사건 '{(case.get('case_type') or '유형 미입력')[:20]}'({_short_date(case.get('created_at'))})"
+        try:
+            items = list_case_evidence(case_id)
+        except Exception as error:
+            print(f"[export] stage=evidence_list result={type(error).__name__}", flush=True)
+            missing.append(f"{label}의 증거파일 목록을 불러오지 못했습니다")
+            continue
+        for item in items:
+            if total + int(item.get("size") or 0) > EXPORT_TOTAL_MAX_BYTES:
+                missing.append(f"{label}의 증거파일 '{item['display_name']}' — 전체 용량이 커서(약 "
+                               f"{EXPORT_TOTAL_MAX_BYTES // (1024 * 1024)}MB 넘음) 이번에 담지 못했습니다. "
+                               "사건 화면의 '증거파일 첨부·관리'에서 하나씩 받을 수 있어요")
+                continue
+            try:
+                data = download_case_evidence(item["path"])
+                total += len(data)
+                files.append({"case_id": case_id, "path": item["path"], "name": item["display_name"], "data": data})
+            except Exception as error:
+                print(f"[export] stage=evidence_file result={type(error).__name__}", flush=True)
+                missing.append(f"{label}의 증거파일 '{item['display_name']}'을(를) 받지 못했습니다")
+    account = {"email": session.get("email"), "method": current_account_label(session)[1]}
+    return build_export(user_id, account, cases, {r["case_id"]: r for r in draft_rows}, {r["case_id"]: r for r in ws_rows},
+                        consents, files, missing, datetime.datetime.now(KST))
+
+
+def _short_date(value) -> str:
+    return str(value or "")[:10]
+
+
+def render_my_data_export(key: str) -> None:
+    """내 자료 모두 내려받기(내 계정, 18세 미만 안내 화면에서 함께 쓴다)."""
+    st.markdown("### 내 자료 모두 내려받기")
+    st.caption("저장한 사건 내용, 저장된 초안, 사건 정리(경위·증거 설명·일정·체크리스트), 증거파일, 동의 기록을 "
+               "사건별 폴더로 정리한 ZIP 파일로 받아요. " + NOT_INCLUDED_NOTE.replace("\n", " "))
+    state_key = f"_my_export_{key}"
+    if st.button("내 자료 모두 내려받기", key=f"export_prepare_{key}", icon=":material/download:", type="secondary"):
+        try:
+            with st.spinner("내 자료를 모으고 있어요. 증거파일이 많으면 조금 걸려요."):
+                st.session_state[state_key] = collect_my_data()
+        except Exception as error:
+            log_auth_error(error)
+            st.session_state.pop(state_key, None)
+            st.error("자료를 모으지 못했어요. 잠시 후 다시 눌러 주세요. 계속되면 다시 로그인해 주세요." + contact_hint())
+    result = st.session_state.get(state_key)
+    if not result:
+        return
+    summary = result["summary"]
+    parts = result["parts"]
+    text = (f"사건 {summary['cases']}건, 저장된 초안 {summary['drafts']}개, 사건 정리 {summary['workspaces']}개, "
+            f"증거파일 {summary['files']}개")
+    if result["complete"]:
+        st.success(f"내려받을 준비가 됐어요: {text}.")
+    else:
+        st.warning(f"**일부 자료를 담지 못했어요.** 담은 것: {text}.\n\n받지 못한 자료:\n"
+                   + "\n".join(f"- {md_escape(item)}" for item in result["missing"])
+                   + "\n\n잠시 후 다시 눌러 보시고, 계속되면 문의해 주세요.")
+    if len(parts) > 1:
+        st.caption(f"증거파일이 많아 {len(parts)}개 묶음으로 나눴어요(묶음마다 최대 약 {EXPORT_PART_MAX_BYTES // (1024 * 1024)}MB). "
+                   "모든 묶음을 받아 주세요. 사건 내용·초안·기록은 1번 묶음에 있어요.")
+    for no, data in enumerate(parts, 1):
+        suffix = f"_{no}of{len(parts)}" if len(parts) > 1 else ""
+        st.download_button(
+            f"ZIP 내려받기{f' ({no}/{len(parts)})' if len(parts) > 1 else ''} · {max(1, len(data) // 1024)}KB",
+            data=data, file_name=f"{result['root']}{suffix}.zip", mime="application/zip",
+            key=f"export_download_{key}_{no}", width="stretch", type="primary", icon=":material/download:",
+        )
+    st.caption("이 파일에는 개인정보가 들어 있어요. 공용 컴퓨터라면 받은 뒤 지워 주세요.")
+    if st.button("준비한 파일 지우기", key=f"export_clear_{key}", type="tertiary"):
+        st.session_state.pop(state_key, None)
+        st.rerun()
 
 
 def save_workspace_row(case_id: str, payload: dict, version) -> dict:
@@ -3795,6 +3903,7 @@ if not consent_status and MIN_USER_AGE == 18 and st.session_state.get("under_age
     st.markdown(
         "고소미의 AI 기능에 쓰는 Google Gemini의 이용 조건 때문에 만 18세 미만은 이용할 수 없게 되었습니다.\n\n"
         "- 계정과 저장한 사건·자료는 **운영자가 임의로 지우지 않습니다.**\n"
+        "- 자료가 필요하면 아래 '내 자료 모두 내려받기'로 먼저 받아 두세요.\n"
         "- 모두 지우려면 아래 '회원탈퇴'를 눌러 주세요. 지울 내용을 한 번 더 보여 드려요.\n"
         "- 잘못 누르셨다면 '다시 확인하기'를 눌러 주세요."
         + (f"\n- 문의: {md_escape(PRIVACY_CONTACT_EMAIL)}" if PRIVACY_CONTACT_EMAIL else "")
@@ -3807,6 +3916,9 @@ if not consent_status and MIN_USER_AGE == 18 and st.session_state.get("under_age
     with col_out:
         if st.button("로그아웃", key="under_age_logout", width="stretch"):
             perform_logout()
+    render_my_data_export("under_age")
+    st.markdown("### 회원탈퇴")
+    st.caption("탈퇴하면 계정과 저장한 자료가 모두 지워져요. 필요하면 위에서 먼저 내려받아 주세요.")
     if st.button("회원탈퇴", key="delete_account_main", type="secondary", icon=":material/person_remove:"):
         render_delete_account_dialog()
     render_footer()
@@ -4004,6 +4116,7 @@ def render_account_page(identity: str, method: str) -> None:
         st.markdown(f"문의: {md_escape(PRIVACY_CONTACT_EMAIL)} (서비스 이용·개인정보)")
     if not sales_open(BILLING_MODE, BILLING_PLANS):
         st.caption("지금은 모든 기능이 무료예요. 결제를 요청하지 않아요.")
+    render_my_data_export("account")
     st.markdown("### 회원탈퇴")
     st.markdown("탈퇴하면 계정과 저장한 사건" + (", 초안" if draft_save_available() else "")
                 + (", 증거파일" if EVIDENCE_UPLOAD_ENABLED else "") + "이 모두 삭제돼요. 누르면 삭제할 내용을 한 번 더 보여 드려요.")

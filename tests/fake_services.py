@@ -130,6 +130,7 @@ class FakeAuth:
 
 
 FILES = {}  # 가짜 파일 저장소 {경로: 바이트}
+DOWNLOAD_FAIL = set()  # 내려받기에 실패할 파일 경로
 
 
 class FakeBucket:
@@ -149,6 +150,8 @@ class FakeBucket:
         return []
 
     def download(self, path):
+        if path in DOWNLOAD_FAIL:
+            raise RuntimeError("fake storage error")
         return FILES.get(path, b"")
 
 
@@ -224,6 +227,7 @@ def reset():
     global CONSENT_MISSING
     CONSENT_MISSING = False
     RPC_CALLS.clear()
+    DOWNLOAD_FAIL.clear()
     TTS_CALLS.clear()
     TTS_REPLIES.clear()
     CALLS.clear()
