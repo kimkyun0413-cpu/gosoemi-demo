@@ -192,10 +192,11 @@ class WorkspaceAppTest(unittest.TestCase):
 
     def test_schedule_and_ics_download(self):
         at = self.open(step="next")
-        p = f"ws_sch_{CID}_"
+        at.button(key=f"ws_add_{CID}_schedules").click().run()
+        p = f"ws_f_{CID}_schedules_"
         at.text_input(key=p + "title").input("경찰서 제출").run()
         at.date_input(key=p + "date").set_value(datetime.date(2026, 10, 20)).run()
-        at.button(key=p + "add").click().run()
+        at.button(key=f"ws_fok_{CID}_schedules").click().run()
         events = at.session_state[f"ws_{CID}"]["schedules"]
         self.assertEqual(events[0]["date"], datetime.date(2026, 10, 20))
         self.assertIsNone(events[0]["time"])
