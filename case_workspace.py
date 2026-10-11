@@ -203,7 +203,7 @@ def bundle_text(draft: str, timeline: list, evidence: list, include: dict) -> st
             lines.append(f"{i}. [{when}] {row.get('what', '')}{link}")
         parts.append("\n".join(lines))
     if include.get("evidence") and evidence:
-        lines = ["증거 목록 (파일 내용은 고소음이가 확인하지 않았습니다)"]
+        lines = ["증거 목록 (파일 내용은 고소미가 확인하지 않았습니다)"]
         for i, item in enumerate(evidence, 1):
             shows = f" — {item['shows']}" if (item.get("shows") or "").strip() else " — 무엇을 보여 주는지 확인 필요"
             lines.append(f"{i}. {item['name']} ({item.get('source', '')}){shows}")

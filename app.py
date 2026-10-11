@@ -90,7 +90,7 @@ PASSWORD_RESET_ENABLED = os.environ.get("PASSWORD_RESET_ENABLED") == "true"
 # 이용자 IP를 Supabase Auth에 전달해 IP별 제한을 이용자마다 따로 적용(auth_ip.py). 기본은 꺼짐.
 AUTH_IP_FORWARDING_ENABLED = os.environ.get("AUTH_IP_FORWARDING_ENABLED") == "true"
 
-UNSUPPORTED_ASSISTANT_MESSAGE = "죄송합니다. 현재 고소음이는 일정 관리·메모 기억 기능을 지원하지 않습니다. 법률 상담이나 사건 정리를 도와드릴게요."
+UNSUPPORTED_ASSISTANT_MESSAGE = "죄송합니다. 현재 고소미는 일정 관리·메모 기억 기능을 지원하지 않습니다. 법률 상담이나 사건 정리를 도와드릴게요."
 
 PRIVACY_POLICY_ENABLED = os.environ.get("PRIVACY_POLICY_ENABLED") == "true"
 PRIVACY_OPERATOR_NAME = os.environ.get("PRIVACY_OPERATOR_NAME")
@@ -189,12 +189,12 @@ def terms_config_ready() -> bool:
     )
 
 SERVICE_IDENTITY_INSTRUCTION = (
-    "- 이 서비스의 이름은 \"고소음이\"이다.\n"
-    "- \"고소음이\"는 소음(noise) 관련 서비스가 아니다. 이름에 \"소음\"이 포함되어 있다고 해서 "
-    "소음 측정, 소음 진단, 층간소음 상담 등 소음 관련 서비스로 오해하거나 그렇게 답변하지 마라.\n"
-    "- \"고소음이\"는 범죄·피해 상황을 사용자가 정리하고, 고소장 참고용 초안을 작성하도록 돕는 "
+    "- 이 서비스의 이름은 \"고소미\"이다(이전 이름: 고소음이).\n"
+    "- \"고소미\"는 같은 이름의 과자 등 다른 상품·회사와 관계없다. 그런 상품이나 소음 관련 서비스로 오해하거나 "
+    "그렇게 답변하지 마라.\n"
+    "- \"고소미\"는 범죄·피해 상황을 사용자가 정리하고, 고소장 참고용 초안을 작성하도록 돕는 "
     "AI 법률정보 도우미이다.\n"
-    "- \"고소음이\"는 변호사의 법률자문을 대체하지 않는다.\n"
+    "- \"고소미\"는 변호사의 법률자문을 대체하지 않는다.\n"
     "- 사용자가 서비스의 정체성(무엇을 하는 서비스인지 등)을 물으면 위 내용에 맞게 간결하게 설명하라."
 )
 
@@ -832,7 +832,7 @@ def is_naver_session(session: dict) -> bool:
 
 
 def current_account_label(session: dict) -> tuple[str, str]:
-    # 네이버 로그인은 이름을 받지 않으므로 이메일을, 이메일이 없으면 고소음이 사용자 ID를 보여준다.
+    # 네이버 로그인은 이름을 받지 않으므로 이메일을, 이메일이 없으면 고소미 사용자 ID를 보여준다.
     if is_naver_session(session):
         method = "네이버"
     else:
@@ -1952,7 +1952,7 @@ def build_terms_of_service_text():
     return f"""
 ### 이용약관
 
-이 약관은 {PRIVACY_OPERATOR_NAME}(이하 "운영자")가 개인 자격으로 제공하는 "고소음이"(이하 "서비스")의 이용에 관한 조건을 정합니다.
+이 약관은 {PRIVACY_OPERATOR_NAME}(이하 "운영자")가 개인 자격으로 제공하는 "고소미"(이전 서비스명: 고소음이, 이하 "서비스")의 이용에 관한 조건을 정합니다.
 이 약관은 회원가입 과정에서 이용약관 필수 동의 항목에 체크하고 가입을 완료한 이용자에게 적용됩니다.
 
 **제1조 (목적)**
@@ -2144,7 +2144,7 @@ def render_case_evidence_manager(case_id: str) -> None:
 def render_brand_header():
     st.markdown(
         '<div class="dgo-hero">'
-        '<div class="dgo-hero-title">⚖️ 고소음이</div>'
+        '<div class="dgo-hero-title">⚖️ 고소미</div>'
         '<div class="dgo-hero-subtitle">어려운 피해 상황을 정리하고, 고소장 초안 작성을 돕는 AI 법률정보 도우미</div>'
         '</div>',
         unsafe_allow_html=True,
@@ -2186,7 +2186,7 @@ def render_footer():
         contact = f'<br>문의: <a href="mailto:{email}">{email}</a>'
     st.markdown(
         '<div class="dgo-footer">'
-        '고소음이는 법률정보와 문서 작성을 돕는 서비스이며, 변호사의 법률자문을 대체하지 않습니다.'
+        '고소미는 법률정보와 문서 작성을 돕는 서비스이며, 변호사의 법률자문을 대체하지 않습니다.'
         '<br>지금 위험하거나 급한 상황이라면 112에 먼저 신고하세요.'
         f'{contact}'
         '</div>',
@@ -2276,7 +2276,7 @@ def render_precedent_finder(case_type: str) -> None:
     label, url = OFFICIAL_PRECEDENT_SEARCH
     with st.expander("🔎 판례 찾아보기 (외부 공식 사이트)"):
         st.caption(
-            "고소음이는 판례를 직접 검색하지 않아요. 아래 버튼을 누르면 법제처 국가법령정보센터의 판례 검색 화면이 새 창으로 열려요. "
+            "고소미는 판례를 직접 검색하지 않아요. 아래 버튼을 누르면 법제처 국가법령정보센터의 판례 검색 화면이 새 창으로 열려요. "
             "검색어를 복사해 그 화면의 검색창에 붙여 넣어 주세요. 판례는 사건마다 사실관계가 달라 내 사건 결과를 뜻하지 않아요."
         )
         st.link_button(f"{label} 열기 ↗", url, width="stretch")
@@ -3195,7 +3195,7 @@ def render_social_login_section(key_suffix: str) -> None:
         )
         st.caption(
             "네이버 로그인은 새 탭에서 열립니다. 로그인한 뒤에는 이전 탭을 닫아 주세요. "
-            "고소음이에서 로그아웃해도 네이버 로그인은 유지되므로, 다른 네이버 계정을 쓰려면 "
+            "고소미에서 로그아웃해도 네이버 로그인은 유지되므로, 다른 네이버 계정을 쓰려면 "
             "'다른 네이버 계정으로 로그인'을 눌러 주세요."
         )
 
@@ -3203,7 +3203,7 @@ def render_social_login_section(key_suffix: str) -> None:
 def render_google_age_gate():
     st.markdown(
         "**만 14세 이상 확인**\n\n"
-        "고소음이는 만 14세 이상만 이용할 수 있습니다. "
+        "고소미는 만 14세 이상만 이용할 수 있습니다. "
         "Google 계정으로 처음 이용하시는 경우 아래 확인이 필요합니다."
     )
     google_age_consent = st.checkbox("[필수] 만 14세 이상입니다.", key="google_age_consent")
@@ -3231,7 +3231,7 @@ def render_naver_age_gate(status_error: bool):
     else:
         st.markdown(
             "**만 14세 이상 확인**\n\n"
-            "고소음이는 만 14세 이상만 이용할 수 있습니다. "
+            "고소미는 만 14세 이상만 이용할 수 있습니다. "
             "네이버 계정으로 처음 이용하시는 경우 아래 확인이 필요합니다."
         )
         naver_age_consent = st.checkbox("[필수] 만 14세 이상입니다.", key="naver_age_consent")
@@ -3380,7 +3380,7 @@ def render_recovery_set_password_form():
 
 
 st.set_page_config(
-    page_title="고소음이 | AI 법률정보 도우미",
+    page_title="고소미 | AI 법률정보 도우미",
     page_icon="⚖️",
     initial_sidebar_state="collapsed",
 )
@@ -3770,7 +3770,7 @@ def render_top_bar(identity: str, method: str) -> str:
     with st.container(key="top_bar"):
         col_logo, col_account = st.columns([3, 2], vertical_alignment="center")
         with col_logo:
-            st.button("고소음이", key="brand_home_btn", icon=":material/balance:", type="tertiary", on_click=go_to, args=("home",),
+            st.button("고소미", key="brand_home_btn", icon=":material/balance:", type="tertiary", on_click=go_to, args=("home",),
                       help="처음 화면으로 가기")
         with col_account:
             st.button("내 계정", key="account_btn", icon=":material/account_circle:", type="secondary",
@@ -4532,7 +4532,7 @@ def render_ws_story(case_id: str, case: dict, ws: dict, file_names: list) -> Non
     )
 
     st.markdown("#### 증거 자료")
-    st.caption("자료마다 무엇을 보여 주는지 적어 주세요. 고소음이는 파일 내용을 열어 보지 않아요.")
+    st.caption("자료마다 무엇을 보여 주는지 적어 주세요. 고소미는 파일 내용을 열어 보지 않아요.")
     render_item_list(
         case_id, ws, "evidence", evidence,
         lambda i, e: (f"**{md_escape(e['name'])}**" + (f" · {e['source']}" if e.get("source") else ""),
@@ -4607,7 +4607,7 @@ def render_ws_download(case_id: str, ws: dict, editor_key: str, draft_key: str, 
     timeline = ws["timeline"] if ws["timeline"] is not None else build_timeline(case)
     evidence = ws["evidence"] if ws["evidence"] is not None else evidence_items(case, ws.get("file_names"))
     st.markdown("#### 내려받을 자료")
-    st.caption("함께 내려받을 자료를 고르세요. 고소음이는 기관에 자동으로 보내지 않아요.")
+    st.caption("함께 내려받을 자료를 고르세요. 고소미는 기관에 자동으로 보내지 않아요.")
     include = {
         "draft": st.checkbox("고소장 초안" + ("" if draft else " (아직 없음)"), value=bool(draft), key=f"ws_inc_draft_{case_id}",
                              disabled=not draft),
@@ -4648,12 +4648,12 @@ def render_ws_next(case_id: str, case: dict, ws: dict) -> None:
             ("- **앱에 저장**: 화면 아래 '작업 저장'을 누르면 이 사건에 일정이 저장돼 다음에 열어도 보여요.\n"
              if workspace_save_available() else "- **앱에 저장**: 지금은 미리보기라 일정이 저장되지 않아요.\n")
             + "- **휴대폰·PC 일정에 넣기**: 아래 .ics 파일을 받아 열면 일정 앱에 추가돼요. 알림은 그 일정 앱이 보내요.\n"
-            "- 고소음이는 알림을 직접 보내지 않아요."
+            "- 고소미는 알림을 직접 보내지 않아요."
         )
     if ws["schedules"]:
         st.download_button(
             "휴대폰·PC 일정 앱에 넣을 파일 받기 (.ics)", data=build_ics(ws["schedules"], case.get("case_type") or ""),
-            file_name=f"gosoemi_schedule_{case_id[:8]}.ics", mime="text/calendar", key=f"ws_sch_{case_id}_ics", width="stretch",
+            file_name=f"gosomi_schedule_{case_id[:8]}.ics", mime="text/calendar", key=f"ws_sch_{case_id}_ics", width="stretch",
         )
         st.caption("받은 파일을 연 뒤 일정 앱에서 시간과 알림을 확인해 주세요. 앱마다 알림 방식이 다를 수 있어요.")
 

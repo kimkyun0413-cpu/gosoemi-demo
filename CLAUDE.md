@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-고소음이(gosoemi) is a Streamlit web app that helps crime/damage victims organize what happened and produce a reference draft of a criminal complaint (고소장). It is deployed on Streamlit Community Cloud and uses Supabase (auth, Postgres with RLS, Storage) and the Google Gemini API.
+고소미 (renamed from 고소음이 on 2026-10-11; technical identifiers such as the repo, app URL, `gosoemi_*` component/storage keys, backup file names and .ics UIDs keep `gosoemi`) is a Streamlit web app that helps crime/damage victims organize what happened and produce a reference draft of a criminal complaint (고소장). It is deployed on Streamlit Community Cloud and uses Supabase (auth, Postgres with RLS, Storage) and the Google Gemini API.
 
 - [app.py](app.py) — the whole Streamlit app: auth (email, Naver, Google), consent/age gates, case writing, drafts, evidence files, account deletion.
 - [case_guide.py](case_guide.py) — Streamlit-free data and helpers: damage types and official source links, field guides, draft prompt, draft checks, Word export.
-- [policy_text.py](policy_text.py) — privacy policy text per version. Never edit a version users already consented to; add a new version instead.
+- [policy_text.py](policy_text.py) — privacy policy text per version. Never edit a version users already consented to; add a new version instead. (Only exception so far: the 2026-10-11 service-name change, shown as "고소미(이전 서비스명: 고소음이)" in v2 and the terms.)
 - [voice_input.py](voice_input.py) — voice input rules: allowed audio formats/limits, transcription and field-extraction prompts, checks that flag unstated amounts/dates/numbers. Audio is never stored.
 - [chat_assistant.py](chat_assistant.py) — AI chat rules (system instructions, history trimming, duplicate-send guard, user-only text for case extraction) and the hands-free voice conversation browser component (`VOICE_CHAT_JS`: mic only after the user taps, end-of-speech detection, mic muted while the answer is read, on-device Korean voices only). Chat history is never stored in the DB.
 - [precedent_search.py](precedent_search.py) — case-law search: link to the official 국가법령정보센터 search page with keyword suggestions; Open API client used only when `LAW_OPEN_API_OC` is set. The app never shows precedents it did not actually retrieve.

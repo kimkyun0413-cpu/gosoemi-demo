@@ -1,6 +1,6 @@
 """사용자가 정한 일정을 캘린더 파일(.ics, RFC 5545)로 만든다. Streamlit에 의존하지 않는다.
 
-- 고소음이는 알림을 보내지 않는다. 파일을 휴대폰·PC 일정 앱에 추가하면 그 앱이 알림을 보낸다(앱마다 다를 수 있음).
+- 고소미는 알림을 보내지 않는다. 파일을 휴대폰·PC 일정 앱에 추가하면 그 앱이 알림을 보낸다(앱마다 다를 수 있음).
 - 법률 기한을 계산하거나 추정하지 않는다. 날짜와 시간은 사용자가 고른 값만 쓴다.
 - 시간은 한국 시간(Asia/Seoul, UTC+9, 일광절약시간 없음)으로 적는다.
 """
@@ -61,7 +61,7 @@ def build_ics(events: list, case_title: str = "", now: datetime.datetime = None)
              "METHOD:PUBLISH", *_VTIMEZONE]
     for raw in events:
         event = clean_event(raw)
-        summary = f"[고소음이] {event['title']}" + (f" · {case_title}" if case_title else "")
+        summary = f"[고소미] {event['title']}" + (f" · {case_title}" if case_title else "")
         lines += ["BEGIN:VEVENT", f"UID:{event['uid']}", f"DTSTAMP:{stamp}"]
         if event["time"] is None:
             day = event["date"]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 고소음이 DB 수동 백업 (Supabase Free: 자동 백업 없음).
+# 고소미 DB 수동 백업 (Supabase Free: 자동 백업 없음).
 # - Docker 없이 PostgreSQL 클라이언트(pg_dump)로 백업하고, 결과를 암호화해 이 컴퓨터에만 둔다.
 # - 백업에는 회원·사건 등 개인정보가 들어 있다. 외부 저장소(클라우드 드라이브 등)에 올리지 않는다.
 # - 증거파일(Storage)은 DB 백업에 포함되지 않는다: scripts/backup_storage.py를 따로 실행한다.
