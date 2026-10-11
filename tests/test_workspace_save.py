@@ -372,6 +372,122 @@ class WorkspaceSaveTest(unittest.TestCase):
         self.assertEqual(at.session_state["nav_page"], "home")
         self.assertEqual(self.leave_buttons(at), set())
 
+    # ── '목록에 추가'를 누르지 않고 작성 중인 항목 ──
+    def start_timeline(self, at, when="", what=""):
+        at.button(key=f"ws_add_{CID}_timeline").click().run()
+        p = f"ws_f_{CID}_timeline_"
+        if when:
+            at.text_input(key=p + "when").input(when).run()
+        if what:
+            at.text_area(key=p + "what").input(what).run()
+
+    def test_pending_item_is_added_and_saved_with_work_save(self):
+        at = self.open(step="story")
+        self.start_timeline(at, "9월 6일", "경찰서에 문의함")
+        self.assertIn("작성 중인 사건 경위 항목이 있어요.", self.texts(at))
+        self.assertFalse(self.save_button(at).disabled)
+        self.save_button(at).click().run()
+        row = self.workspace_rows()[0]
+        self.assertEqual(row["timeline"][-1]["what"], "경찰서에 문의함")
+        self.assertIn("작성 중이던 사건 경위 항목도 넣었어요", self.texts(at))
+        self.assertIsNone(at.session_state[f"ws_{CID}"]["editing"])
+
+    def test_incomplete_pending_item_blocks_save_and_guides_to_field(self):
+        at = self.open(step="story")
+        self.start_timeline(at, when="9월 6일")                       # '무슨 일' 칸이 비어 있음
+        self.save_button(at).click().run()
+        self.assertEqual(self.workspace_rows(), [])                   # 아무것도 저장하지 않는다
+        self.assertTrue(any("무슨 일이 있었나요" in e.value for e in at.error))  # 입력칸 옆에 빠진 칸 안내
+        self.assertNotIn("저장했어요", self.texts(at))
+        self.assertTrue(any("작성 중인 사건 경위 항목을 먼저 추가해 주세요" in w.value for w in at.warning))
+        at.session_state[f"ws_step_{CID}"] = "draft"                  # 다른 단계로 갔다가
+        at.run()
+        at.button(key=f"ws_goform_{CID}").click().run()               # '작성 중인 칸으로 가기'
+        self.assertEqual(at.session_state[f"ws_step_{CID}"], "story")
+        self.assertEqual(at.text_input(key=f"ws_f_{CID}_timeline_when").value, "9월 6일")
+        at.text_area(key=f"ws_f_{CID}_timeline_what").input("경찰서에 문의함").run()
+        self.save_button(at).click().run()
+        self.assertEqual(self.workspace_rows()[0]["timeline"][-1], {"when": "9월 6일", "what": "경찰서에 문의함", "evidence": ""})
+
+    def test_pending_item_alone_counts_as_unsaved_when_leaving(self):
+        at = self.open(step="story")
+        self.start_timeline(at, when="9월 6일")
+        at.session_state[f"ws_step_{CID}"] = "draft"
+        at.run()
+        at.button(key="brand_home_btn").click().run()
+        self.assertEqual(self.leave_buttons(at), {"leave_save", "leave_discard", "leave_stay"})
+        self.assertTrue(any("작성 중인 사건 경위 항목" in c.value for c in at.caption))
+        at.button(key="leave_save").click().run()                     # 칸이 모자라 저장·이동하지 않는다
+        self.assertEqual(at.session_state["nav_page"], "cases")
+        self.assertEqual(self.workspace_rows(), [])
+        self.assertTrue(any("먼저 추가해 주세요" in w.value for w in at.warning))
+
+    def test_untouched_open_form_is_not_unsaved(self):
+        at = self.open(step="story")
+        at.button(key=f"ws_add_{CID}_timeline").click().run()
+        self.assertTrue(self.save_button(at).disabled)
+        at.button(key="brand_home_btn").click().run()
+        self.assertEqual(at.session_state["nav_page"], "home")
+
+    # ── '새 사건 작성하기'(고소장 작성 화면의 작업 공간) ──
+    def open_case_page(self):
+        at = AppTest.from_file(os.path.join(ROOT, "app.py"), default_timeout=60)
+        at.session_state["supabase_session"] = fake.session_for(fake.ADMIN_ID, "x@example.com")
+        at.session_state["browser_login_checked"] = True
+        at.run()
+        at.session_state["nav_page"] = "case"
+        at.session_state["case_draft"] = "고소장\n범죄 사실\n9월 2일 45만 원 송금"
+        at.session_state["case_draft_id"] = CID
+        at.session_state["case_draft_case"] = dict(CASE)
+        # 새로 만든 초안은 바로 저장되므로(show_new_draft) 저장된 상태로 시작한다
+        at.session_state["case_draft_editor_saved"] = {"text": "고소장\n범죄 사실\n9월 2일 45만 원 송금", "at": None}
+        at.session_state[f"ws_step_{CID}"] = "next"
+        at.run()
+        self.assertEqual([e.value for e in at.exception], [])
+        return at
+
+    def test_new_case_button_asks_when_unsaved(self):
+        at = self.open_case_page()
+        at.checkbox(key=f"prog_{CID}_story").check().run()
+        at.button(key="case_new_button").click().run()
+        self.assertEqual(self.leave_buttons(at), {"leave_save", "leave_discard", "leave_stay"})
+        self.assertEqual(at.session_state["case_draft_id"], CID)       # 아직 지우지 않았다
+        at.button(key="leave_stay").click().run()
+        self.assertTrue(at.checkbox(key=f"prog_{CID}_story").value)
+        at.button(key="case_new_button").click().run()
+        at.button(key="leave_save").click().run()
+        self.assertIsNone(at.session_state["case_draft_id"])            # 저장한 뒤 새 사건 화면
+        self.assertTrue(self.workspace_rows()[0]["checklist"]["story"])
+        self.assertTrue(any(b.key == "case_form_submit" for b in at.button))
+
+    def test_new_case_button_without_saving_and_when_clean(self):
+        at = self.open_case_page()
+        at.checkbox(key=f"prog_{CID}_story").check().run()
+        at.button(key="case_new_button").click().run()
+        at.button(key="leave_discard").click().run()
+        self.assertIsNone(at.session_state["case_draft_id"])
+        self.assertEqual(self.workspace_rows(), [])
+        clean = self.open_case_page()
+        clean.button(key="case_new_button").click().run()               # 바뀐 것이 없으면 바로 새 사건
+        self.assertEqual(self.leave_buttons(clean), set())
+        self.assertIsNone(clean.session_state["case_draft_id"])
+
+    def test_case_form_text_turns_on_refresh_warning_only_while_unsaved(self):
+        at = AppTest.from_file(os.path.join(ROOT, "app.py"), default_timeout=60)
+        at.session_state["supabase_session"] = fake.session_for(fake.USER_ID, "x@example.com")
+        at.session_state["browser_login_checked"] = True
+        at.run()
+        at.session_state["nav_page"] = "case"
+        at.run()
+        self.assertFalse(at.session_state["_unsaved_form"])
+        at.text_area(key="case_field_incident_description").input("9월 2일 45만 원 송금").run()
+        self.assertTrue(at.session_state["_unsaved_form"])
+        self.assertTrue(any("새로고침하거나 탭을 닫으면 사라져요" in c.value for c in at.caption))
+        at.session_state["nav_page"] = "home"                          # 다른 화면에서는 경고하지 않는다(적은 내용은 남아 있음)
+        at.run()
+        self.assertFalse(at.session_state["_unsaved_form"])
+        self.assertEqual(at.session_state["case_field_incident_description"], "9월 2일 45만 원 송금")
+
 
 if __name__ == "__main__":
     unittest.main()

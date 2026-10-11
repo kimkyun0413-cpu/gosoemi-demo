@@ -1711,11 +1711,11 @@ h3 { font-size: 1.2rem !important; color: var(--dgo-navy); padding-top: 0.8rem !
 :focus-visible { outline: 3px solid var(--dgo-blue) !important; outline-offset: 2px; }
 
 /* ── 버튼: 주 버튼(파랑), 보조 버튼(흰 바탕+테두리), 글자 버튼 ── */
-[data-testid="stBaseButton-primary"], [data-testid="stDownloadButton"] button {
+[data-testid="stBaseButton-primary"] {
     background-color: var(--dgo-blue); color: #FFFFFF; border: 1px solid var(--dgo-blue);
     border-radius: 10px; font-weight: 700; min-height: 46px;
 }
-[data-testid="stBaseButton-primary"]:hover, [data-testid="stDownloadButton"] button:hover {
+[data-testid="stBaseButton-primary"]:hover {
     background-color: var(--dgo-navy-light); border-color: var(--dgo-navy-light); color: #FFFFFF;
 }
 [data-testid="stBaseButton-secondary"] {
@@ -2403,7 +2403,8 @@ def save_draft_from_editor(editor_key: str, case_id: str) -> None:
         st.session_state.pop(f"{editor_key}_error", None)
 
 
-def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str, show_save: bool = True) -> None:
+def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str, show_save: bool = True,
+                       show_download: bool = True) -> None:
     # 사건 작업 공간에서는 화면 아래 '작업 저장' 버튼 하나로 초안까지 저장하므로 이 패널의 저장 버튼은 숨긴다.
     can_save = draft_save_available() and show_save
     saved = st.session_state.get(f"{editor_key}_saved")
@@ -2460,25 +2461,29 @@ def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str,
         st.caption("✏️ 직접 고친 내용이 TXT·Word 내려받기에 그대로 반영됩니다.")
 
     file_stem = f"case_draft_{case_id}"
-    col_txt_download, col_docx_download = st.columns(2)
-    with col_txt_download:
-        st.download_button(
-            "TXT로 내려받기",
-            data=with_draft_disclaimer(edited),
-            file_name=f"{file_stem}.txt",
-            mime="text/plain",
-            key=f"{editor_key}_txt",
-            width="stretch",
-        )
-    with col_docx_download:
-        st.download_button(
-            "Word로 내려받기",
-            data=build_case_draft_docx(edited),
-            file_name=f"{file_stem}.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            key=f"{editor_key}_docx",
-            width="stretch",
-        )
+    if show_download:
+        # Word가 주로 쓰는 형식이라 앞에 크게, 글자만 필요한 경우를 위해 TXT를 옆에 둔다.
+        col_docx_download, col_txt_download = st.columns(2)
+        with col_docx_download:
+            st.download_button(
+                "Word로 내려받기",
+                data=build_case_draft_docx(edited),
+                file_name=f"{file_stem}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key=f"{editor_key}_docx",
+                width="stretch",
+                type="primary",
+                icon=":material/download:",
+            )
+        with col_txt_download:
+            st.download_button(
+                "TXT로 내려받기",
+                data=with_draft_disclaimer(edited),
+                file_name=f"{file_stem}.txt",
+                mime="text/plain",
+                key=f"{editor_key}_txt",
+                width="stretch",
+            )
     baseline, baseline_label = (saved["text"], "마지막으로 저장한 초안으로 되돌리기") if saved else (
         original, "처음 만든 초안으로 되돌리기"
     )
@@ -2489,10 +2494,10 @@ def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str,
             on_click=restore_original_draft,
             args=(editor_key, baseline),
         )
-    if not can_save:
+    if not can_save and show_download:
         st.caption(
-            "초안은 서버에 저장되지 않습니다. 필요하면 내려받아 보관하세요. "
-            "'내 사건'에서 언제든 다시 만들 수 있습니다."
+            "초안은 서버에 저장되지 않아요. 필요하면 내려받아 보관하세요. "
+            "'내 사건'에서 언제든 다시 만들 수 있어요."
         )
 
 
@@ -3660,12 +3665,15 @@ def render_leave_dialog() -> None:
     pending = st.session_state.get("_pending_nav") or {}
     ctx = pending.get("ctx") or {}
     st.markdown("이 사건에서 고친 내용을 아직 저장하지 않았어요. 어떻게 할까요?")
+    pending_kind = ws_form_pending(ctx["case_id"], ws_state(ctx["case_id"])) if ctx else None
+    if pending_kind:
+        st.caption(f"작성 중인 {ITEM_NAMES[pending_kind]} 항목은 '저장하고 이동'을 누르면 목록에 넣고 함께 저장해요.")
     if st.button("저장하고 이동", key="leave_save", type="primary", width="stretch", icon=":material/save:"):
         with st.spinner("저장하고 있어요…"):
             ws_save(ctx["case"], ctx["case_id"], ctx["draft_key"], ctx["editor_key"])
         ws = ws_state(ctx["case_id"])
         st.session_state._pending_nav = None
-        if ws["save_error"] or ws["conflict"]:
+        if ws["save_error"] or ws["conflict"] or ws.get("pending_error"):
             # 저장하지 못했으면 옮기지 않는다. 화면 아래 저장 영역에 이유와 다시 하는 방법이 보인다.
             ws["save_error"] = ws["save_error"] and "저장하지 못해 이동하지 않았어요. " + ws["save_error"]
         else:
@@ -3680,6 +3688,24 @@ def render_leave_dialog() -> None:
         st.rerun()
     st.caption("저장하지 않고 이동해도 고친 내용은 이 탭에 잠시 남아 있어 다시 열면 이어서 고칠 수 있어요. "
                "하지만 새로고침하거나 탭을 닫거나 로그아웃하면 사라져요.")
+
+
+_scroll_to_component = st.components.v2.component(
+    "gosoemi_scroll_to",
+    js="""
+export default function({data}) {
+  const go = () => {
+    const el = document.querySelector(data && data.selector);
+    if (!el) return;
+    el.scrollIntoView({block: 'center'});
+    const fields = [...el.querySelectorAll('input[type="text"], textarea')];
+    const field = fields.find(f => !f.value) || fields[0];  // 비어 있는 칸(빠진 칸)부터
+    if (field) field.focus({preventScroll: true});
+  };
+  setTimeout(go, 350);
+}
+""",
+)
 
 
 # 저장하지 않은 작업이 있을 때 새로고침·탭 닫기를 하면 브라우저가 확인 창을 띄우게 한다.
@@ -3902,6 +3928,10 @@ def render_case_form() -> None:
             )
         )
     case_data_consent = st.checkbox("[필수] 위 내용을 확인했고, 사건 정보 저장·전송에 동의합니다.", key="case_data_consent")
+    if any((st.session_state.get(f"case_field_{key}") or "").strip() for _, key in CASE_FIELDS):
+        # 적던 내용은 다른 화면에 다녀와도 남지만, 새로고침·탭 닫기 때는 사라지므로 브라우저 확인 창을 띄운다.
+        st.session_state["_unsaved_form"] = True
+        st.caption("적은 내용은 '입력한 내용 확인하기' → '저장하고 초안 만들기'를 눌러야 저장돼요. 새로고침하거나 탭을 닫으면 사라져요.")
     submitted = st.button("입력한 내용 확인하기", type="primary", key="case_form_submit", width="stretch",
                           icon=":material/fact_check:")
 
@@ -3976,6 +4006,7 @@ def render_review_questions(review: dict) -> None:
 
 
 def render_case_review(review: dict) -> None:
+    st.session_state["_unsaved_form"] = True  # 아직 저장 전(새로고침 경고)
     st.markdown("### 입력한 내용을 확인해 주세요")
     if assist_preview():
         render_review_questions(review)
@@ -4247,18 +4278,60 @@ def ws_item_open(case_id: str, kind: str, index) -> None:
         st.session_state[k("time")] = item.get("time") or datetime.time(10, 0)
         st.session_state[k("alarm")] = item.get("alarm", 0)
         st.session_state[k("memo")] = item.get("memo", "")
+    prefix = f"ws_f_{case_id}_{kind}_"
+    ws["form_base"] = {key: value for key, value in st.session_state.items() if key.startswith(prefix)}
+
+
+ITEM_STEPS = {"timeline": "story", "evidence": "story", "schedules": "next"}
+
+
+def ws_form_pending(case_id: str, ws: dict):
+    """입력칸을 열어 적었지만 '목록에 추가'(또는 '고친 내용 넣기')를 누르지 않은 항목의 종류. 없으면 None."""
+    editing = ws.get("editing")
+    if not editing:
+        return None
+    base = ws.get("form_base") or {}
+    prefix = f"ws_f_{case_id}_{editing['kind']}_"
+    for key, value in st.session_state.items():
+        if key.startswith(prefix) and key in base and value != base[key]:
+            return editing["kind"]
+    return None
+
+
+def ws_commit_pending(case_id: str) -> bool:
+    """저장·이동 전에 작성 중인 항목을 검사해 목록에 넣는다. 칸이 모자라면 넣지 않고 False."""
+    ws = ws_state(case_id)
+    ws["pending_error"] = ws["pending_added"] = None
+    kind = ws_form_pending(case_id, ws)
+    if not kind:
+        return True
+    if not ws_item_submit(case_id):
+        ws["pending_error"] = {"kind": kind, "text": f"작성 중인 {ITEM_NAMES[kind]} 항목을 먼저 추가해 주세요. {ws.get('item_error') or ''}".strip()}
+        ws["focus_form"] = (ws.get("focus_form") or 0) + 1  # 그 입력칸이 보이는 단계라면 바로 그 칸까지 내려 준다
+        return False
+    ws["pending_added"] = ITEM_NAMES[kind]
+    return True
+
+
+def ws_go_to_form(case_id: str) -> None:
+    """'작성 중인 칸으로 가기': 입력칸이 있는 단계로 옮기고 그 칸까지 내려 준다."""
+    ws = ws_state(case_id)
+    kind = (ws.get("editing") or {}).get("kind")
+    if kind:
+        st.session_state[f"ws_step_{case_id}"] = ITEM_STEPS[kind]
+        ws["focus_form"] = (ws.get("focus_form") or 0) + 1
 
 
 def ws_item_close(case_id: str) -> None:
     ws = ws_state(case_id)
     kind = (ws.get("editing") or {}).get("kind")
-    ws["editing"] = ws["item_error"] = None
+    ws["editing"] = ws["item_error"] = ws["form_base"] = ws["pending_error"] = None
     for key in list(st.session_state.keys()):
         if kind and key.startswith(f"ws_f_{case_id}_{kind}_"):
             del st.session_state[key]
 
 
-def ws_item_submit(case_id: str) -> None:
+def ws_item_submit(case_id: str) -> bool:
     """입력칸의 내용을 목록에 넣는다(저장은 '작업 저장'에서). 입력이 모자라면 칸을 그대로 두고 알려 준다."""
     ws = ws_state(case_id)
     editing = ws.get("editing") or {}
@@ -4269,7 +4342,7 @@ def ws_item_submit(case_id: str) -> None:
         what = (get("what") or "").strip()
         if not what:
             ws["item_error"] = "'무슨 일이 있었나요' 칸을 적어 주세요."
-            return
+            return False
         link = get("evidence")
         item = {"when": (get("when") or "").strip()[:40], "what": what[:300], "evidence": "" if link in (None, NO_LINK) else link}
         label = what[:30]
@@ -4277,10 +4350,10 @@ def ws_item_submit(case_id: str) -> None:
         name = (get("name") or "").strip()[:60]
         if not name:
             ws["item_error"] = "'자료 이름' 칸을 적어 주세요."
-            return
+            return False
         if any(e["name"] == name for i, e in enumerate(items) if i != index):
             ws["item_error"] = "같은 이름의 자료가 이미 있어요. 이름을 조금 다르게 적어 주세요."
-            return
+            return False
         old = items[index] if index is not None else {}
         item = {"name": name, "shows": (get("shows") or "").strip()[:200], "source": old.get("source") or "직접 추가"}
         if old and old["name"] != name:  # 이름을 바꾸면 경위의 연결도 따라 바꾼다
@@ -4298,7 +4371,7 @@ def ws_item_submit(case_id: str) -> None:
             })
         except ValueError:
             ws["item_error"] = "날짜를 골라 주세요."
-            return
+            return False
         label = item["title"]
     if index is None:
         items.append(item)
@@ -4310,6 +4383,8 @@ def ws_item_submit(case_id: str) -> None:
         items.sort(key=lambda e: (e["date"], e["time"] or datetime.time(0, 0)))
     ws_item_close(case_id)
     ws["item_notice"] = {"kind": kind, "text": f"'{label}' {verb}. {ws_saved_hint()}"}
+    ws["pending_error"] = None
+    return True
 
 
 def ws_item_delete(case_id: str, kind: str, index: int, confirmed: bool = False) -> None:
@@ -4340,6 +4415,11 @@ def render_item_form(case_id: str, ws: dict, kind: str, evidence_names=()) -> No
     k = lambda field: ws_form_key(case_id, kind, field)  # noqa: E731
     with st.container(border=True, key=f"ws_form_{case_id}_{kind}"):
         st.markdown(f"**{ITEM_NAMES[kind]} {'추가' if index is None else '고치기'}**")
+        if ws.get("focus_form"):
+            # '작성 중인 칸으로 가기'를 눌렀을 때만 이 입력칸까지 내려 준다(화면 맨 위로 올리는 동작보다 뒤에 실행).
+            _scroll_to_component(key=f"ws_focus_{case_id}_{ws['focus_form']}", height=0,
+                                 data={"selector": f".st-key-ws_form_{case_id}_{kind}"})
+            ws["focus_form"] = None
         if kind == "timeline":
             st.text_input("언제 (모르면 비워 두세요)", key=k("when"), max_chars=40, placeholder="예: 9월 2일 오후 3시")
             st.text_area("무슨 일이 있었나요", key=k("what"), max_chars=300, height=90,
@@ -4517,14 +4597,17 @@ def render_ws_draft(case_id: str, case: dict, ws: dict, draft_key: str, editor_k
                   on_click=lambda: (st.session_state.__setitem__(editor_key, ws["history"].pop()), ws.pop("rewrite_notes", None)))
     for note in ws.get("rewrite_notes") or []:
         st.warning(note + " 바뀐 부분을 꼭 확인하거나 '바로 전 초안으로'를 눌러 주세요.")
-    render_draft_panel(editor_key, draft, case, case_id, show_save=not workspace_save_available())
+    render_draft_panel(editor_key, draft, case, case_id, show_save=not workspace_save_available(), show_download=False)
+    st.button("다음: 내려받기", key=f"ws_to_download_{case_id}", type="primary", icon=":material/arrow_forward:",
+              on_click=ws_go, args=(case_id, "download"))
 
 
 def render_ws_download(case_id: str, ws: dict, editor_key: str, draft_key: str, case: dict) -> None:
     draft = st.session_state.get(editor_key) or st.session_state.get(draft_key) or ""
     timeline = ws["timeline"] if ws["timeline"] is not None else build_timeline(case)
     evidence = ws["evidence"] if ws["evidence"] is not None else evidence_items(case, ws.get("file_names"))
-    st.markdown("함께 내려받을 자료를 고르세요. 고소음이는 기관에 자동으로 보내지 않아요.")
+    st.markdown("#### 내려받을 자료")
+    st.caption("함께 내려받을 자료를 고르세요. 고소음이는 기관에 자동으로 보내지 않아요.")
     include = {
         "draft": st.checkbox("고소장 초안" + ("" if draft else " (아직 없음)"), value=bool(draft), key=f"ws_inc_draft_{case_id}",
                              disabled=not draft),
@@ -4538,14 +4621,16 @@ def render_ws_download(case_id: str, ws: dict, editor_key: str, draft_key: str, 
     with st.expander("내려받을 내용 미리 보기"):
         st.text(text[:4000] + ("…" if len(text) > 4000 else ""))
     st.caption("내려받은 파일을 제출하기 전에 사실관계를 직접 확인하고, 법률 전문가의 검토를 받아 주세요.")
-    col_txt, col_doc = st.columns(2)
-    with col_txt:
-        st.download_button("TXT로 내려받기", data=text, file_name=f"case_{case_id}_bundle.txt", mime="text/plain",
-                           key=f"ws_dl_txt_{case_id}", width="stretch")
+    col_doc, col_txt = st.columns(2)
     with col_doc:
         st.download_button("Word로 내려받기", data=bundle_docx(text), file_name=f"case_{case_id}_bundle.docx",
                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                           key=f"ws_dl_doc_{case_id}", width="stretch")
+                           key=f"ws_dl_doc_{case_id}", width="stretch", type="primary", icon=":material/download:")
+    with col_txt:
+        st.download_button("TXT로 내려받기", data=text, file_name=f"case_{case_id}_bundle.txt", mime="text/plain",
+                           key=f"ws_dl_txt_{case_id}", width="stretch")
+    st.button("다음: 다음 할 일", key=f"ws_to_next_{case_id}", icon=":material/arrow_forward:",
+              on_click=ws_go, args=(case_id, "next"))
 
 
 def render_ws_next(case_id: str, case: dict, ws: dict) -> None:
@@ -4689,6 +4774,8 @@ def ws_save(case: dict, case_id: str, draft_key: str, editor_key: str, overwrite
     ws = ws_state(case_id)
     ws["save_error"] = ws["saved_ok"] = ws["conflict"] = None
     ws["save_partial"] = False
+    if not ws_commit_pending(case_id):
+        return  # 저장한 것처럼 보이지 않게 아무것도 저장하지 않고, 작성 중인 칸으로 안내한다
     done, step = [], "case"
     try:
         if ws["answers"]:
@@ -4778,24 +4865,38 @@ def render_ws_save_bar(case: dict, case_id: str, ws: dict, draft_key: str, edito
                 st.button("내 내용으로 덮어쓰기", key=f"ws_mine_{case_id}", width="stretch", type="primary", on_click=ws_save,
                           args=(case, case_id, draft_key, editor_key, ws["conflict"]))
             return True
-        dirty = ws_dirty(case_id, case, ws, draft_key, editor_key)
+        pending = ws_form_pending(case_id, ws)
+        pending_error = ws.get("pending_error") if ws.get("editing") else None
+        dirty = ws_dirty(case_id, case, ws, draft_key, editor_key) or bool(pending)
         col_status, col_button = st.columns([3, 2], vertical_alignment="center")
         with col_status:
-            if ws["save_error"] and ws.get("save_partial"):
+            if pending_error:
+                st.warning(pending_error["text"])
+            elif pending:
+                st.markdown(f"**작성 중인 {ITEM_NAMES[pending]} 항목이 있어요.** '작업 저장'을 누르면 목록에 넣고 함께 저장해요.")
+            elif ws["save_error"] and ws.get("save_partial"):
                 st.warning("**일부만 저장됐어요.** " + ws["save_error"])
             elif ws["save_error"]:
                 st.error(ws["save_error"])
             elif dirty:
                 st.markdown("**수정한 내용이 아직 저장되지 않았습니다.**")
             elif ws["saved_ok"]:
-                st.markdown(f"✓ 저장했어요 · {ws['saved_ok']}")
+                st.markdown(f"✓ 저장했어요 · {ws['saved_ok']}"
+                            + (f" (작성 중이던 {ws['pending_added']} 항목도 넣었어요)" if ws.get("pending_added") else ""))
             elif ws["saved_at"]:
                 st.markdown(f"마지막 저장 · {format_created_at(ws['saved_at'])}")
             else:
                 st.markdown("아직 저장하지 않았어요.")
         with col_button:
-            clicked = st.button("작업 저장", key=f"ws_save_{case_id}", type="primary", width="stretch", icon=":material/save:",
-                                disabled=not dirty and not ws["save_error"])
+            form_kind = (ws.get("editing") or {}).get("kind")
+            if pending_error and st.session_state.get(f"ws_step_{case_id}") != ITEM_STEPS.get(form_kind):
+                # 입력칸이 지금 단계에 없으면 그 칸으로 데려간다. 같은 단계면 칸을 고친 뒤 바로 다시 저장할 수 있다.
+                st.button("작성 중인 칸으로 가기", key=f"ws_goform_{case_id}", type="primary", width="stretch",
+                          icon=":material/edit:", on_click=ws_go_to_form, args=(case_id,))
+                clicked = False
+            else:
+                clicked = st.button("작업 저장", key=f"ws_save_{case_id}", type="primary", width="stretch", icon=":material/save:",
+                                    disabled=not dirty and not ws["save_error"])
         if clicked:
             with st.spinner("저장하고 있어요…"):
                 ws_save(case, case_id, draft_key, editor_key)
@@ -5084,6 +5185,7 @@ def render_chat_page() -> None:
 
 keep_widget_values()
 st.session_state["_unsaved"] = None  # 이번 화면을 그리면서 다시 채운다(이동 버튼의 콜백은 바로 전 화면 기준으로 본다)
+st.session_state["_unsaved_form"] = False  # 고소장 작성 칸에 적던 내용(새로고침 경고에만 쓴다)
 render_upcoming_privacy_notice()
 account_identity, account_method = current_account_label(st.session_state.supabase_session)
 current_page = render_top_bar(account_identity, account_method)
@@ -5096,7 +5198,7 @@ else:
     }[current_page]()
 if st.session_state.get("_pending_nav"):
     render_leave_dialog()
-_unsaved_guard_component(key="unsaved_guard", data={"dirty": bool(st.session_state.get("_unsaved"))}, height=0)
+_unsaved_guard_component(key="unsaved_guard", data={"dirty": bool(st.session_state.get("_unsaved") or st.session_state.get("_unsaved_form"))}, height=0)
 render_footer()
 # 다른 화면(또는 고소장 작성 단계·사건 열기·음성 대화)으로 바뀌었을 때만 새 화면의 맨 위로 올린다.
 current_view = "|".join(str(x) for x in (
