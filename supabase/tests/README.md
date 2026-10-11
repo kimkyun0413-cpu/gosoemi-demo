@@ -107,3 +107,15 @@ Homebrew·Docker가 없는 Mac에서도 아래처럼 할 수 있다(2026-10-11 �
 | local_case_workspace_edit_test.py | 사건 수정·작업 공간 저장(미적용): 본인만, 고칠 수 없는 열, 동시 수정 충돌, 사건 삭제·탈퇴 시 삭제, 되돌리기·재적용 | 33/33 |
 
 주의: 로컬 `cases` 표는 운영 표를 흉내 낸 것이다(열·정책은 기존 시험과 같은 가정). 운영 적용 전에 운영 `cases`의 실제 열·정책을 한 번 더 확인한다.
+
+# 백업·복구 스크립트 시험 (로컬)
+
+[local_backup_restore_test.py](local_backup_restore_test.py)는 로컬 임시 Postgres에 Supabase 비슷한 원본 DB를 만들고 앱 마이그레이션과 가짜 자료를 넣은 뒤,
+`scripts/backup_supabase.sh`로 암호화 백업 → '새 프로젝트'처럼 빈 DB에 `scripts/restore_supabase.sh`로 복구 → 행 수·계정 연결·정책을 비교한다(17개).
+pg_dump·psql은 PATH에 있어야 하고, 암호는 이 시험에서만 `BACKUP_PASSPHRASE` 환경변수로 넘긴다.
+
+```bash
+PATH=<pg bin>:$PATH LOCAL_PG="host=127.0.0.1 port=54329 user=postgres" python3 supabase/tests/local_backup_restore_test.py
+```
+
+2026-10-12 처음 실행해 오류 2개를 찾아 고쳤다: 백업에 계정 표만 담기던 문제(`--table`을 쓰면 `--schema`가 무시됨), 복구가 `CREATE SCHEMA public`에서 멈추던 문제.

@@ -98,6 +98,13 @@ CASE_UI_STATE_PREFIXES = (
 # 비밀번호 재설정은 Supabase에 직접 메일 서버(SMTP)와 재설정 메일 템플릿을 설정한 뒤 켠다.
 # 기본 메일 설정에서는 재설정 링크가 이 앱의 token_hash 처리 방식과 맞지 않아 동작하지 않는다.
 PASSWORD_RESET_ENABLED = os.environ.get("PASSWORD_RESET_ENABLED") == "true"
+# 이메일 가입. Supabase 기본 메일은 프로젝트 팀원 주소로만 보내므로(공식 문서), 메일 서버(SMTP)를 연결하기 전에는
+# 일반 이용자가 인증 메일을 받지 못한다. 운영자가 "false"로 두면 이메일 가입만 잠시 닫고 네이버·Google 가입을 안내한다.
+# 설정이 없으면 지금처럼 열어 둔다.
+EMAIL_SIGNUP_ENABLED = os.environ.get("EMAIL_SIGNUP_ENABLED", "true") != "false"
+EMAIL_SEND_FAILED_MESSAGE = (
+    "지금은 인증 메일을 보낼 수 없어 이메일 가입을 마칠 수 없어요(메일 발송 준비 중). 네이버 또는 Google로 가입해 주세요."
+)
 # 이용자 IP를 Supabase Auth에 전달해 IP별 제한을 이용자마다 따로 적용(auth_ip.py). 기본은 꺼짐.
 AUTH_IP_FORWARDING_ENABLED = os.environ.get("AUTH_IP_FORWARDING_ENABLED") == "true"
 
@@ -313,6 +320,10 @@ def map_auth_error(error: Exception) -> str:
             return "이전과 동일한 비밀번호로는 변경할 수 없습니다."
         if code == "signup_disabled":
             return "현재 회원가입이 제한되어 있습니다. 잠시 후 다시 시도해 주세요."
+        if code in ("email_address_not_authorized", "email_provider_disabled") or (
+            status == 500 and "sending" in str(getattr(error, "message", "") or error).lower()
+        ):
+            return EMAIL_SEND_FAILED_MESSAGE
     return "일시적인 문제로 처리하지 못했습니다. 인터넷 연결을 확인하고 잠시 후 다시 시도해 주세요."
 
 
@@ -3607,72 +3618,77 @@ if not st.session_state.supabase_session:
             render_social_login_section("login")
 
         with signup_tab:
-            render_signup_guide()
-            st.markdown(
-                "**회원가입 시 수집하는 개인정보**\n"
-                "- 수집 항목: 이메일, 인증을 위한 비밀번호\n"
-                "- 목적: 회원가입·로그인·계정관리\n"
-                "- 보관기간: 회원탈퇴 시까지\n"
-                "- 동의를 거부할 수 있으나, 거부 시 회원가입이 제한됩니다.\n"
-                "- 비밀번호는 Supabase Auth에서 암호화된 인증정보로 처리되며 운영자는 원문을 열람할 수 없습니다."
-            )
-
-            with st.form("signup_form"):
-                signup_email = st.text_input("이메일", key="signup_email", max_chars=254)
-                signup_password = st.text_input("비밀번호 (6자 이상)", type="password", key="signup_password", max_chars=128)
-                signup_password_confirm = st.text_input("비밀번호 확인", type="password", key="signup_password_confirm", max_chars=128)
-                signup_privacy_consent = st.checkbox(
-                    "[필수] 위 안내를 확인했으며 개인정보 수집·이용에 동의합니다.",
-                    key="signup_privacy_consent",
+            if not EMAIL_SIGNUP_ENABLED:
+                st.info("이메일 가입은 인증 메일 준비 중이라 잠시 쉬고 있어요. 아래 네이버 또는 Google로 가입해 주세요. "
+                        "이미 이메일로 가입하신 분은 로그인 탭에서 그대로 로그인할 수 있어요.")
+                render_social_login_section("signup")
+            else:
+                render_signup_guide()
+                st.markdown(
+                    "**회원가입 시 수집하는 개인정보**\n"
+                    "- 수집 항목: 이메일, 인증을 위한 비밀번호\n"
+                    "- 목적: 회원가입·로그인·계정관리\n"
+                    "- 보관기간: 회원탈퇴 시까지\n"
+                    "- 동의를 거부할 수 있으나, 거부 시 회원가입이 제한됩니다.\n"
+                    "- 비밀번호는 Supabase Auth에서 암호화된 인증정보로 처리되며 운영자는 원문을 열람할 수 없습니다."
                 )
-                signup_terms_consent = st.checkbox(
-                    "[필수] 이용약관에 동의합니다.",
-                    key="signup_terms_consent",
-                )
-                signup_age_consent = st.checkbox("[필수] 만 14세 이상입니다.", key="signup_age_consent")
-                signup_submitted = st.form_submit_button("회원가입", type="primary", width="stretch")
 
-            if signup_submitted:
-                if not privacy_config_ready() or not terms_config_ready():
-                    st.error(
-                        "현재 서비스 운영 정보 설정이 진행 중이라 잠시 회원가입을 "
-                        "이용하실 수 없습니다. 잠시 후 다시 시도해 주세요."
+                with st.form("signup_form"):
+                    signup_email = st.text_input("이메일", key="signup_email", max_chars=254)
+                    signup_password = st.text_input("비밀번호 (6자 이상)", type="password", key="signup_password", max_chars=128)
+                    signup_password_confirm = st.text_input("비밀번호 확인", type="password", key="signup_password_confirm", max_chars=128)
+                    signup_privacy_consent = st.checkbox(
+                        "[필수] 위 안내를 확인했으며 개인정보 수집·이용에 동의합니다.",
+                        key="signup_privacy_consent",
                     )
-                elif not (signup_privacy_consent and signup_terms_consent and signup_age_consent):
-                    st.error("회원가입을 진행하려면 이용약관 동의, 개인정보 수집·이용 동의, 만 14세 이상 확인에 모두 체크해 주세요.")
-                elif len(signup_password) < 6:
-                    st.error("비밀번호는 6자 이상 입력해 주세요.")
-                elif signup_password != signup_password_confirm:
-                    st.error("비밀번호가 일치하지 않습니다.")
-                else:
-                    base_url = get_app_base_url()
-                    if not base_url:
-                        st.error("서비스 주소 설정이 아직 끝나지 않아 메일을 보낼 수 없습니다. 잠시 후 다시 시도해 주세요." + contact_hint())
-                    else:
-                        try:
-                            auth_client = get_auth_client()
-                            auth_client.auth.sign_up({
-                                "email": signup_email.strip(),
-                                "password": signup_password,
-                                "options": {
-                                    "email_redirect_to": base_url,
-                                    "data": {
-                                        "terms_version": TERMS_EFFECTIVE_DATE,
-                                        "privacy_version": PRIVACY_POLICY_EFFECTIVE_DATE,
-                                        "terms_consent": True,
-                                        "privacy_consent": True,
-                                    },
-                                },
-                            })
-                            st.session_state.signup_sent_email = signup_email.strip()
-                            st.session_state.signup_resend_last_sent_at = None
-                            st.session_state.auth_view = "signup_sent"
-                            st.rerun()
-                        except Exception as error:
-                            log_auth_error(error)
-                            st.error(map_auth_error(error))
+                    signup_terms_consent = st.checkbox(
+                        "[필수] 이용약관에 동의합니다.",
+                        key="signup_terms_consent",
+                    )
+                    signup_age_consent = st.checkbox("[필수] 만 14세 이상입니다.", key="signup_age_consent")
+                    signup_submitted = st.form_submit_button("회원가입", type="primary", width="stretch")
 
-            render_social_login_section("signup")
+                if signup_submitted:
+                    if not privacy_config_ready() or not terms_config_ready():
+                        st.error(
+                            "현재 서비스 운영 정보 설정이 진행 중이라 잠시 회원가입을 "
+                            "이용하실 수 없습니다. 잠시 후 다시 시도해 주세요."
+                        )
+                    elif not (signup_privacy_consent and signup_terms_consent and signup_age_consent):
+                        st.error("회원가입을 진행하려면 이용약관 동의, 개인정보 수집·이용 동의, 만 14세 이상 확인에 모두 체크해 주세요.")
+                    elif len(signup_password) < 6:
+                        st.error("비밀번호는 6자 이상 입력해 주세요.")
+                    elif signup_password != signup_password_confirm:
+                        st.error("비밀번호가 일치하지 않습니다.")
+                    else:
+                        base_url = get_app_base_url()
+                        if not base_url:
+                            st.error("서비스 주소 설정이 아직 끝나지 않아 메일을 보낼 수 없습니다. 잠시 후 다시 시도해 주세요." + contact_hint())
+                        else:
+                            try:
+                                auth_client = get_auth_client()
+                                auth_client.auth.sign_up({
+                                    "email": signup_email.strip(),
+                                    "password": signup_password,
+                                    "options": {
+                                        "email_redirect_to": base_url,
+                                        "data": {
+                                            "terms_version": TERMS_EFFECTIVE_DATE,
+                                            "privacy_version": PRIVACY_POLICY_EFFECTIVE_DATE,
+                                            "terms_consent": True,
+                                            "privacy_consent": True,
+                                        },
+                                    },
+                                })
+                                st.session_state.signup_sent_email = signup_email.strip()
+                                st.session_state.signup_resend_last_sent_at = None
+                                st.session_state.auth_view = "signup_sent"
+                                st.rerun()
+                            except Exception as error:
+                                log_auth_error(error)
+                                st.error(map_auth_error(error))
+
+                render_social_login_section("signup")
 
         col_privacy, col_terms = st.columns(2)
         with col_privacy:

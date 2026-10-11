@@ -10,9 +10,12 @@ file="${1:?복구할 .enc 파일 경로를 적어 주세요}"
 case "$TARGET_DB_URL" in *hnaobxrfapsuiygggdgx*) echo "운영 프로젝트 주소입니다. 새 프로젝트에 먼저 복구해 주세요." >&2; exit 2;; esac
 
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT; umask 077
-openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in "$file" -out "$work/backup.tar.gz"
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 ${BACKUP_PASSPHRASE:+-pass env:BACKUP_PASSPHRASE} -in "$file" -out "$work/backup.tar.gz"
 tar -C "$work" -xzf "$work/backup.tar.gz"
 cat "$work/manifest.txt"
+# 새 Supabase 프로젝트에는 public 스키마가 이미 있다. 백업의 'CREATE SCHEMA ...;'를 '없을 때만 만들기'로 바꿔
+# 복구가 첫 줄에서 멈추지 않게 한다(2026-10-12 로컬 복구 시험에서 발견). 예전 백업 파일에도 그대로 적용된다.
+sed -E -i.bak 's/^CREATE SCHEMA ([a-z_]+);$/CREATE SCHEMA IF NOT EXISTS \1;/' "$work/schema.sql"
 
 # 계정이 먼저 있어야 사건 등의 외래키가 맞는다. 트리거는 잠시 끄고(replica) 자료를 넣는다.
 psql "$TARGET_DB_URL" --single-transaction --variable ON_ERROR_STOP=1 \

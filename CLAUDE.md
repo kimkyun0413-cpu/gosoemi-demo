@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [billing.py](billing.py) — paid-plan settings and display rules only. No payment provider is integrated; sales stay closed. DB/Edge Function drafts live in `supabase/proposals/billing/` and are not applied.
 - [auth_ip.py](auth_ip.py) — when to forward the user's IP to Supabase Auth (Sb-Forwarded-For).
 - [scripts/](scripts/) — Free-plan backup/restore, voice smoke test, privacy review packet builder. None of them run automatically.
-- [docs/decisions-2026-10.md](docs/decisions-2026-10.md) — options prepared for the owner (mail, backup, auth limits, billing, voice test).
+- [docs/decisions-2026-10.md](docs/decisions-2026-10.md), [docs/decisions-2026-10-12.md](docs/decisions-2026-10-12.md) — options prepared for the owner; the 10-12 file is the current single list (Gemini free tier, age terms, mail, backup, unused secrets).
 - [docs/launch-status.md](docs/launch-status.md) — current launch blockers and next steps; read this first when resuming work.
 - [supabase/](supabase/) — migrations, rollbacks, deployed Edge Function sources (`naver-auth`, `delete-account`), and access tests.
 - `main.py`, `calendar_test.py` — an old personal CLI assistant, not used by the app.
@@ -31,9 +31,9 @@ deno test supabase/proposals/billing/functions/billing-webhook/handler_test.ts
 streamlit run app.py
 ```
 
-The app reads all secrets and feature flags from environment variables (Streamlit secrets in production): `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `GEMINI_API_KEY`, `APP_BASE_URL`, `PRIVACY_*`, `EVIDENCE_UPLOAD_ENABLED`, `DRAFT_SAVE_ENABLED`, `VOICE_INPUT_ENABLED`, `AI_CHAT_V2_ENABLED`, `VOICE_CHAT_ENABLED`, `VOICE_SERVER_TTS_ENABLED` + optional `GEMINI_TTS_MODEL` (server voice; costs per answer), `ASSIST_V2_ENABLED`, `CASE_WORKSPACE_SAVE_ENABLED` (needs migration 20261012000000), `LAW_OPEN_API_OC`, `NAVER_*`, `GOOGLE_*`, `AI_CALLS_PER_HOUR`, `AI_CALLS_PER_HOUR_TOTAL`, `PASSWORD_RESET_ENABLED`, `BILLING_MODE`, `BILLING_PLANS_JSON`, `ADMIN_USER_IDS` (operator-only voice test mode and diagnostics; Supabase user IDs, verified server-side against the token), `AUTH_IP_FORWARDING_ENABLED` + `SUPABASE_SECRET_KEY` (secret key used only for Auth requests, never for data). Never hardcode keys.
+The app reads all secrets and feature flags from environment variables (Streamlit secrets in production): `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `GEMINI_API_KEY`, `APP_BASE_URL`, `PRIVACY_*`, `EVIDENCE_UPLOAD_ENABLED`, `DRAFT_SAVE_ENABLED`, `VOICE_INPUT_ENABLED`, `AI_CHAT_V2_ENABLED`, `VOICE_CHAT_ENABLED`, `VOICE_SERVER_TTS_ENABLED` + optional `GEMINI_TTS_MODEL` (server voice; costs per answer), `ASSIST_V2_ENABLED`, `CASE_WORKSPACE_SAVE_ENABLED` (needs migration 20261012000000), `LAW_OPEN_API_OC`, `NAVER_*`, `GOOGLE_*`, `AI_CALLS_PER_HOUR`, `AI_CALLS_PER_HOUR_TOTAL`, `PASSWORD_RESET_ENABLED`, `EMAIL_SIGNUP_ENABLED` (default on; "false" pauses email sign-up while no SMTP is connected), `BILLING_MODE`, `BILLING_PLANS_JSON`, `ADMIN_USER_IDS` (operator-only voice test mode and diagnostics; Supabase user IDs, verified server-side against the token), `AUTH_IP_FORWARDING_ENABLED` + `SUPABASE_SECRET_KEY` (secret key used only for Auth requests, never for data). Never hardcode keys.
 
-`supabase/tests/local_case_drafts_test.py`, `local_billing_test.py` and `local_case_workspace_edit_test.py` check migrations and RLS against a local throwaway Postgres only and refuse to run against a Supabase host. Without Homebrew/Docker, use the EDB macOS binaries as described in [supabase/tests/README.md](supabase/tests/README.md).
+`supabase/tests/local_case_drafts_test.py`, `local_billing_test.py`, `local_case_workspace_edit_test.py` and `local_backup_restore_test.py` (runs the real backup/restore scripts) check migrations, RLS and backups against a local throwaway Postgres only and refuse to run against a Supabase host. Without Homebrew/Docker, use the EDB macOS binaries as described in [supabase/tests/README.md](supabase/tests/README.md).
 
 ## Rules that matter
 

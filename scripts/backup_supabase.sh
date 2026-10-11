@@ -34,10 +34,12 @@ mkdir -p "$out_dir"
 # 앱이 만든 스키마 구조(표·함수·트리거·RLS 정책·권한). Supabase가 관리하는 스키마는 덤프하지 않는다.
 pg_dump "$SUPABASE_DB_URL" --schema-only --no-owner \
   --schema=public --schema=naver_private --file="$work/schema.sql"
-# 자료: 앱 스키마 + 로그인 계정(auth.users, auth.identities).
+# 자료: 앱 스키마의 모든 표 + 로그인 계정(auth.users, auth.identities).
+# pg_dump는 --table을 하나라도 쓰면 --schema를 무시하므로, 앱 스키마도 --table 'public.*' 형태로 적는다
+# (예전 방식은 계정 표만 담겼다. 2026-10-12 로컬 백업·복구 시험에서 발견, 운영에서 실행한 적 없음).
 # storage.objects(증거파일 목록)는 넣지 않는다: 파일을 복구할 때 Storage API가 목록을 다시 만든다.
 pg_dump "$SUPABASE_DB_URL" --data-only --no-owner \
-  --schema=public --schema=naver_private \
+  --table='public.*' --table='naver_private.*' \
   --table=auth.users --table=auth.identities \
   --file="$work/data.sql"
 
@@ -48,6 +50,8 @@ pg_dump "$SUPABASE_DB_URL" --data-only --no-owner \
 } > "$work/manifest.txt"
 
 tar -C "$work" -czf "$work/backup.tar.gz" schema.sql data.sql manifest.txt
-openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in "$work/backup.tar.gz" -out "$out_dir/gosoemi-db-$stamp.tar.gz.enc"
+# 암호는 기본으로 직접 입력한다. 자동 시험에서만 BACKUP_PASSPHRASE 환경변수로 넘긴다(명령줄에 암호를 쓰지 않음).
+openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt ${BACKUP_PASSPHRASE:+-pass env:BACKUP_PASSPHRASE} \
+  -in "$work/backup.tar.gz" -out "$out_dir/gosoemi-db-$stamp.tar.gz.enc"
 echo "백업 완료: $out_dir/gosoemi-db-$stamp.tar.gz.enc"
 echo "암호를 잃어버리면 복구할 수 없습니다. 오래된 백업은 운영 원칙(보관 기간)에 따라 지워 주세요."
