@@ -226,10 +226,42 @@ class AppVoiceTest(unittest.TestCase):
         self.call(at, "handle_voice_preview", {"sid": "abc123", "n": 2, "voice": "<script>"})
         self.assertEqual(len(tts_calls()), 1)
 
+    QUOTA_429 = (429, {"error": {"code": 429, "message": "Rate limit exceeded for model gemini-3.8-flash-lite-tts "
+                                 "(limit: 10 requests per day on Free Tier). Please retry in 7h12m57s or upgrade your tier."}})
+
+    def test_daily_quota_error_is_explained_and_not_retried_as_success(self):
+        fake.TTS_REPLIES[:] = [self.QUOTA_429]
+        at = self.start()
+        self.call(at, "handle_voice_preview", {"sid": "abc123", "n": 1, "voice": "Sulafat"})
+        preview = at.session_state["chat_voice_preview"]
+        self.assertNotIn("audio", preview)
+        self.assertIn("사용량 한도", preview["error"])
+        self.assertIn("약 7시간 뒤", preview["error"])
+        fake.REPLIES[:] = ["질문", "답변입니다."]
+        fake.TTS_REPLIES[:] = [self.QUOTA_429]
+        self.call(at, "handle_voice_turn", self.utterance(voice="Sulafat"))
+        reply = at.session_state["chat_voice_reply"]
+        self.assertEqual(reply["text"], "답변입니다.")                      # 글 답변은 그대로
+        self.assertIn("사용량 한도", reply["tts_error"])
+
+    def test_preview_audio_is_reused_per_voice(self):
+        at = self.start()
+        self.call(at, "handle_voice_preview", {"sid": "abc123", "n": 1, "voice": "Sulafat"})
+        first = len(tts_calls())
+        self.call(at, "handle_voice_preview", {"sid": "abc123", "n": 2, "voice": "Sulafat"})
+        self.assertEqual(len(tts_calls()), first)                         # 같은 목소리는 다시 만들지 않는다
+        self.assertIn("audio", at.session_state["chat_voice_preview"])
+        self.assertEqual(at.session_state["chat_voice_preview"]["n"], 2)
+
+    def test_no_startup_self_test(self):
+        with open(os.path.join(ROOT, "app.py"), encoding="utf-8") as f:
+            self.assertNotIn("self_test", f.read())                        # 무료 등급 하루 한도를 깎지 않는다
+
     def test_tts_counts_toward_hourly_limit(self):
         at = self.start(user_id=TTS_LIMIT_ADMIN_ID, AI_CALLS_PER_HOUR="1")
-        self.call(at, "handle_voice_preview", {"sid": "abc123", "n": 1, "voice": "Kore"})
-        self.call(at, "handle_voice_preview", {"sid": "abc123", "n": 2, "voice": "Kore"})
+        # 미리듣기 음성은 목소리별로 재사용되므로, 이 시험에서만 쓰는 목소리 두 개로 확인한다.
+        self.call(at, "handle_voice_preview", {"sid": "abc123", "n": 1, "voice": "Achernar"})
+        self.call(at, "handle_voice_preview", {"sid": "abc123", "n": 2, "voice": "Schedar"})
         self.assertEqual(len(tts_calls()), 1)
         self.assertIn("1시간에 1번", at.session_state["chat_voice_preview"]["error"])
 

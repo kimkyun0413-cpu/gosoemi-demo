@@ -444,7 +444,7 @@ function fillSettings(S) {
   S.el.rateVal.textContent = rate(S).toFixed(2).replace(/0$/, '') + '배';
   const server = sel.value.startsWith('server:');
   S.el.setNote.textContent = server
-    ? '서버 목소리는 답변 글(앞부분 약 1분)을 Google Gemini로 보내 음성으로 바꿔요. 만든 음성은 저장하지 않아요. 만들지 못하면 기기 목소리로 바꿀 수 있어요.'
+    ? '서버 목소리는 답변 글(앞부분 약 1분)을 Google Gemini로 보내 음성으로 바꿔요. 만든 음성은 저장하지 않아요. 만들지 못하면 기기 목소리로 바꿀 수 있어요. 무료 등급은 Google이 정한 하루 사용 횟수가 있어요(같은 목소리 미리듣기를 다시 누르면 횟수를 쓰지 않아요).'
     : (list.length
       ? '답변 글은 기기 밖으로 나가지 않아요. 더 또렷한 한국어 목소리는 기기 설정의 손쉬운 사용 > 읽기 및 말하기에서 내려받을 수 있고, 기기에 따라 이 목록에 나타나요.'
       : '이 기기에는 한국어 읽기 목소리가 없어 답변을 글로 보여 드려요.');

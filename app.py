@@ -1608,35 +1608,29 @@ def request_tts_audio(text: str, voice: str) -> bytes:
         raise TtsError(200, "NO_AUDIO", str(error)) from error
 
 
-def log_tts_error(stage: str, error: Exception) -> None:
+def log_tts_error(stage: str, error: Exception, voice: str = "") -> None:
+    where = f"model={GEMINI_TTS_MODEL} voice={voice if voice in SERVER_VOICES else '-'}"
     if isinstance(error, TtsError):
-        print(f"[voice_chat] stage={stage} result=TtsError http={error.http_status} status={error.status} "
-              f"model={GEMINI_TTS_MODEL} detail={error.detail}", flush=True)
+        print(f"[voice_chat] stage={stage} result=TtsError http={error.http_status} status={error.status} {where} "
+              f"detail={error.detail}", flush=True)
     else:
-        print(f"[voice_chat] stage={stage} result={type(error).__name__} model={GEMINI_TTS_MODEL}", flush=True)
-
-
-def run_tts_self_test() -> None:
-    try:
-        wav = request_tts_audio("안녕하세요, 고소미 음성 시험입니다.", "Kore")
-    except Exception as error:
-        log_tts_error("selftest", error)
-        return
-    print(f"[voice_tts_selftest] ok model={GEMINI_TTS_MODEL} bytes={len(wav)} seconds={wav_seconds(wav)}", flush=True)
-
-
-@st.cache_resource
-def start_tts_self_test() -> bool:
-    """서버 목소리를 켠 서버가 처음 뜰 때 한 번, 개인정보 없는 예시 문장으로 실제 음성 생성을 확인해 로그에 남긴다.
-    화면을 기다리게 하지 않도록 뒤에서 실행하고, 이용자 호출 한도에는 세지 않는다."""
-    threading.Thread(target=run_tts_self_test, daemon=True).start()
-    return True
+        print(f"[voice_chat] stage={stage} result={type(error).__name__} {where}", flush=True)
 
 
 def tts_error_message(error: Exception) -> str:
     if isinstance(error, AiUsageLimitError):
         return str(error) + " 기기 목소리로 들을 수 있어요."
+    if isinstance(error, TtsError) and error.http_status == 429:
+        return tts_quota_message(error) + " 답변은 글로 볼 수 있고, 기기 목소리로 들을 수 있어요."
     return "서버 목소리를 만들지 못했어요. 답변은 글로 볼 수 있어요. 다시 시도하거나 기기 목소리로 들어 주세요."
+
+
+def tts_quota_message(error: TtsError) -> str:
+    """Google 사용량 한도(429). 무료 등급은 프로젝트 전체에 하루 횟수가 정해져 있고 태평양 시간 자정에 다시 채워진다."""
+    wait = re.search(r"retry in (?:(\d+)h)?(?:(\d+)m)?", error.detail or "")
+    hours = int(wait.group(1) or 0) if wait else None
+    when = (f" 약 {hours}시간 뒤에 다시 쓸 수 있어요." if hours else " 1시간 안에 다시 쓸 수 있어요.") if wait else ""
+    return "Google 음성 생성 사용량 한도(무료 등급 하루 횟수)를 다 써서 목소리를 만들지 못했어요." + when
 
 
 def ai_error_message(error: Exception, default: str) -> str:
@@ -2957,7 +2951,7 @@ def add_server_audio(reply: dict, voice: str) -> None:
     try:
         reply["audio"] = synthesize_speech(server_speech_text(reply["text"]), voice)
     except Exception as error:
-        log_tts_error("tts", error)
+        log_tts_error("tts", error, voice)
         reply["tts_error"] = tts_error_message(error)
 
 
@@ -2976,17 +2970,36 @@ def handle_tts_retry(payload) -> None:
     st.session_state.chat_voice_reply = dict(reply)
 
 
+@st.cache_resource
+def preview_audio_cache() -> dict:
+    """{(모델, 목소리): 미리듣기 음성(base64)}. 고정 예시 문장이라 개인정보가 없고, 같은 목소리를 다시 들어도 한도를 쓰지 않는다."""
+    return {}
+
+
 def handle_voice_preview(payload) -> None:
     """목소리 설정의 '미리듣기'(서버 목소리): 정해 둔 예시 문장만 음성으로 바꾼다."""
     if (not isinstance(payload, dict) or payload.get("voice") not in SERVER_VOICES or not server_tts_available()
             or not isinstance(payload.get("sid"), str) or not isinstance(payload.get("n"), int)):
         return
     preview = {"sid": payload["sid"][:32], "n": payload["n"]}
+    cache, key = preview_audio_cache(), (GEMINI_TTS_MODEL, payload["voice"])
+    if key in cache:
+        preview["audio"] = cache[key]
+        print(f"[voice_chat] stage=preview result=cached model={GEMINI_TTS_MODEL} voice={payload['voice']}", flush=True)
+        st.session_state.chat_voice_preview = preview
+        return
     try:
-        preview["audio"] = synthesize_speech(VOICE_PREVIEW_TEXT, payload["voice"])
+        preview["audio"] = cache[key] = synthesize_speech(VOICE_PREVIEW_TEXT, payload["voice"])
+        print(f"[voice_chat] stage=preview result=ok model={GEMINI_TTS_MODEL} voice={payload['voice']} "
+              f"seconds={wav_seconds(base64.b64decode(preview['audio']))}", flush=True)
     except Exception as error:
-        log_tts_error("preview", error)
-        preview["error"] = "미리듣기 목소리를 만들지 못했어요. 잠시 후 다시 눌러 주세요." if not isinstance(error, AiUsageLimitError) else str(error)
+        log_tts_error("preview", error, payload["voice"])
+        if isinstance(error, AiUsageLimitError):
+            preview["error"] = str(error)
+        elif isinstance(error, TtsError) and error.http_status == 429:
+            preview["error"] = tts_quota_message(error) + " 기기 목소리는 계속 미리들을 수 있어요."
+        else:
+            preview["error"] = "미리듣기 목소리를 만들지 못했어요. 잠시 후 다시 눌러 주세요."
     st.session_state.chat_voice_preview = preview
 
 
@@ -3512,8 +3525,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 st.markdown(BRAND_CSS, unsafe_allow_html=True)
-if VOICE_SERVER_TTS_ENABLED and os.environ.get("GEMINI_API_KEY"):
-    start_tts_self_test()
 
 if "supabase_session" not in st.session_state:
     st.session_state.supabase_session = None
