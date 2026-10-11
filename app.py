@@ -55,7 +55,7 @@ from voice_input import (
 )
 from chat_assistant import (
     CHAT_INPUT_PLACEHOLDER, CHAT_LIMITS_NOTE, CHAT_MAX_INPUT_CHARS, CHAT_RETENTION_NOTE, CHAT_WELCOME, SPEECH_NOTE, VOICE_CHAT_CSS, VOICE_CHAT_JS,
-    GEMINI_TTS_DEFAULT_MODEL, SERVER_SPEECH_NOTE, SERVER_VOICES, TTS_ENDPOINT, VOICE_PREVIEW_TEXT, TtsError, extract_tts_audio,
+    DEFAULT_SPEECH_RATE, GEMINI_TTS_DEFAULT_MODEL, SERVER_DEFAULT_VOICE, SERVER_SPEECH_NOTE, SERVER_VOICES, TTS_ENDPOINT, VOICE_PREVIEW_TEXT, TtsError, extract_tts_audio,
     server_speech_text, tts_error_from_response, tts_request, wav_seconds,
     VOICE_MIC_NOTE, VOICE_TURN_MAX_SECONDS, append_exchange, decode_voice_turn, is_duplicate_submit, model_contents,
     normalize_question, question_digest, speech_text, system_instruction as chat_system_instruction, user_statements,
@@ -3233,6 +3233,8 @@ def render_chat_voice() -> None:
             "max_seconds": VOICE_TURN_MAX_SECONDS,
             "preview_text": VOICE_PREVIEW_TEXT,
             "server_voices": [{"id": k, "label": v} for k, v in SERVER_VOICES.items()] if server_tts_available() else [],
+            "default_voice": SERVER_DEFAULT_VOICE if server_tts_available() else "",
+            "default_rate": DEFAULT_SPEECH_RATE,
         },
         on_utterance_change=lambda: None,
         on_end_change=lambda: None,

@@ -87,9 +87,13 @@ GEMINI_TTS_DEFAULT_MODEL = "gemini-3.8-flash-lite-tts"
 SERVER_SPEECH_MAX_CHARS = 600
 # Google 문서가 붙인 특징 중 상담 안내에 어울릴 만한 것만 고른 후보. 한국어로 어떻게 들리는지는 직접 들어 보고 고른다.
 SERVER_VOICES = {
-    "Iapetus": "또렷함", "Erinome": "또렷함", "Charon": "정보 전달", "Rasalgethi": "정보 전달",
-    "Schedar": "고른 말투", "Kore": "단단함", "Sulafat": "따뜻함", "Achernar": "부드러움",
+    "Sulafat": "술라팟 · 따뜻함", "Iapetus": "또렷함", "Erinome": "또렷함", "Charon": "정보 전달", "Rasalgethi": "정보 전달",
+    "Schedar": "고른 말투", "Kore": "단단함", "Achernar": "부드러움",
 }
+# 운영자가 정한 기본값(2026-10-12): 서버 목소리를 쓸 수 있고 이용자가 아직 고르지 않았을 때 Sulafat, 속도 1.0배.
+# 이용자가 직접 고른 목소리·속도(브라우저 저장)는 그대로 쓴다. 음질·재생 확인 결과와는 별개의 선택이다.
+SERVER_DEFAULT_VOICE = "Sulafat"
+DEFAULT_SPEECH_RATE = 1.0
 SERVER_TTS_STYLE = ("Calm, clear and articulate Korean speech for a legal-information helper. "
                     "Pronounce names, dates, amounts of money and legal terms precisely, without rushing.")
 VOICE_PREVIEW_TEXT = "안녕하세요, 고소미예요. 홍길동 님, 2026년 10월 20일까지 45만 원 송금 내역과 고소장 사본을 준비해 주세요."
@@ -415,14 +419,21 @@ function koVoices() {
   return synth.getVoices().filter(v => v.localService && (v.lang || '').toLowerCase().replace('_', '-').startsWith('ko'));
 }
 
+// 이용자가 아직 목소리를 고르지 않았으면(저장값 없음) 운영자가 정한 기본 서버 목소리를 쓴다. 저장은 이용자가 고를 때만 한다.
+function chosenVoice(S) {
+  if (S.pref.voice) return S.pref.voice;
+  const def = S.defaultVoice && (S.serverVoices || []).some(v => v.id === S.defaultVoice) ? 'server:' + S.defaultVoice : '';
+  return def;
+}
+
 function serverVoice(S) {
-  const want = S.pref.voice || '';
+  const want = chosenVoice(S);
   if (!want.startsWith('server:')) return null;
   const id = want.slice(7);
   return (S.serverVoices || []).some(v => v.id === id) ? id : null;
 }
 
-function rate(S) { const r = Number(S.pref.rate); return r >= 0.7 && r <= 1.4 ? r : 1.0; }
+function rate(S) { const r = Number(S.pref.rate); return r >= 0.7 && r <= 1.4 ? r : (S.defaultRate || 1.0); }
 
 function fillSettings(S) {
   if (!S.el || !S.el.voice) return;
@@ -439,7 +450,8 @@ function fillSettings(S) {
   }
   const values = [...sel.options].map(o => o.value);
   const def = list.find(v => v.default) || list[0];
-  sel.value = values.includes(S.pref.voice) ? S.pref.voice : (def ? 'device:' + def.voiceURI : values[0]);
+  const want = chosenVoice(S);
+  sel.value = values.includes(want) ? want : (def ? 'device:' + def.voiceURI : values[0]);
   S.el.rate.value = String(rate(S));
   S.el.rateVal.textContent = rate(S).toFixed(2).replace(/0$/, '') + '배';
   const server = sel.value.startsWith('server:');
@@ -451,7 +463,7 @@ function fillSettings(S) {
 }
 
 function pickVoice(S) {
-  const list = koVoices(), want = S.pref.voice || '';
+  const list = koVoices(), want = chosenVoice(S);
   if (want.startsWith('device:')) { const found = list.find(v => v.voiceURI === want.slice(7)); if (found) return found; }
   return list.find(v => v.default) || list[0] || null;
 }
@@ -771,6 +783,8 @@ function build(S, root) {
 function applyData(S, data) {
   const reply = data && data.reply, notice = data && data.notice, preview = data && data.preview;
   const servers = (data && data.server_voices) || [];
+  if (data && data.default_voice !== undefined) S.defaultVoice = String(data.default_voice || '');
+  if (data && data.default_rate) S.defaultRate = Number(data.default_rate) || 1.0;
   if (JSON.stringify(servers) !== JSON.stringify(S.serverVoices || [])) { S.serverVoices = servers; fillSettings(S); }
   if (preview && preview.sid === S.sid && preview.n === S.previewN) {
     S.previewN = -1; fillSettings(S);

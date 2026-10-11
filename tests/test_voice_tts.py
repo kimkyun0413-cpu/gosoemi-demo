@@ -94,6 +94,15 @@ class HelperTest(unittest.TestCase):
         import json
         self.assertNotIn("UNKNOWN", json.dumps(c.tts_request("안녕", "Kore", "m")))
 
+    def test_operator_default_is_sulafat_at_normal_speed(self):
+        self.assertEqual(c.SERVER_DEFAULT_VOICE, "Sulafat")
+        self.assertIn(c.SERVER_DEFAULT_VOICE, c.SERVER_VOICES)
+        self.assertEqual(c.DEFAULT_SPEECH_RATE, 1.0)
+        js = c.VOICE_CHAT_JS
+        self.assertIn("if (S.pref.voice) return S.pref.voice;", js)       # 이용자가 고른 목소리가 먼저
+        self.assertIn("savePref(S)", js)
+        self.assertNotIn("S.pref.voice = 'server:' + S.defaultVoice", js)  # 기본값을 이용자 선택처럼 저장하지 않는다
+
     def test_component_keeps_safety_rules(self):
         js = c.VOICE_CHAT_JS
         self.assertIn("v.localService", js)                 # 기기 목소리는 기기 안 음성만
@@ -115,6 +124,8 @@ if call:
     st.session_state["_test_result"] = g[name](arg) if arg is not None else g[name]()
 st.session_state["_server_tts"] = g["server_tts_available"]()
 st.session_state["_preview_cache"] = dict(g["preview_audio_cache"]())
+_src = open({app!r}, encoding="utf-8").read()
+st.session_state["_default_voice"] = g["SERVER_DEFAULT_VOICE"] if g["server_tts_available"]() else ""
 """
 
 
@@ -182,6 +193,12 @@ class AppVoiceTest(unittest.TestCase):
         self.assertEqual(body["input"][0]["content"][0]["text"], reply["text"])
         self.assertEqual(len(at.session_state["chat_messages"]), 2)      # 앞선 대화 기억 유지
         self.assertEqual(len(fake.CALLS), 2)                               # 받아쓰기·답변은 그대로 2번
+
+    def test_default_voice_only_offered_when_server_voice_available(self):
+        at = self.start()
+        self.assertEqual(at.session_state["_default_voice"], "Sulafat")
+        off = self.start(VOICE_SERVER_TTS_ENABLED="false")
+        self.assertEqual(off.session_state["_default_voice"], "")
 
     def test_device_voice_sends_no_tts(self):
         fake.REPLIES[:] = ["질문", "답변입니다."]
