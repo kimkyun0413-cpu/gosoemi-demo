@@ -69,7 +69,7 @@ class FakeQuery:
             FAIL_NEXT.remove((self.table_name, self.op))
             raise RuntimeError("fake network error")
         if self.table_name == "consent_records" and self.op == "select":
-            return SimpleNamespace(data=[{"terms_version": "x"}])
+            return SimpleNamespace(data=[] if CONSENT_MISSING else [{"terms_version": "x"}])
         rows = TABLES.get(self.table_name)
         if rows is None:
             return SimpleNamespace(data=[])
@@ -167,6 +167,7 @@ class FakeSupabase:
         return FakeQuery(name)
 
     def rpc(self, name, params=None):
+        RPC_CALLS.append((name, params))
         return FakeQuery("rpc:" + name)
 
 
@@ -215,7 +216,14 @@ class FakeGenaiClient:
         self.models = _Models()
 
 
+CONSENT_MISSING = False   # True면 현재 버전 동의가 없는 것처럼(동의 화면 시험)
+RPC_CALLS = []
+
+
 def reset():
+    global CONSENT_MISSING
+    CONSENT_MISSING = False
+    RPC_CALLS.clear()
     TTS_CALLS.clear()
     TTS_REPLIES.clear()
     CALLS.clear()

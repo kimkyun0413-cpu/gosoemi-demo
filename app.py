@@ -114,7 +114,20 @@ PRIVACY_POLICY_ENABLED = os.environ.get("PRIVACY_POLICY_ENABLED") == "true"
 PRIVACY_OPERATOR_NAME = os.environ.get("PRIVACY_OPERATOR_NAME")
 PRIVACY_CONTACT_EMAIL = os.environ.get("PRIVACY_CONTACT_EMAIL")
 PRIVACY_POLICY_EFFECTIVE_DATE = (os.environ.get("PRIVACY_POLICY_EFFECTIVE_DATE") or "").strip() or None
-TERMS_EFFECTIVE_DATE = "2026-09-15"
+# 이용 연령. 기본은 만 14세(지금 시행 중인 약관). 만 18세 기준(Gemini API 이용 조건)은 운영자가
+# MIN_USER_AGE="18"과 새 약관 시행일 TERMS_EFFECTIVE_DATE_V2를 함께 설정할 때만 적용한다(수정안, 2026-10-12 준비).
+# 새 약관 버전을 기록하려면 DB 함수 record_consent도 바꿔야 한다(supabase/proposals/age18/, 미적용).
+_MIN_AGE_SETTING = os.environ.get("MIN_USER_AGE", "14").strip()
+_TERMS_V2_DATE = (os.environ.get("TERMS_EFFECTIVE_DATE_V2") or "").strip()
+MIN_USER_AGE = 18 if _MIN_AGE_SETTING == "18" and re.fullmatch(r"\d{4}-\d{2}-\d{2}", _TERMS_V2_DATE) else 14
+if _MIN_AGE_SETTING == "18" and MIN_USER_AGE != 18:
+    print("[config] MIN_USER_AGE=18 needs TERMS_EFFECTIVE_DATE_V2 (YYYY-MM-DD); keeping 14", flush=True)
+TERMS_EFFECTIVE_DATE = _TERMS_V2_DATE if MIN_USER_AGE == 18 else "2026-09-15"
+
+
+def age_text(text: str) -> str:
+    """화면 문구의 '만 14세'를 지금 이용 연령으로 바꾼다(기본 14세면 그대로)."""
+    return text.replace("만 14세", f"만 {MIN_USER_AGE}세") if MIN_USER_AGE != 14 else text
 # 개정 예정인 개인정보처리방침 시행일(예: "2026-10-13"). 설정하면 시행 전까지 화면 위에 미리 알린다.
 PRIVACY_POLICY_UPCOMING_DATE = (os.environ.get("PRIVACY_POLICY_UPCOMING_DATE") or "").strip() or None
 
@@ -189,7 +202,7 @@ GOOGLE_ERROR_MESSAGES = {
 KST = datetime.timezone(datetime.timedelta(hours=9), "Asia/Seoul")
 # 소셜 로그인 사용자의 만 14세 이상 확인 시각을 저장하는 user_metadata 키 (Google 전용, 네이버는 별도 테이블 사용)
 SOCIAL_AGE_CONFIRMED_KEY = "age_14_confirmed_at"
-SOCIAL_LOGIN_NOTICE = (
+SOCIAL_LOGIN_NOTICE = age_text(
     "소셜 계정으로 처음 로그인하시면 만 14세 이상 확인과 이용약관·개인정보 수집·이용 동의를 마친 뒤 "
     "서비스를 이용할 수 있습니다. 제공받는 정보는 개인정보처리방침에서 확인할 수 있습니다."
 )
@@ -1543,6 +1556,19 @@ class AiUsageLimitError(RuntimeError):
     pass
 
 
+class AiPausedError(AiUsageLimitError):
+    """운영자가 AI 기능을 잠시 멈춘 상태(AI_FEATURES_PAUSED). 사용량 초과와 같은 경로로 화면에 그대로 안내한다."""
+
+
+# 운영자가 AI 기능(상담·초안·음성 받아쓰기·정리·요약·표현 바꾸기·서버 목소리)을 잠시 멈추는 설정.
+# 예: Gemini를 유료 등급으로 바꾸기 전, 방침과 실제 처리가 다른 동안. 사건 저장·내 사건·내려받기는 그대로 쓴다.
+AI_FEATURES_PAUSED = os.environ.get("AI_FEATURES_PAUSED") == "true"
+AI_PAUSED_MESSAGE = (
+    "AI 기능(상담·초안 만들기·음성)을 잠시 멈췄어요. 개인정보 처리 방식을 점검하는 중이에요. "
+    "적은 사건 내용 저장, 내 사건 보기, 내려받기는 그대로 쓸 수 있어요."
+)
+
+
 class AiUsageLimiter:
     """서버 메모리에 계정별 최근 1시간 호출 시각을 둔다. 앱이 다시 시작되면 초기화된다."""
 
@@ -1574,7 +1600,9 @@ def get_ai_usage_limiter() -> AiUsageLimiter:
 
 
 def reserve_ai_call() -> None:
-    """계정별·전체 1시간 호출 한도를 하나 쓴다. 넘으면 AiUsageLimitError."""
+    """계정별·전체 1시간 호출 한도를 하나 쓴다. 넘으면 AiUsageLimitError. AI를 멈춘 동안에는 AiPausedError."""
+    if AI_FEATURES_PAUSED:
+        raise AiPausedError(AI_PAUSED_MESSAGE)
     session = st.session_state.get("supabase_session") or {}
     limiter = get_ai_usage_limiter()
     if not limiter.allow(session.get("user_id", ""), AI_CALLS_PER_HOUR):
@@ -2018,7 +2046,7 @@ def build_privacy_policy_text():
     effective_date = parse_privacy_effective_date()
     args = (PRIVACY_OPERATOR_NAME, PRIVACY_CONTACT_EMAIL, PRIVACY_POLICY_EFFECTIVE_DATE)
     if effective_date and effective_date >= PRIVACY_V3_REVISED_DATE:
-        return build_privacy_policy_v3(*args)
+        return build_privacy_policy_v3(*args, min_age=MIN_USER_AGE)
     return build_privacy_policy_v2(*args)
 
 
@@ -2030,7 +2058,24 @@ def render_privacy_policy_dialog():
         st.markdown(build_privacy_policy_text())
 
 
+TERMS_AGE18_CLAUSE = (
+    "서비스는 만 18세 이상만 이용할 수 있습니다. 서비스의 AI 기능에 쓰는 Google Gemini API의 이용 조건(18세 이상, "
+    "18세 미만이 이용할 서비스에서 사용 금지)에 따른 것입니다. 만 18세 미만인 경우 회원가입 및 서비스 이용이 제한됩니다.\n"
+    "이 기준을 시행하기 전에 가입한 이용자는 다음 이용 때 만 18세 이상인지 다시 확인합니다. 확인하지 않으면 서비스를 이용할 수 "
+    "없으며, 이때에도 운영자는 계정과 저장한 자료를 임의로 삭제하지 않고, 이용자는 언제든지 직접 탈퇴해 모두 삭제할 수 있습니다."
+)
+
+
 def build_terms_of_service_text():
+    """이용약관. 기본(만 14세)은 2026-09-15 시행본과 똑같은 문구이고, 만 18세 기준이면 연령 조항만 바꾼 새 버전이다."""
+    text = _terms_of_service_v1()
+    if MIN_USER_AGE == 18:
+        text = text.replace("서비스는 만 14세 이상만 이용할 수 있습니다. 만 14세 미만인 경우 회원가입 및 서비스 이용이 제한됩니다.",
+                            TERMS_AGE18_CLAUSE)
+    return text
+
+
+def _terms_of_service_v1():
     return f"""
 ### 이용약관
 
@@ -2258,7 +2303,8 @@ def render_upcoming_privacy_notice() -> None:
             "시행일 이후 처음 이용하실 때 바뀐 방침에 다시 동의해 주셔야 합니다. 동의하지 않으시면 회원탈퇴할 수 있습니다."
         )
         st.markdown("**바뀐 개인정보처리방침 전문**")
-        st.markdown(build_privacy_policy_v3(PRIVACY_OPERATOR_NAME, PRIVACY_CONTACT_EMAIL, upcoming.isoformat()))
+        st.markdown(build_privacy_policy_v3(PRIVACY_OPERATOR_NAME, PRIVACY_CONTACT_EMAIL, upcoming.isoformat(),
+                                            min_age=MIN_USER_AGE))
 
 
 def render_footer():
@@ -3363,14 +3409,14 @@ def render_social_login_section(key_suffix: str) -> None:
 
 def render_google_age_gate():
     st.markdown(
-        "**만 14세 이상 확인**\n\n"
-        "고소미는 만 14세 이상만 이용할 수 있습니다. "
-        "Google 계정으로 처음 이용하시는 경우 아래 확인이 필요합니다."
+        age_text("**만 14세 이상 확인**\n\n"
+                 "고소미는 만 14세 이상만 이용할 수 있습니다. "
+                 "Google 계정으로 처음 이용하시는 경우 아래 확인이 필요합니다.")
     )
-    google_age_consent = st.checkbox("[필수] 만 14세 이상입니다.", key="google_age_consent")
+    google_age_consent = st.checkbox(age_text("[필수] 만 14세 이상입니다."), key="google_age_consent")
     if st.button("확인하고 계속하기", key="google_age_submit"):
         if not google_age_consent:
-            st.error("만 14세 이상인 경우에만 서비스를 이용할 수 있습니다.")
+            st.error(age_text("만 14세 이상인 경우에만 서비스를 이용할 수 있습니다."))
         else:
             try:
                 confirm_google_age()
@@ -3391,14 +3437,14 @@ def render_naver_age_gate(status_error: bool):
         st.error("계정 정보를 확인하지 못했습니다. 새로고침해 보시고, 계속되면 로그아웃 후 다시 로그인해 주세요.")
     else:
         st.markdown(
-            "**만 14세 이상 확인**\n\n"
-            "고소미는 만 14세 이상만 이용할 수 있습니다. "
-            "네이버 계정으로 처음 이용하시는 경우 아래 확인이 필요합니다."
+            age_text("**만 14세 이상 확인**\n\n"
+                     "고소미는 만 14세 이상만 이용할 수 있습니다. "
+                     "네이버 계정으로 처음 이용하시는 경우 아래 확인이 필요합니다.")
         )
-        naver_age_consent = st.checkbox("[필수] 만 14세 이상입니다.", key="naver_age_consent")
+        naver_age_consent = st.checkbox(age_text("[필수] 만 14세 이상입니다."), key="naver_age_consent")
         if st.button("확인하고 계속하기", key="naver_age_submit"):
             if not naver_age_consent:
-                st.error("만 14세 이상인 경우에만 서비스를 이용할 수 있습니다.")
+                st.error(age_text("만 14세 이상인 경우에만 서비스를 이용할 수 있습니다."))
             else:
                 try:
                     confirmed = get_authed_client().rpc("naver_confirm_age").execute().data is True
@@ -3645,7 +3691,7 @@ if not st.session_state.supabase_session:
                         "[필수] 이용약관에 동의합니다.",
                         key="signup_terms_consent",
                     )
-                    signup_age_consent = st.checkbox("[필수] 만 14세 이상입니다.", key="signup_age_consent")
+                    signup_age_consent = st.checkbox(age_text("[필수] 만 14세 이상입니다."), key="signup_age_consent")
                     signup_submitted = st.form_submit_button("회원가입", type="primary", width="stretch")
 
                 if signup_submitted:
@@ -3655,7 +3701,7 @@ if not st.session_state.supabase_session:
                             "이용하실 수 없습니다. 잠시 후 다시 시도해 주세요."
                         )
                     elif not (signup_privacy_consent and signup_terms_consent and signup_age_consent):
-                        st.error("회원가입을 진행하려면 이용약관 동의, 개인정보 수집·이용 동의, 만 14세 이상 확인에 모두 체크해 주세요.")
+                        st.error(age_text("회원가입을 진행하려면 이용약관 동의, 개인정보 수집·이용 동의, 만 14세 이상 확인에 모두 체크해 주세요."))
                     elif len(signup_password) < 6:
                         st.error("비밀번호는 6자 이상 입력해 주세요.")
                     elif signup_password != signup_password_confirm:
@@ -3738,6 +3784,29 @@ if consent_status is None:
         perform_logout()
     render_footer()
     st.stop()
+if not consent_status and MIN_USER_AGE == 18 and st.session_state.get("under_age_declared"):
+    # 만 18세 미만이라고 한 경우: 서비스는 쓸 수 없지만 계정·자료는 지우지 않는다. 직접 탈퇴만 안내한다.
+    render_brand_header()
+    st.markdown("### 만 18세 이상만 이용할 수 있어요")
+    st.markdown(
+        "고소미의 AI 기능에 쓰는 Google Gemini의 이용 조건 때문에 만 18세 미만은 이용할 수 없게 되었습니다.\n\n"
+        "- 계정과 저장한 사건·자료는 **운영자가 임의로 지우지 않습니다.**\n"
+        "- 모두 지우려면 아래 '회원탈퇴'를 눌러 주세요. 지울 내용을 한 번 더 보여 드려요.\n"
+        "- 잘못 누르셨다면 '다시 확인하기'를 눌러 주세요."
+        + (f"\n- 문의: {md_escape(PRIVACY_CONTACT_EMAIL)}" if PRIVACY_CONTACT_EMAIL else "")
+    )
+    col_back, col_out = st.columns(2)
+    with col_back:
+        if st.button("다시 확인하기", key="under_age_back", width="stretch"):
+            st.session_state.under_age_declared = False
+            st.rerun()
+    with col_out:
+        if st.button("로그아웃", key="under_age_logout", width="stretch"):
+            perform_logout()
+    if st.button("회원탈퇴", key="delete_account_main", type="secondary", icon=":material/person_remove:"):
+        render_delete_account_dialog()
+    render_footer()
+    st.stop()
 if not consent_status:
     render_brand_header()
     consent_identity, consent_method = current_account_label(st.session_state.supabase_session)
@@ -3749,8 +3818,13 @@ if not consent_status:
     st.markdown(build_privacy_policy_text())
     reconsent_terms = st.checkbox("[필수] 이용약관에 동의합니다.", key="reconsent_terms")
     reconsent_privacy = st.checkbox("[필수] 개인정보 수집·이용에 동의합니다.", key="reconsent_privacy")
+    if MIN_USER_AGE == 18:
+        # 이 기준 시행 전에 가입한 이용자도 여기서 만 18세 이상인지 다시 확인한다(새 약관 동의와 함께 기록).
+        reconsent_age = st.checkbox("[필수] 만 18세 이상입니다.", key="reconsent_age")
+    else:
+        reconsent_age = True
     if st.button("동의하고 계속하기", key="reconsent_submit"):
-        if reconsent_terms and reconsent_privacy:
+        if reconsent_terms and reconsent_privacy and reconsent_age:
             try:
                 get_authed_client().rpc(
                     "record_consent",
@@ -3773,7 +3847,11 @@ if not consent_status:
                     f"계속되면 운영자에게 이 오류 코드를 알려 주세요: {error_code}" + contact_hint()
                 )
         else:
-            st.error("계속하려면 이용약관과 개인정보 수집·이용 두 곳에 모두 체크해 주세요.")
+            st.error("계속하려면 이용약관과 개인정보 수집·이용 두 곳에 모두 체크해 주세요."
+                     if MIN_USER_AGE != 18 else "계속하려면 이용약관, 개인정보 수집·이용, 만 18세 이상 확인에 모두 체크해 주세요.")
+    if MIN_USER_AGE == 18 and st.button("만 18세 미만입니다", key="reconsent_under_age"):
+        st.session_state.under_age_declared = True
+        st.rerun()
     if st.button("동의하지 않고 로그아웃", key="reconsent_logout_btn"):
         perform_logout()
     render_footer()
@@ -4280,6 +4358,8 @@ def render_pending_draft() -> None:
 
 def render_case_page() -> None:
     st.markdown("## 고소장 작성하기")
+    if AI_FEATURES_PAUSED:
+        st.info(AI_PAUSED_MESSAGE + " 사건을 저장해 두면 AI가 다시 열린 뒤 '내 사건'에서 초안을 만들 수 있어요.")
     review = st.session_state.get("case_review")
     pending = st.session_state.pending_draft_entry
     has_draft = bool(st.session_state.case_draft) and not pending
@@ -5343,6 +5423,8 @@ def render_public_chat() -> None:
 
 def render_chat_page() -> None:
     st.markdown("## AI에게 질문하기")
+    if AI_FEATURES_PAUSED:
+        st.info(AI_PAUSED_MESSAGE)
     if chat_v2_available():
         render_chat_v2()
     else:
