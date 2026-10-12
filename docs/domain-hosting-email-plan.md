@@ -28,7 +28,9 @@
 | C. Google Cloud Run(서울 리전) | 사용량 과금(초 단위, 서울은 별도 단가 — 가입 전 [요금](https://cloud.google.com/run/pricing) 확인) | Claude 2~3일 | 서버가 서울에 있음 | 연결 유지(WebSocket)가 '최선 노력'이고 최대 요청 시간 제한이 있어 Streamlit 화면이 끊길 수 있음([WebSockets](https://docs.cloud.google.com/run/docs/triggering/websockets)) — 설정·시험이 더 필요 |
 | (무료 단계) Render Free | 0원 | — | — | 15분 접속이 없으면 꺼지고 Render가 **운영용으로 쓰지 말라**고 안내([Free](https://render.com/docs/free)) → 제외 |
 
-**추천:**
+> **2026-10-13 갱신:** Render $25안은 확정하지 않았습니다. 더 저렴한 후보(Fly.io, AWS Lightsail 서울 등), 메모리 측정, 월/연 비용, 무료 시험에도 약관이 해당하는지는 [hosting-cost-comparison.md](hosting-cost-comparison.md)를 보세요. 아래는 처음 정리한 안입니다.
+
+**처음 추천(갱신 전):**
 1. **지금(무료 시험 운영):** 안 A. 도메인을 사면 '포워딩'으로 지금 주소로만 이동시키고, 앱·로그인 설정은 그대로 둡니다. (원하면 도메인은 메일용으로만 먼저 써도 됩니다.)
 2. **유료 판매 전:** 안 B(Render Standard, 싱가포르)로 옮기고 `app.gosomiapp.com`(또는 gosomiapp.com)을 직접 연결. 옮기기 전에 방침의 위탁·국외 이전 표(Streamlit/Snowflake → Render)를 고치고 시행 절차를 거쳐야 합니다. Render와의 계약·결제는 운영자 승인 후.
 - 어떤 안이든 **DB(Supabase, 서울)·AI(Gemini)는 그대로**입니다. 옮기는 것은 화면을 돌리는 서버뿐입니다.
