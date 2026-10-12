@@ -284,14 +284,14 @@ class AppExportTest(unittest.TestCase):
         self.assertNotIn("_my_export_part_account", at.session_state)
 
     def test_only_one_evidence_part_is_kept_in_memory(self):
+        # app.py가 실행마다 data_export를 다시 불러오므로 상수를 바꾸지 않고 실제 크기(묶음 약 20MB)로 시험한다.
         for i in range(5):
-            fake.FILES[f"{fake.USER_ID}/{C1}/{i + 3}_big.bin"] = bytes([i]) * 3000
-        with mock.patch("data_export.EVIDENCE_PART_MAX_BYTES", 7000):
-            at = self.start()
-            at.button(key="export_prepare_account").click().run()
-            result = at.session_state["_my_export_account"]
-            self.assertGreaterEqual(len(result["parts"]), 3)
-            zips = self.download_all(at)
+            fake.FILES[f"{fake.USER_ID}/{C1}/{i + 3}_big.bin"] = bytes([i]) * (9 * 1024 * 1024)
+        at = self.start()
+        at.button(key="export_prepare_account").click().run()
+        result = at.session_state["_my_export_account"]
+        self.assertGreaterEqual(len(result["parts"]), 3)
+        zips = self.download_all(at)
         self.assertNotIn("data", str(result["parts"]))                    # 계획에는 파일 내용이 없음
         current = at.session_state["_my_export_part_account"]                # 마지막에 만든 묶음 하나만 남음
         self.assertEqual((set(current), current["no"]), ({"no", "data"}, 1 + len(result["parts"])))
