@@ -98,4 +98,4 @@
 - 화면·약관: `app.py`(`MIN_USER_AGE`, `TERMS_AGE18_CLAUSE`, `render_restricted_screen`, `render_upcoming_age_notice`, 동의 화면, Google·네이버 첫 확인)
 - 방침: `policy_text.py`(`build_privacy_policy_v3(..., min_age)`) · 검토 자료: `scripts/build_privacy_review_packet.py` → `docs/privacy-review-packet.md`
 - DB 수정안: `supabase/proposals/age18/`(전환·새 버전만·되돌리기) · 시험: `tests/test_age_and_ai_pause.py`, `tests/test_data_export.py`, `supabase/tests/local_age18_consent_test.py`
-- 내 자료 모두 내려받기 운영 확인 기록: [launch-status.md](launch-status.md) 2026-10-13 (동의 기록·증거 이미지 포함 확인, 나눠 받기·200MB 상한·이 제한 화면은 운영 미확인)
+- 내 자료 모두 내려받기 운영 확인 기록: [launch-status.md](launch-status.md) 2026-10-13 (묶음 방식으로 바뀐 뒤 1·2번 묶음과 시험 이미지 운영 확인, 작은 자료 기준. 대용량·동시 내려받기·이 제한 화면은 운영 미확인)
