@@ -137,7 +137,7 @@ class Age18FlowTest(Base):
         at.button(key="reconsent_decline").click().run()
         self.assert_restricted(at, "바뀐 약관에 동의해야 이용할 수 있어요")
         at.button(key="export_prepare_under_age").click().run()                 # 본인 자료 내려받기는 됨
-        self.assertTrue(at.session_state["_my_export_under_age"]["parts"])
+        self.assertTrue(at.session_state["_my_export_under_age"]["text_part"])
         at.button(key="under_age_back").click().run()                           # 마음을 바꾸면 동의 화면으로
         self.assertTrue(any(b.key == "reconsent_submit" for b in at.button))
 

@@ -63,7 +63,8 @@ from chat_assistant import (
     normalize_question, question_digest, speech_text, system_instruction as chat_system_instruction, user_statements,
     voice_system_instruction, SUMMARY_FAILED, SUMMARY_MIN_CHARS, clean_summary, summary_prompt, summary_supported,
 )
-from data_export import EXPORT_PART_MAX_BYTES, EXPORT_TOTAL_MAX_BYTES, NOT_INCLUDED_NOTE, build_export, evidence_summary_text
+from data_export import (EVIDENCE_PART_MAX_BYTES, NOT_INCLUDED_NOTE, build_evidence_part, build_text_part,
+                         evidence_summary_text)
 from case_workspace import (
     STYLES, UNKNOWN, build_timeline, bundle_docx, bundle_text, draft_check_items, evidence_items, inconsistencies,
     link_issues, missing_questions, next_action, rewrite_changes, rewrite_prompt, suggestion_for, unknown_items,
@@ -565,6 +566,9 @@ def clear_user_session_data() -> None:
     # 만 18세 기준: '18세 미만'·'동의하지 않음'은 이 계정·이 탭에서만 기억한다(다음 이용자에게 넘어가지 않게).
     st.session_state.pop("under_age_declared", None)
     st.session_state.pop("consent_declined", None)
+    # '내 자료 모두 내려받기'로 준비한 파일(개인정보)은 로그아웃·계정 변경 때 바로 지운다.
+    for export_key in [k for k in st.session_state if str(k).startswith("_my_export")]:
+        st.session_state.pop(export_key, None)
     # 서버 업로드 저장소의 녹음(사건 음성 입력)은 위젯 상태를 지우기 전에 파일 ID로 지운다.
     # 음성 대화의 녹음은 업로드 저장소를 거치지 않고, 처리한 요청 안에서만 쓴다.
     purge_session_audio()
@@ -1564,35 +1568,36 @@ def collect_my_data() -> dict:
                     .eq("user_id", user_id).execute(), optional_table=True)
     consents = [{**row, "created_at": next((row[k] for k in CONSENT_TIME_KEYS if row.get(k)), row.get("created_at"))}
                 for row in fetch_consents()]
-    files, total = [], 0
+    evidence_items = []
     evidence = {"checked": 0, "failed": 0}
     for case in cases:
         case_id = str(case.get("case_id"))
         label = f"사건 '{(case.get('case_type') or '유형 미입력')[:20]}'({_short_date(case.get('created_at'))})"
         try:
-            items = list_case_evidence(case_id)
+            items = list_case_evidence(case_id)       # 목록만 읽는다. 파일 내용은 묶음을 만들 때 받는다.
         except Exception as error:
             print(f"[export] stage=evidence_list result={type(error).__name__} code={_error_code(error)}", flush=True)
             missing.append(f"{label}의 증거파일 목록을 불러오지 못했습니다(파일이 있는지 확인하지 못함)")
             evidence["failed"] += 1
             continue
         evidence["checked"] += 1
-        for item in items:
-            if total + int(item.get("size") or 0) > EXPORT_TOTAL_MAX_BYTES:
-                missing.append(f"{label}의 증거파일 '{item['display_name']}' — 전체 용량이 커서(약 "
-                               f"{EXPORT_TOTAL_MAX_BYTES // (1024 * 1024)}MB 넘음) 이번에 담지 못했습니다. "
-                               "사건 화면의 '증거파일 첨부·관리'에서 하나씩 받을 수 있어요")
-                continue
-            try:
-                data = download_case_evidence(item["path"])
-                total += len(data)
-                files.append({"case_id": case_id, "path": item["path"], "name": item["display_name"], "data": data})
-            except Exception as error:
-                print(f"[export] stage=evidence_file result={type(error).__name__}", flush=True)
-                missing.append(f"{label}의 증거파일 '{item['display_name']}'을(를) 받지 못했습니다")
+        evidence_items += [{"case_id": case_id, "path": item["path"], "name": item["display_name"], "size": item.get("size")}
+                           for item in items]
     account = {"email": session.get("email"), "method": current_account_label(session)[1]}
-    return build_export(user_id, account, cases, {r["case_id"]: r for r in draft_rows}, {r["case_id"]: r for r in ws_rows},
-                        consents, files, missing, datetime.datetime.now(KST), evidence_status=evidence)
+    result = build_text_part(user_id, account, cases, {r["case_id"]: r for r in draft_rows}, {r["case_id"]: r for r in ws_rows},
+                             consents, evidence_items, missing, datetime.datetime.now(KST), evidence_status=evidence)
+    result["user_id"] = user_id
+    return result
+
+
+def build_my_evidence_part(result: dict, index: int) -> dict:
+    """증거파일 묶음 하나만 만든다(이 묶음의 파일만 받아 ZIP으로). 다른 묶음은 메모리에 두지 않는다."""
+    session = ensure_active_session() or st.session_state.get("supabase_session") or {}
+    if session.get("user_id") != result.get("user_id"):
+        raise RuntimeError("다른 계정의 준비 자료입니다.")
+    total = 1 + len(result["parts"])
+    return build_evidence_part(result["user_id"], result["root"], result["parts"][index], index + 2, total,
+                               download_case_evidence, datetime.datetime.now(KST))
 
 
 def _short_date(value) -> str:
@@ -1600,45 +1605,95 @@ def _short_date(value) -> str:
 
 
 def render_my_data_export(key: str) -> None:
-    """내 자료 모두 내려받기(내 계정, 18세 미만 안내 화면에서 함께 쓴다)."""
+    """내 자료 모두 내려받기(내 계정, 이용 제한 화면에서 함께 쓴다).
+    1번 묶음(글 자료·증거파일 목록)을 먼저 받고, 증거파일은 약 20MB씩 묶음을 하나씩 만들어 받는다(서버 메모리 보호)."""
     st.markdown("### 내 자료 모두 내려받기")
     st.caption("저장한 사건 내용, 저장된 초안, 사건 정리(경위·증거 설명·일정·체크리스트), 증거파일, 동의 기록을 "
                "사건별 폴더로 정리한 ZIP 파일로 받아요. " + NOT_INCLUDED_NOTE.replace("\n", " "))
-    state_key = f"_my_export_{key}"
+    state_key, part_key = f"_my_export_{key}", f"_my_export_part_{key}"
     if st.button("내 자료 모두 내려받기", key=f"export_prepare_{key}", icon=":material/download:", type="secondary"):
+        st.session_state.pop(part_key, None)
+        st.session_state.pop(f"_my_export_request_{key}", None)
         try:
-            with st.spinner("내 자료를 모으고 있어요. 증거파일이 많으면 조금 걸려요."):
-                st.session_state[state_key] = collect_my_data()
+            with st.spinner("내 자료를 모으고 있어요."):
+                result = collect_my_data()
+                result["part_results"] = {}
+                st.session_state[state_key] = result
         except Exception as error:
             log_auth_error(error)
             st.session_state.pop(state_key, None)
             st.error("자료를 모으지 못했어요. 잠시 후 다시 눌러 주세요. 계속되면 다시 로그인해 주세요." + contact_hint())
     result = st.session_state.get(state_key)
+    if result and result.get("user_id") != (st.session_state.get("supabase_session") or {}).get("user_id"):
+        st.session_state.pop(state_key, None)              # 다른 계정이 준비한 자료는 보여 주지 않는다
+        st.session_state.pop(part_key, None)
+        result = None
     if not result:
         return
-    summary = result["summary"]
-    parts = result["parts"]
+    summary, parts, done = result["summary"], result["parts"], result["part_results"]
+    downloaded = result.setdefault("downloaded", set())
+    total = 1 + len(parts)
+    # 묶음 만들기 요청은 화면을 그리기 전에 처리한다. 그래야 앞 묶음의 내려받기 버튼이 다시 그려지지 않아
+    # Streamlit이 앞 묶음 파일을 바로 정리하고, 메모리에는 지금 묶음 하나만 남는다.
+    requested = st.session_state.pop(f"_my_export_request_{key}", None)
+    if requested:
+        st.session_state.pop(part_key, None)
+        index, no = requested - 2, requested
+        try:
+            with st.spinner(f"{no}번 묶음을 만들고 있어요."):
+                built = build_my_evidence_part(result, index)
+            done[no] = built["missing"]
+            st.session_state[part_key] = {"no": no, "data": built["data"]}
+        except Exception as error:
+            log_auth_error(error)
+            done[no] = [f"{no}번 묶음을 만들지 못했습니다(다시 눌러 주세요)"]
+    current = st.session_state.get(part_key)
     text = (f"사건 {summary['cases']}건, 저장된 초안 {summary['drafts']}개, 사건 정리 {summary['workspaces']}개, "
             f"{evidence_summary_text(summary)}")
-    if result["complete"]:
-        st.success(f"내려받을 준비가 됐어요: {text}.")
-    else:
-        st.warning(f"**일부 자료를 담지 못했어요.** 담은 것: {text}.\n\n받지 못한 자료:\n"
-                   + "\n".join(f"- {md_escape(item)}" for item in result["missing"])
+    part_missing = [m for no in sorted(done) for m in done[no]]
+    all_missing = result["missing"] + part_missing
+    if all_missing:
+        st.warning(f"**일부 자료를 담지 못했어요.** {text}.\n\n받지 못한 자료:\n"
+                   + "\n".join(f"- {md_escape(item)}" for item in all_missing)
                    + "\n\n잠시 후 다시 눌러 보시고, 계속되면 문의해 주세요.")
-    if len(parts) > 1:
-        st.caption(f"증거파일이 많아 {len(parts)}개 묶음으로 나눴어요(묶음마다 최대 약 {EXPORT_PART_MAX_BYTES // (1024 * 1024)}MB). "
-                   "모든 묶음을 받아 주세요. 사건 내용·초안·기록은 1번 묶음에 있어요.")
-    for no, data in enumerate(parts, 1):
-        suffix = f"_{no}of{len(parts)}" if len(parts) > 1 else ""
-        st.download_button(
-            f"ZIP 내려받기{f' ({no}/{len(parts)})' if len(parts) > 1 else ''} · {max(1, len(data) // 1024)}KB",
-            data=data, file_name=f"{result['root']}{suffix}.zip", mime="application/zip",
-            key=f"export_download_{key}_{no}", width="stretch", type="primary", icon=":material/download:",
-        )
+    elif len(done) == len(parts):
+        st.success(f"모든 묶음을 빠짐없이 만들었어요: {text}." + (" 묶음마다 내려받았는지 확인해 주세요." if parts else ""))
+    else:
+        st.info(f"{text}. 증거파일은 {len(parts)}개 묶음으로 나눠 받아요. 아래에서 묶음을 하나씩 만들어 받아 주세요.")
+    st.download_button(
+        f"1번 묶음 받기 (글 자료·증거파일 목록) · {max(1, len(result['text_part']) // 1024)}KB",
+        data=result["text_part"], file_name=f"{result['root']}_1of{total}.zip" if parts else f"{result['root']}.zip",
+        mime="application/zip", key=f"export_download_{key}_1", width="stretch", type="primary", icon=":material/download:",
+    )
+    if parts:
+        st.caption(f"증거파일은 묶음마다 최대 약 {EVIDENCE_PART_MAX_BYTES // (1024 * 1024)}MB예요. 묶음을 만들어 받으면 서버에서 바로 지우고, "
+                   "다음 묶음을 만들 수 있어요. 받은 묶음은 모두 같은 폴더에 풀어 주세요.")
+
+    def request_part(no: int) -> None:
+        st.session_state[f"_my_export_request_{key}"] = no
+
+    def part_downloaded(no: int) -> None:
+        downloaded.add(no)
+        st.session_state.pop(part_key, None)           # 받은 묶음은 서버 메모리에서 바로 뺀다
+
+    for index, part in enumerate(parts):
+        no = index + 2
+        size = sum(int(i.get("size") or 0) for i in part)
+        status = (f" · {len(done[no])}개 받지 못함" if done.get(no) else " · 받음" if no in downloaded
+                  else " · 만들었음" if no in done else "")
+        st.button(f"{no}번 묶음 만들기 (증거파일 {len(part)}개 · 약 {max(1, size // (1024 * 1024))}MB){status}",
+                  key=f"export_part_{key}_{no}", width="stretch", on_click=request_part, args=(no,))
+        if current and current["no"] == no:
+            st.download_button(
+                f"{no}번 묶음 받기 · {max(1, len(current['data']) // 1024)}KB", data=current["data"],
+                file_name=f"{result['root']}_{no}of{total}.zip", mime="application/zip",
+                key=f"export_download_{key}_{no}", width="stretch", type="primary", icon=":material/download:",
+                on_click=part_downloaded, args=(no,),
+            )
     st.caption("이 파일에는 개인정보가 들어 있어요. 공용 컴퓨터라면 받은 뒤 지워 주세요.")
     if st.button("준비한 파일 지우기", key=f"export_clear_{key}", type="tertiary"):
         st.session_state.pop(state_key, None)
+        st.session_state.pop(part_key, None)
         st.rerun()
 
 
