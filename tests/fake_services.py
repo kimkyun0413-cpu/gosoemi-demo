@@ -32,6 +32,15 @@ def session_for(user_id: str, email: str) -> dict:
 
 TABLES = {"cases": CASES, "case_workspace": [], "case_drafts": []}
 FAIL_NEXT = []  # 다음 요청을 실패시킬 (표, 동작) 목록. 예: [("case_workspace", "update")]
+# 가짜 consent_records에 있는 열. 운영처럼 '동의한 때' 열이 없다고 두고, 없는 열을 고르면 PostgREST처럼 42703 오류를 낸다.
+CONSENT_COLUMNS = ("user_id", "terms_version", "privacy_version")
+CONSENT_STAR_DENIED = [False]  # True면 select("*")를 열 권한 오류(42501)로 막는다
+
+
+class FakeAPIError(Exception):
+    def __init__(self, message, code):
+        super().__init__(message)
+        self.message, self.code = message, code
 _CLOCK = [0]
 
 
@@ -58,6 +67,8 @@ class FakeQuery:
                 WRITES.append((self.table_name, name, args))
             if name == "eq" and len(args) == 2:
                 self.filters[args[0]] = str(args[1])
+            if name == "select":
+                self.columns = [c.strip() for c in (args[0] if args else "*").split(",")]
             return self
         return method
 
@@ -69,7 +80,14 @@ class FakeQuery:
             FAIL_NEXT.remove((self.table_name, self.op))
             raise RuntimeError("fake network error")
         if self.table_name == "consent_records" and self.op == "select":
-            return SimpleNamespace(data=[] if CONSENT_MISSING else [{"terms_version": "x"}])
+            columns = getattr(self, "columns", ["*"])
+            if columns == ["*"] and CONSENT_STAR_DENIED[0]:
+                raise FakeAPIError("permission denied for table consent_records", "42501")
+            for column in columns:
+                if column != "*" and column not in CONSENT_COLUMNS:
+                    raise FakeAPIError(f"column consent_records.{column} does not exist", "42703")
+            row = {"user_id": self.filters.get("user_id", USER_ID), "terms_version": "x", "privacy_version": "2026-09-27"}
+            return SimpleNamespace(data=[] if CONSENT_MISSING else [row])
         rows = TABLES.get(self.table_name)
         if rows is None:
             return SimpleNamespace(data=[])
@@ -131,10 +149,13 @@ class FakeAuth:
 
 FILES = {}  # 가짜 파일 저장소 {경로: 바이트}
 DOWNLOAD_FAIL = set()  # 내려받기에 실패할 파일 경로
+LIST_FAIL = set()  # 목록 조회에 실패할 폴더(사용자ID/사건ID)
 
 
 class FakeBucket:
     def list(self, folder, *args, **kwargs):
+        if folder.rstrip("/") in LIST_FAIL:
+            raise RuntimeError("fake storage list error")
         prefix = folder.rstrip("/") + "/"
         return [{"name": path[len(prefix):], "id": path, "metadata": {"size": len(data)}} for path, data in FILES.items()
                 if path.startswith(prefix)]
@@ -228,6 +249,8 @@ def reset():
     CONSENT_MISSING = False
     RPC_CALLS.clear()
     DOWNLOAD_FAIL.clear()
+    LIST_FAIL.clear()
+    CONSENT_STAR_DENIED[0] = False
     TTS_CALLS.clear()
     TTS_REPLIES.clear()
     CALLS.clear()

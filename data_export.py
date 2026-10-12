@@ -95,8 +95,20 @@ def consent_text(account: dict, consents: list) -> str:
     if not consents:
         out.append("(기록 없음)")
     for row in consents:
-        out.append(f"- {row.get('terms_version', '')} / {row.get('privacy_version', '')} / {row.get('created_at', '')}")
+        out.append(f"- {row.get('terms_version', '')} / {row.get('privacy_version', '')} / "
+                   f"{row.get('created_at') or '(동의한 때는 기록에 없음)'}")
     return "\n".join(out) + "\n"
+
+
+def evidence_summary_text(summary: dict) -> str:
+    """증거파일 개수 문구. 목록을 확인하지 못한 사건이 있으면 0개라고 하지 않는다."""
+    files, checked, failed = summary["files"], summary.get("evidence_checked"), summary.get("evidence_failed", 0)
+    if failed:
+        return (f"증거파일 {files}개(사건 {failed}건은 목록을 불러오지 못해 파일이 있는지 확인하지 못했어요)" if files or checked
+                else f"증거파일: 확인하지 못함(사건 {failed}건 목록을 불러오지 못함)")
+    if files == 0 and checked:
+        return f"증거파일 0개(사건 {checked}건 모두 목록을 확인했고, 첨부한 파일이 없어요)"
+    return f"증거파일 {files}개"
 
 
 def readme_text(summary: dict, missing: list, part_no: int, part_count: int, now: datetime.datetime) -> str:
@@ -107,7 +119,8 @@ def readme_text(summary: dict, missing: list, part_no: int, part_count: int, now
         "",
         "[들어 있는 것]",
         f"- 사건 {summary['cases']}건: 사건마다 폴더가 있고, 그 안에 사건 내용·저장된 초안·사건 정리(경위·증거 설명·일정·체크리스트)·증거파일이 있습니다.",
-        f"- 저장된 초안 {summary['drafts']}개, 사건 정리 기록 {summary['workspaces']}개, 증거파일 {summary['files']}개(이 묶음: {summary['files_in_part']}개)",
+        f"- 저장된 초안 {summary['drafts']}개, 사건 정리 기록 {summary['workspaces']}개, {evidence_summary_text(summary)}"
+        f"(이 묶음: {summary['files_in_part']}개)",
         "- 계정_동의기록.txt: 가입한 이메일, 로그인 방법, 이용약관·개인정보처리방침 동의 기록",
         "- 전체자료.json: 위 내용을 컴퓨터가 읽기 쉬운 형식으로 한 번 더 담은 파일(1번 묶음에만)",
         "",
@@ -139,7 +152,8 @@ def plan_parts(files: list, limit: int = EXPORT_PART_MAX_BYTES) -> list:
 
 
 def build_export(user_id: str, account: dict, cases: list, drafts: dict, workspaces: dict, consents: list,
-                 files: list, missing: list, now: datetime.datetime, limit: int = EXPORT_PART_MAX_BYTES) -> dict:
+                 files: list, missing: list, now: datetime.datetime, limit: int = EXPORT_PART_MAX_BYTES,
+                 evidence_status: dict = None) -> dict:
     """ZIP 묶음들을 만든다.
 
     drafts: {case_id: {"draft_text", "updated_at"}}, workspaces: {case_id: 행}, files: [{"case_id", "path", "name", "data"}]
@@ -172,6 +186,9 @@ def build_export(user_id: str, account: dict, cases: list, drafts: dict, workspa
     root = f"고소미_내자료_{now:%Y%m%d-%H%M}"
     file_parts = plan_parts(own_files, limit)
     summary = {"cases": len(own_cases), "drafts": len(drafts), "workspaces": len(workspaces), "files": len(own_files)}
+    if evidence_status is not None:   # 증거파일 목록을 확인한 사건 수·확인하지 못한 사건 수
+        summary["evidence_checked"] = int(evidence_status.get("checked", 0))
+        summary["evidence_failed"] = int(evidence_status.get("failed", 0))
 
     parts = []
     for no, part_files in enumerate(file_parts, 1):

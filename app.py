@@ -63,7 +63,7 @@ from chat_assistant import (
     normalize_question, question_digest, speech_text, system_instruction as chat_system_instruction, user_statements,
     voice_system_instruction, SUMMARY_FAILED, SUMMARY_MIN_CHARS, clean_summary, summary_prompt, summary_supported,
 )
-from data_export import EXPORT_PART_MAX_BYTES, EXPORT_TOTAL_MAX_BYTES, NOT_INCLUDED_NOTE, build_export
+from data_export import EXPORT_PART_MAX_BYTES, EXPORT_TOTAL_MAX_BYTES, NOT_INCLUDED_NOTE, build_export, evidence_summary_text
 from case_workspace import (
     STYLES, UNKNOWN, build_timeline, bundle_docx, bundle_text, draft_check_items, evidence_items, inconsistencies,
     link_issues, missing_questions, next_action, rewrite_changes, rewrite_prompt, suggestion_for, unknown_items,
@@ -1226,6 +1226,9 @@ def list_case_evidence(case_id: str):
         folder,
         {"limit": EVIDENCE_MAX_FILES_PER_CASE + 1, "sortBy": {"column": "created_at", "order": "desc"}},
     )
+    if items is not None and not isinstance(items, list):
+        # 목록 대신 다른 응답(오류 내용 등)이 오면 '파일 없음'으로 보지 않는다.
+        raise RuntimeError("증거파일 목록 응답 형식이 올바르지 않습니다.")
     files = []
     for item in items or []:
         name = evidence_item_value(item, "name")
@@ -1500,8 +1503,21 @@ def load_workspace_row(case_id: str):
 
 
 def _table_missing(error: Exception) -> bool:
+    """테이블 자체가 아직 없을 때만 True. 열이 없다는 오류(42703)는 0건으로 숨기지 않고 '받지 못한 자료'로 알린다."""
+    code = str(getattr(error, "code", "") or "").upper()
+    if code in ("PGRST205", "42P01"):
+        return True
     text = str(getattr(error, "message", None) or error).lower()
-    return "does not exist" in text or "pgrst205" in text or "schema cache" in text
+    return "could not find the table" in text or ("relation" in text and "does not exist" in text)
+
+
+def _error_code(error: Exception) -> str:
+    """로그용 오류 코드(예: 42703, 42501, PGRST205). 내용·이용자 자료는 남기지 않는다."""
+    return str(getattr(error, "code", "") or getattr(error, "status", "") or "-")[:20]
+
+
+# 동의한 때를 담는 열 이름은 운영 테이블마다 다를 수 있어, 있는 것을 쓴다.
+CONSENT_TIME_KEYS = ("created_at", "agreed_at", "consented_at", "accepted_at", "inserted_at")
 
 
 def collect_my_data() -> dict:
@@ -1520,27 +1536,42 @@ def collect_my_data() -> dict:
         except Exception as error:
             if optional_table and _table_missing(error):
                 return []
-            print(f"[export] stage={label} result={type(error).__name__}", flush=True)
+            print(f"[export] stage={label} result={type(error).__name__} code={_error_code(error)}", flush=True)
             missing.append(f"{label}을(를) 불러오지 못했습니다")
             return []
+
+    def fetch_consents():
+        """동의 기록. 운영 테이블에 없는 열을 지정하면 전체가 실패하므로 있는 열을 그대로(*) 받는다.
+        열 단위 권한 때문에 *가 막히면 동의 확인(has_current_consent)에서 쓰는 세 열만 다시 받는다.
+        어느 쪽이든 이용자 토큰·본인 user_id 조건 그대로이며 권한을 넓히지 않는다."""
+        table = lambda: client.table("consent_records")
+        try:
+            return table().select("*").eq("user_id", user_id).execute().data or []
+        except Exception as error:
+            print(f"[export] stage=동의 기록(*) result={type(error).__name__} code={_error_code(error)}", flush=True)
+        return fetch("동의 기록", lambda: table().select("user_id, terms_version, privacy_version")
+                     .eq("user_id", user_id).execute())
 
     cases = fetch("사건 목록", lambda: client.table(CASES_TABLE).select("*").eq("user_id", user_id).execute())
     draft_rows = fetch("저장된 초안", lambda: client.table(CASE_DRAFTS_TABLE).select("case_id, user_id, draft_text, updated_at")
                        .eq("user_id", user_id).execute(), optional_table=True)
     ws_rows = fetch("사건 정리 기록(경위·증거 설명·일정·체크)", lambda: client.table(WORKSPACE_TABLE).select("*")
                     .eq("user_id", user_id).execute(), optional_table=True)
-    consents = fetch("동의 기록", lambda: client.table("consent_records").select("user_id, terms_version, privacy_version, created_at")
-                     .eq("user_id", user_id).execute())
+    consents = [{**row, "created_at": next((row[k] for k in CONSENT_TIME_KEYS if row.get(k)), row.get("created_at"))}
+                for row in fetch_consents()]
     files, total = [], 0
+    evidence = {"checked": 0, "failed": 0}
     for case in cases:
         case_id = str(case.get("case_id"))
         label = f"사건 '{(case.get('case_type') or '유형 미입력')[:20]}'({_short_date(case.get('created_at'))})"
         try:
             items = list_case_evidence(case_id)
         except Exception as error:
-            print(f"[export] stage=evidence_list result={type(error).__name__}", flush=True)
-            missing.append(f"{label}의 증거파일 목록을 불러오지 못했습니다")
+            print(f"[export] stage=evidence_list result={type(error).__name__} code={_error_code(error)}", flush=True)
+            missing.append(f"{label}의 증거파일 목록을 불러오지 못했습니다(파일이 있는지 확인하지 못함)")
+            evidence["failed"] += 1
             continue
+        evidence["checked"] += 1
         for item in items:
             if total + int(item.get("size") or 0) > EXPORT_TOTAL_MAX_BYTES:
                 missing.append(f"{label}의 증거파일 '{item['display_name']}' — 전체 용량이 커서(약 "
@@ -1556,7 +1587,7 @@ def collect_my_data() -> dict:
                 missing.append(f"{label}의 증거파일 '{item['display_name']}'을(를) 받지 못했습니다")
     account = {"email": session.get("email"), "method": current_account_label(session)[1]}
     return build_export(user_id, account, cases, {r["case_id"]: r for r in draft_rows}, {r["case_id"]: r for r in ws_rows},
-                        consents, files, missing, datetime.datetime.now(KST))
+                        consents, files, missing, datetime.datetime.now(KST), evidence_status=evidence)
 
 
 def _short_date(value) -> str:
@@ -1583,7 +1614,7 @@ def render_my_data_export(key: str) -> None:
     summary = result["summary"]
     parts = result["parts"]
     text = (f"사건 {summary['cases']}건, 저장된 초안 {summary['drafts']}개, 사건 정리 {summary['workspaces']}개, "
-            f"증거파일 {summary['files']}개")
+            f"{evidence_summary_text(summary)}")
     if result["complete"]:
         st.success(f"내려받을 준비가 됐어요: {text}.")
     else:

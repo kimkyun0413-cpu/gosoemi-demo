@@ -199,6 +199,62 @@ class AppExportTest(unittest.TestCase):
         self.assertFalse(any("big" in n for n in names))
         self.assertTrue(any("photo" in n for n in names))
 
+    def prepare(self):
+        at = self.start()
+        at.button(key="export_prepare_account").click().run()
+        self.assertEqual([e.value for e in at.exception], [])
+        return at, at.session_state["_my_export_account"]
+
+    def test_consent_records_without_time_column(self):
+        # 운영 오류 재현: consent_records에 created_at 열이 없으면 예전 코드는 '동의 기록을 불러오지 못했습니다'였다.
+        at, result = self.prepare()
+        self.assertNotIn("동의 기록을(를) 불러오지 못했습니다", result["missing"])
+        self.assertTrue(result["complete"], result["missing"])
+        text = zip_read(result["parts"][0], "계정_동의기록.txt")
+        self.assertIn("2026-09-27", text)
+        self.assertIn("동의한 때는 기록에 없음", text)
+
+    def test_consent_records_fallback_when_star_is_denied(self):
+        fake.CONSENT_STAR_DENIED[0] = True          # 열 단위 권한이면 동의 확인과 같은 세 열만 다시 받는다
+        _, result = self.prepare()
+        self.assertTrue(result["complete"], result["missing"])
+        self.assertIn("2026-09-27", zip_read(result["parts"][0], "계정_동의기록.txt"))
+
+    def test_consent_records_failure_is_reported(self):
+        # 내려받기 때의 두 조회(*, 세 열)만 실패시키고, 화면마다 하는 동의 확인(terms_version)은 그대로 둔다.
+        fake.CONSENT_STAR_DENIED[0] = True
+        with mock.patch.object(fake, "CONSENT_COLUMNS", ("terms_version",)):
+            at, result = self.prepare()
+        self.assertIn("동의 기록을(를) 불러오지 못했습니다", result["missing"])
+        self.assertFalse(at.success)
+
+    def test_missing_column_in_drafts_is_not_hidden_as_zero(self):
+        # 테이블이 없을 때만 0건으로 넘기고, 열 오류는 '받지 못한 자료'로 알린다.
+        app_globals = {}
+        exec(open(os.path.join(ROOT, "app.py")).read().split("def _table_missing")[1].split("def _error_code")[0]
+             .replace("(error: Exception) -> bool:", "def _table_missing(error):", 1), app_globals)
+        missing = app_globals["_table_missing"]
+        self.assertTrue(missing(fake.FakeAPIError("Could not find the table 'public.case_drafts'", "PGRST205")))
+        self.assertTrue(missing(fake.FakeAPIError('relation "public.case_drafts" does not exist', "42P01")))
+        self.assertFalse(missing(fake.FakeAPIError("column case_drafts.draft_text does not exist", "42703")))
+
+    def test_no_evidence_files_is_shown_as_checked_zero(self):
+        fake.FILES.clear()
+        at, result = self.prepare()
+        self.assertTrue(result["complete"])
+        self.assertTrue(any("증거파일 0개(사건 1건 모두 목록을 확인했고, 첨부한 파일이 없어요)" in s.value for s in at.success))
+
+    def test_evidence_list_failure_is_not_shown_as_zero(self):
+        fake.FILES.clear()
+        fake.LIST_FAIL.add(f"{fake.USER_ID}/{C1}")
+        at, result = self.prepare()
+        self.assertFalse(result["complete"])
+        self.assertTrue(any("증거파일 목록을 불러오지 못했습니다" in m for m in result["missing"]))
+        warning = " ".join(w.value for w in at.warning)
+        self.assertIn("증거파일: 확인하지 못함", warning)
+        self.assertNotIn("증거파일 0개", warning)
+        self.assertIn("증거파일: 확인하지 못함", zip_read(result["parts"][0], "읽어보세요.txt"))
+
     def test_under_age_screen_offers_download_and_withdrawal(self):
         fake.CONSENT_MISSING = True
         patch = mock.patch.dict(os.environ, {"MIN_USER_AGE": "18", "TERMS_EFFECTIVE_DATE_V2": "2026-11-01"})
