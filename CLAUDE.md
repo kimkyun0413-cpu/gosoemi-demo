@@ -19,6 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [auth_ip.py](auth_ip.py) — when to forward the user's IP to Supabase Auth (Sb-Forwarded-For).
 - [scripts/](scripts/) — Free-plan backup/restore, voice smoke test, privacy review packet builder. None of them run automatically.
 - [docs/decisions-2026-10.md](docs/decisions-2026-10.md), [docs/decisions-2026-10-12.md](docs/decisions-2026-10-12.md) — options prepared for the owner; the 10-12 file is the current single list (Gemini free tier, age terms, mail, backup, unused secrets).
+- [docs/domain-hosting-email-plan.md](docs/domain-hosting-email-plan.md) — gosomiapp.com, hosting move before paid sales (Streamlit Community Cloud terms allow only non-commercial use with personal data), Resend SMTP and inbox. Nothing applied.
 - [docs/launch-status.md](docs/launch-status.md) — current launch blockers and next steps; read this first when resuming work.
 - [supabase/](supabase/) — migrations, rollbacks, deployed Edge Function sources (`naver-auth`, `delete-account`), and access tests.
 - `main.py`, `calendar_test.py` — an old personal CLI assistant, not used by the app.
