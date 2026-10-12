@@ -32,6 +32,7 @@ import chat_assistant as _chat_assistant_module
 import precedent_search as _precedent_search_module
 import case_workspace as _case_workspace_module
 import calendar_ics as _calendar_ics_module
+import data_export as _data_export_module
 
 # Streamlit Cloud는 git push 뒤 app.py만 새로 실행하고, 이미 불러온 보조 모듈(case_guide, voice_input 등)은
 # 예전 버전을 메모리에 그대로 둘 수 있다. 그러면 새로 추가한 이름을 못 찾아 ImportError로 앱이 멈춘다
@@ -42,6 +43,7 @@ import calendar_ics as _calendar_ics_module
 for _module in (
     _case_guide_module, _policy_text_module, _billing_module, _auth_ip_module, _voice_input_module,
     _chat_assistant_module, _precedent_search_module, _case_workspace_module, _calendar_ics_module,
+    _data_export_module,   # 2026-10-13 운영 ImportError: 이 목록에 빠져 예전 data_export가 남아 있었음
 ):
     try:
         importlib.reload(_module)

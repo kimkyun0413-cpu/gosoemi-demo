@@ -57,3 +57,21 @@ class DeployReloadTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReloadListCoversHelpersTest(unittest.TestCase):
+    """app.py가 이름을 가져오는(from X import ...) 이 저장소의 보조 모듈은 모두 배포 때 다시 불러와야 한다.
+    빠지면 배포 뒤 예전 모듈이 남아 새 이름을 못 찾고 앱이 열리지 않는다(2026-10-13 data_export 운영 ImportError)."""
+
+    def test_every_local_helper_is_reloaded(self):
+        import ast
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "app.py"), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        local = {name[:-3] for name in os.listdir(root) if name.endswith(".py")} - {"app"}
+        used = {n.module for n in tree.body if isinstance(n, ast.ImportFrom) and n.module in local}
+        aliases = {a.asname: a.name for n in tree.body if isinstance(n, ast.Import) for a in n.names if a.asname}
+        loop = next(n for n in tree.body if isinstance(n, ast.For) and isinstance(n.iter, ast.Tuple))
+        reloaded = {aliases[e.id] for e in loop.iter.elts}
+        self.assertTrue(used, "app.py에서 보조 모듈 import를 찾지 못함")
+        self.assertEqual(sorted(used - reloaded), [], "배포 때 다시 불러오지 않는 보조 모듈")
