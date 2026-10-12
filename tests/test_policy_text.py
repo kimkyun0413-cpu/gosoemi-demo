@@ -17,7 +17,8 @@ class PrivacyPolicyV3Test(unittest.TestCase):
         for phrase in [
             "고소장 초안 저장 시",
             "동의 및 연령 확인 기록",
-            "만 14세 이상 확인 여부와 확인 일시",
+            "만 14세 이상 확인 여부, Google·네이버 로그인으로 처음 이용할 때의 연령 확인 일시",
+            "내 자료 모두 내려받기",
             "로그인·인증 기록",
             "AI 상담(글·음성 대화) 이용 시",
             "localStorage",

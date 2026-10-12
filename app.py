@@ -133,6 +133,8 @@ def age_text(text: str) -> str:
     return text.replace("만 14세", f"만 {MIN_USER_AGE}세") if MIN_USER_AGE != 14 else text
 # 개정 예정인 개인정보처리방침 시행일(예: "2026-10-13"). 설정하면 시행 전까지 화면 위에 미리 알린다.
 PRIVACY_POLICY_UPCOMING_DATE = (os.environ.get("PRIVACY_POLICY_UPCOMING_DATE") or "").strip() or None
+# 만 18세 기준 새 약관 시행 예정일(예: "2026-11-15"). 설정하면 시행 전까지 바뀌는 내용을 미리 알린다(MIN_USER_AGE=18이 되면 사라짐).
+TERMS_V2_UPCOMING_DATE = (os.environ.get("TERMS_V2_UPCOMING_DATE") or "").strip() or None
 
 EVIDENCE_UPLOAD_ENABLED = os.environ.get("EVIDENCE_UPLOAD_ENABLED") == "true"
 
@@ -560,6 +562,9 @@ def clear_user_session_data() -> None:
     st.session_state.messages = []
     st.session_state.model_history = []
     st.session_state.case_workflow_user_id = None
+    # 만 18세 기준: '18세 미만'·'동의하지 않음'은 이 계정·이 탭에서만 기억한다(다음 이용자에게 넘어가지 않게).
+    st.session_state.pop("under_age_declared", None)
+    st.session_state.pop("consent_declined", None)
     # 서버 업로드 저장소의 녹음(사건 음성 입력)은 위젯 상태를 지우기 전에 파일 ID로 지운다.
     # 음성 대화의 녹음은 업로드 저장소를 거치지 않고, 처리한 요청 안에서만 쓴다.
     purge_session_audio()
@@ -2203,7 +2208,8 @@ TERMS_AGE18_CLAUSE = (
     "서비스는 만 18세 이상만 이용할 수 있습니다. 서비스의 AI 기능에 쓰는 Google Gemini API의 이용 조건(18세 이상, "
     "18세 미만이 이용할 서비스에서 사용 금지)에 따른 것입니다. 만 18세 미만인 경우 회원가입 및 서비스 이용이 제한됩니다.\n"
     "이 기준을 시행하기 전에 가입한 이용자는 다음 이용 때 만 18세 이상인지 다시 확인합니다. 확인하지 않으면 서비스를 이용할 수 "
-    "없으며, 이때에도 운영자는 계정과 저장한 자료를 임의로 삭제하지 않고, 이용자는 언제든지 직접 탈퇴해 모두 삭제할 수 있습니다."
+    "없으며, 이때에도 운영자는 계정과 저장한 자료를 임의로 삭제하지 않습니다. 이용자는 로그인해 저장한 자료를 내려받을 수 있고, "
+    "언제든지 직접 탈퇴해 모두 삭제할 수 있습니다."
 )
 
 
@@ -2446,6 +2452,65 @@ def render_upcoming_privacy_notice() -> None:
         st.markdown("**바뀐 개인정보처리방침 전문**")
         st.markdown(build_privacy_policy_v3(PRIVACY_OPERATOR_NAME, PRIVACY_CONTACT_EMAIL, upcoming.isoformat(),
                                             min_age=MIN_USER_AGE))
+
+
+RESTRICTED_TEXT = {
+    "under_age": ("만 18세 이상만 이용할 수 있어요",
+                  "고소미의 AI 기능에 쓰는 Google Gemini의 이용 조건 때문에 만 18세 미만은 이용할 수 없게 되었습니다."),
+    "declined": ("바뀐 약관에 동의해야 이용할 수 있어요",
+                 "고소미는 만 18세 이상만 이용할 수 있도록 약관이 바뀌었습니다. 동의하지 않으면 서비스(AI 기능 포함)를 이용할 수 없습니다."),
+}
+
+
+def render_restricted_screen(reason: str) -> None:
+    """이용이 막힌 계정의 화면: 내 자료 내려받기와 회원탈퇴만 보여 준다. AI·사건 작성 화면은 열지 않는다.
+    계정과 자료는 지우지 않는다(보관 기간은 아직 정하지 않음, docs/age18-rollout-plan.md)."""
+    render_brand_header()
+    title, reason_text = RESTRICTED_TEXT[reason]
+    st.markdown(f"### {title}")
+    st.markdown(
+        f"{reason_text}\n\n"
+        "- 계정과 저장한 사건·자료는 **운영자가 임의로 지우지 않습니다.**\n"
+        "- 자료가 필요하면 아래 '내 자료 모두 내려받기'로 먼저 받아 두세요.\n"
+        "- 모두 지우려면 아래 '회원탈퇴'를 눌러 주세요. 지울 내용을 한 번 더 보여 드려요.\n"
+        "- 잘못 누르셨다면 '다시 확인하기'를 눌러 주세요."
+        + (f"\n- 문의: {md_escape(PRIVACY_CONTACT_EMAIL)}" if PRIVACY_CONTACT_EMAIL else "")
+    )
+    col_back, col_out = st.columns(2)
+    with col_back:
+        if st.button("다시 확인하기", key="under_age_back", width="stretch"):
+            st.session_state.pop("under_age_declared", None)
+            st.session_state.pop("consent_declined", None)
+            st.rerun()
+    with col_out:
+        if st.button("로그아웃", key="under_age_logout", width="stretch"):
+            perform_logout()
+    render_my_data_export("under_age")
+    st.markdown("### 회원탈퇴")
+    st.caption("탈퇴하면 계정과 저장한 자료가 모두 지워져요. 필요하면 위에서 먼저 내려받아 주세요.")
+    if st.button("회원탈퇴", key="delete_account_main", type="secondary", icon=":material/person_remove:"):
+        render_delete_account_dialog()
+
+
+def render_upcoming_age_notice() -> None:
+    """만 18세 기준 새 약관 시행 전 사전 안내. 시행일이 지나거나 MIN_USER_AGE=18이 되면 사라진다."""
+    try:
+        upcoming = datetime.date.fromisoformat(TERMS_V2_UPCOMING_DATE or "")
+    except ValueError:
+        return
+    if MIN_USER_AGE == 18 or not terms_config_ready() or today_kst() >= upcoming:
+        return
+    with st.expander(f"📢 {upcoming.isoformat()}부터 고소미는 만 18세 이상만 이용할 수 있습니다 (눌러서 보기)"):
+        st.markdown(
+            "**무엇이 바뀌나요**\n"
+            "- 이용약관의 이용 자격이 '만 14세 이상'에서 '만 18세 이상'으로 바뀝니다. "
+            "AI 기능에 쓰는 Google Gemini API의 이용 조건(18세 이상) 때문입니다.\n"
+            "- 이미 가입한 분도 시행일 이후 처음 이용하실 때 바뀐 약관에 동의하고 만 18세 이상인지 다시 확인해 주셔야 합니다.\n"
+            "- 만 18세 미만이거나 동의하지 않으시면 서비스를 이용할 수 없습니다. 이때에도 계정과 저장한 자료는 운영자가 "
+            "임의로 지우지 않으며, 로그인해 **내 자료 모두 내려받기**와 **회원탈퇴**를 할 수 있습니다.\n"
+            "- 지금도 '내 계정' 화면에서 내 자료를 내려받거나 탈퇴할 수 있습니다.\n\n"
+            f"**바뀌는 조항(이용약관 제4조 이용 자격)**\n\n> {TERMS_AGE18_CLAUSE.replace(chr(10), chr(10) + '> ')}"
+        )
 
 
 def render_footer():
@@ -3571,6 +3636,9 @@ def render_google_age_gate():
                 st.rerun()
             st.error("확인 내용을 저장하지 못했습니다. 잠시 후 다시 눌러 주세요." + contact_hint())
 
+    if MIN_USER_AGE == 18 and st.button("만 18세 미만입니다", key="google_under_age"):
+        st.session_state.under_age_declared = True
+        st.rerun()
     if st.button("로그아웃", key="google_age_logout_btn"):
         perform_logout()
 
@@ -3597,6 +3665,9 @@ def render_naver_age_gate(status_error: bool):
                     st.rerun()
                 st.error("확인 내용을 저장하지 못했습니다. 잠시 후 다시 눌러 주세요." + contact_hint())
 
+        if MIN_USER_AGE == 18 and st.button("만 18세 미만입니다", key="naver_under_age"):
+            st.session_state.under_age_declared = True
+            st.rerun()
     if st.button("로그아웃", key="naver_age_logout_btn"):
         perform_logout()
 
@@ -3763,6 +3834,7 @@ if not st.session_state.supabase_session:
     if st.session_state.pop("account_deleted", False):
         st.success("회원탈퇴가 완료되었습니다. 계정과 저장된 자료가 삭제되었습니다.")
     render_auth_flash()
+    render_upcoming_age_notice()
     render_upcoming_privacy_notice()
 
     if st.session_state.auth_view == "recovery_set_password":
@@ -3899,6 +3971,13 @@ if st.session_state.get("case_workflow_user_id") != current_user_id:
     clear_user_session_data()
     st.session_state.case_workflow_user_id = current_user_id
 
+if MIN_USER_AGE == 18 and (st.session_state.get("under_age_declared") or st.session_state.get("consent_declined")):
+    # 만 18세 미만이라고 했거나 바뀐 약관에 동의하지 않은 경우: 서비스(AI 포함)는 쓸 수 없지만 계정·자료는 지우지 않는다.
+    # 본인 자료 내려받기와 회원탈퇴만 할 수 있다. 소셜 첫 연령 확인·동의 화면 어느 쪽에서 와도 같은 화면이다.
+    render_restricted_screen("under_age" if st.session_state.get("under_age_declared") else "declined")
+    render_footer()
+    st.stop()
+
 if is_naver_session(st.session_state.supabase_session):
     try:
         naver_age_rows = get_authed_client().rpc("naver_age_status").execute().data or []
@@ -3925,33 +4004,6 @@ if consent_status is None:
         st.rerun()
     if st.button("로그아웃", key="consent_error_logout_btn"):
         perform_logout()
-    render_footer()
-    st.stop()
-if not consent_status and MIN_USER_AGE == 18 and st.session_state.get("under_age_declared"):
-    # 만 18세 미만이라고 한 경우: 서비스는 쓸 수 없지만 계정·자료는 지우지 않는다. 직접 탈퇴만 안내한다.
-    render_brand_header()
-    st.markdown("### 만 18세 이상만 이용할 수 있어요")
-    st.markdown(
-        "고소미의 AI 기능에 쓰는 Google Gemini의 이용 조건 때문에 만 18세 미만은 이용할 수 없게 되었습니다.\n\n"
-        "- 계정과 저장한 사건·자료는 **운영자가 임의로 지우지 않습니다.**\n"
-        "- 자료가 필요하면 아래 '내 자료 모두 내려받기'로 먼저 받아 두세요.\n"
-        "- 모두 지우려면 아래 '회원탈퇴'를 눌러 주세요. 지울 내용을 한 번 더 보여 드려요.\n"
-        "- 잘못 누르셨다면 '다시 확인하기'를 눌러 주세요."
-        + (f"\n- 문의: {md_escape(PRIVACY_CONTACT_EMAIL)}" if PRIVACY_CONTACT_EMAIL else "")
-    )
-    col_back, col_out = st.columns(2)
-    with col_back:
-        if st.button("다시 확인하기", key="under_age_back", width="stretch"):
-            st.session_state.under_age_declared = False
-            st.rerun()
-    with col_out:
-        if st.button("로그아웃", key="under_age_logout", width="stretch"):
-            perform_logout()
-    render_my_data_export("under_age")
-    st.markdown("### 회원탈퇴")
-    st.caption("탈퇴하면 계정과 저장한 자료가 모두 지워져요. 필요하면 위에서 먼저 내려받아 주세요.")
-    if st.button("회원탈퇴", key="delete_account_main", type="secondary", icon=":material/person_remove:"):
-        render_delete_account_dialog()
     render_footer()
     st.stop()
 if not consent_status:
@@ -3996,10 +4048,16 @@ if not consent_status:
         else:
             st.error("계속하려면 이용약관과 개인정보 수집·이용 두 곳에 모두 체크해 주세요."
                      if MIN_USER_AGE != 18 else "계속하려면 이용약관, 개인정보 수집·이용, 만 18세 이상 확인에 모두 체크해 주세요.")
-    if MIN_USER_AGE == 18 and st.button("만 18세 미만입니다", key="reconsent_under_age"):
-        st.session_state.under_age_declared = True
-        st.rerun()
-    if st.button("동의하지 않고 로그아웃", key="reconsent_logout_btn"):
+    if MIN_USER_AGE == 18:
+        if st.button("만 18세 미만입니다", key="reconsent_under_age"):
+            st.session_state.under_age_declared = True
+            st.rerun()
+        if st.button("동의하지 않습니다", key="reconsent_decline"):
+            st.session_state.consent_declined = True
+            st.rerun()
+        if st.button("로그아웃", key="reconsent_logout_btn"):
+            perform_logout()
+    elif st.button("동의하지 않고 로그아웃", key="reconsent_logout_btn"):
         perform_logout()
     render_footer()
     st.stop()
@@ -5627,6 +5685,7 @@ def render_chat_page() -> None:
 keep_widget_values()
 st.session_state["_unsaved"] = None  # 이번 화면을 그리면서 다시 채운다(이동 버튼의 콜백은 바로 전 화면 기준으로 본다)
 st.session_state["_unsaved_form"] = False  # 고소장 작성 칸에 적던 내용(새로고침 경고에만 쓴다)
+render_upcoming_age_notice()
 render_upcoming_privacy_notice()
 account_identity, account_method = current_account_label(st.session_state.supabase_session)
 current_page = render_top_bar(account_identity, account_method)

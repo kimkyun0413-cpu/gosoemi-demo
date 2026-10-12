@@ -1,6 +1,6 @@
 """로컬 임시 Postgres에서 만 18세 기준 동의 함수 수정안(supabase/proposals/age18/)을 검사한다. 운영 DB에는 접속하지 않는다.
 
-검사: 새 약관 버전 동의 기록, 옛 약관 버전·다른 방침 버전 거부, 비로그인 거부, 기존 동의 기록 유지, 되돌리기.
+검사: 전환안(옛·새 버전 모두 받음), 새 약관 버전 동의 기록, 옛 약관 버전·다른 방침 버전 거부, 비로그인 거부, 기존 동의 기록 유지, 되돌리기.
 실행: LOCAL_PG="host=127.0.0.1 port=54329 user=postgres" python3 supabase/tests/local_age18_consent_test.py
 """
 import os
@@ -61,6 +61,20 @@ def call(uid, terms, privacy):
         x("rollback")
         return False
 
+
+transition = open(f"{REPO}/supabase/proposals/age18/record_consent_terms_v2_transition.sql", encoding="utf-8").read()
+check("전환안에 날짜 자리표시가 있어 그대로는 적용되지 않음", "__TERMS_V2_DATE__" in transition)
+x(transition.replace("__TERMS_V2_DATE__", TERMS_V2).replace("__PRIVACY_V3_DATE__", PRIVACY_V3))
+B = uuid.uuid4()
+x("insert into auth.users values (%s)", (B,))
+check("전환 중: 지금 앱(옛 약관·지금 방침) 동의 기록", call(B, "2026-09-15", "2026-09-27"))
+check("전환 중: 18세 설정 앱(새 약관·새 방침) 동의 기록", call(B, TERMS_V2, PRIVACY_V3))
+check("전환 중: 새 약관 + 옛 방침 조합은 거부", not call(B, TERMS_V2, "2026-09-27"))
+check("전환 중: 모르는 버전은 거부", not call(B, "2099-01-01", PRIVACY_V3))
+check("전환 중: 비로그인은 거부", not call(None, TERMS_V2, PRIVACY_V3))
+check("전환 중: anon은 함수 실행 권한 없음", not x(
+    "select has_function_privilege('anon', 'public.record_consent(text,text)', 'execute')").fetchone()[0])
+x("delete from public.consent_records where user_id=%s", (B,))   # 아래 개수 확인을 위해 시험 계정 B 기록만 정리
 
 proposal = open(f"{REPO}/supabase/proposals/age18/record_consent_terms_v2.sql", encoding="utf-8").read()
 check("수정안에 날짜 자리표시가 있어 그대로는 적용되지 않음", "__TERMS_V2_DATE__" in proposal)

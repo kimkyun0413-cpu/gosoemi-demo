@@ -263,6 +263,7 @@ class AppExportTest(unittest.TestCase):
         at = AppTest.from_file(os.path.join(ROOT, "app.py"), default_timeout=60)
         at.session_state["supabase_session"] = fake.session_for(fake.USER_ID, "me@example.invalid")
         at.session_state["browser_login_checked"] = True
+        at.run()                                       # 로그인 직후 한 번 그린 뒤(계정별 상태 초기화 후) '18세 미만'을 고른 상태
         at.session_state["under_age_declared"] = True
         at.run()
         self.assertEqual([e.value for e in at.exception], [])

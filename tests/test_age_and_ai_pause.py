@@ -95,6 +95,140 @@ class AgeTest(Base):
         self.assertTrue(any(c.key == "reconsent_age" for c in at.checkbox))
 
 
+def social_session(user_id, app_metadata):
+    """Google·네이버로 처음 로그인한(연령 확인 전) 가짜 세션."""
+    import base64
+    import json
+
+    def seg(obj):
+        return base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")
+    session = fake.session_for(user_id, "s@example.com")
+    session["access_token"] = ".".join([seg({"alg": "none"}), seg({"sub": user_id, "app_metadata": app_metadata}), "sig"])
+    return session
+
+
+class Age18FlowTest(Base):
+    """만 18세 기준: 재확인 거부·미충족·동의 저장 실패·소셜 첫 확인·사전 안내·문구 일치."""
+    MAIN_KEYS = {"reconsent_submit"}
+
+    def existing_user(self, **env):
+        at = self.start(**{**AGE18, **env})
+        fake.CONSENT_MISSING = True                      # 새 약관 동의 전(기존 이용자)
+        at.session_state["supabase_session"] = fake.session_for(fake.USER_ID, "x@example.com")
+        at.run()
+        self.assertEqual([e.value for e in at.exception], [])
+        return at
+
+    def assert_restricted(self, at, title):
+        self.assertEqual([e.value for e in at.exception], [])
+        text = self.texts(at)
+        self.assertIn(title, text)
+        self.assertIn("운영자가 임의로 지우지 않습니다", text)
+        keys = {b.key for b in at.button}
+        self.assertTrue({"export_prepare_under_age", "delete_account_main", "under_age_back", "under_age_logout"} <= keys)
+        self.assertNotIn("reconsent_submit", keys)
+        self.assertFalse(keys & {"account_btn", "home_go_chat", "home_go_case"})        # 서비스 화면은 열리지 않음
+        self.assertEqual(fake.CALLS, [])                                                 # AI 호출 없음
+        self.assertEqual([w for w in fake.WRITES if w[1] in ("delete", "remove")], [])   # 아무것도 지우지 않음
+        self.assertEqual([c for c in fake.RPC_CALLS if c[0] == "record_consent"], [])
+
+    def test_decline_shows_download_and_withdrawal_only(self):
+        at = self.existing_user()
+        at.button(key="reconsent_decline").click().run()
+        self.assert_restricted(at, "바뀐 약관에 동의해야 이용할 수 있어요")
+        at.button(key="export_prepare_under_age").click().run()                 # 본인 자료 내려받기는 됨
+        self.assertTrue(at.session_state["_my_export_under_age"]["parts"])
+        at.button(key="under_age_back").click().run()                           # 마음을 바꾸면 동의 화면으로
+        self.assertTrue(any(b.key == "reconsent_submit" for b in at.button))
+
+    def test_menu_check_sees_service_screen_when_consented(self):
+        at = self.start(**AGE18)                                                         # 위 확인이 헛돌지 않는지(대조군)
+        at.session_state["supabase_session"] = fake.session_for(fake.USER_ID, "x@example.com")
+        at.run()
+        self.assertTrue({"account_btn", "home_go_chat", "home_go_case"} <= {b.key for b in at.button})
+
+    def test_unchecked_age_is_not_saved(self):
+        at = self.existing_user()
+        at.checkbox(key="reconsent_terms").check()
+        at.checkbox(key="reconsent_privacy").check()
+        at.button(key="reconsent_submit").click().run()
+        self.assertTrue(any("만 18세 이상 확인" in e.value for e in at.error))
+        self.assertEqual([c for c in fake.RPC_CALLS if c[0] == "record_consent"], [])
+        self.assertTrue(any(b.key == "reconsent_submit" for b in at.button))
+
+    def test_consent_save_failure_keeps_user_on_consent_screen(self):
+        at = self.existing_user()
+        fake.FAIL_NEXT.append(("rpc:record_consent", "select"))
+        for key in ("reconsent_terms", "reconsent_privacy", "reconsent_age"):
+            at.checkbox(key=key).check()
+        at.button(key="reconsent_submit").click().run()
+        self.assertEqual([e.value for e in at.exception], [])
+        self.assertTrue(any("동의 내용을 저장하지 못했습니다" in e.value for e in at.error))
+        self.assertTrue(any(b.key == "reconsent_submit" for b in at.button))   # 이용 화면으로 넘어가지 않음
+        self.assertFalse(any(b.key == "home_go_chat" for b in at.button))
+        self.assertEqual(fake.CALLS, [])
+
+    def test_google_first_login_under_18(self):
+        at = self.start(**AGE18)
+        at.session_state["supabase_session"] = social_session(fake.USER_ID, {"provider": "google"})
+        at.run()
+        self.assertIn("[필수] 만 18세 이상입니다.", [c.label for c in at.checkbox])
+        self.assertNotIn("만 14세", self.texts(at))
+        at.button(key="google_under_age").click().run()
+        self.assert_restricted(at, "만 18세 이상만 이용할 수 있어요")
+
+    def test_naver_first_login_under_18(self):
+        at = self.start(**AGE18)
+        at.session_state["supabase_session"] = social_session(fake.USER_ID, {"provider": "email", "naver_linked": True})
+        at.run()
+        self.assertIn("[필수] 만 18세 이상입니다.", [c.label for c in at.checkbox])
+        at.button(key="naver_under_age").click().run()
+        self.assert_restricted(at, "만 18세 이상만 이용할 수 있어요")
+
+    def test_restriction_does_not_carry_to_next_account(self):
+        at = self.existing_user()
+        at.button(key="reconsent_under_age").click().run()
+        at.session_state["supabase_session"] = fake.session_for(fake.ADMIN_ID, "other@example.com")
+        at.run()
+        self.assertTrue(any(b.key == "reconsent_submit" for b in at.button))
+        self.assertFalse(any(b.key == "delete_account_main" for b in at.button))
+
+    def test_terms_policy_and_screens_say_18_together(self):
+        at = self.existing_user(PRIVACY_POLICY_EFFECTIVE_DATE="2026-11-01")   # 새 약관과 방침 v3를 같은 날 시행
+        text = self.texts(at)
+        self.assertNotIn("만 14세", text)
+        self.assertIn("서비스는 만 18세 이상만 이용할 수 있습니다", text)          # 약관 제4조
+        self.assertIn("본 서비스는 만 18세 이상만 이용할 수 있습니다", text)       # 방침 이용 연령
+        self.assertIn("내 자료 모두 내려받기", text)                               # 방침 권리 행사
+        self.assertIn("[필수] 만 18세 이상입니다.", [c.label for c in at.checkbox])
+        at.checkbox(key="reconsent_terms").check()
+        at.checkbox(key="reconsent_privacy").check()
+        at.checkbox(key="reconsent_age").check()
+        at.button(key="reconsent_submit").click().run()
+        call = [c for c in fake.RPC_CALLS if c[0] == "record_consent"][-1][1]
+        self.assertEqual((call["p_terms_version"], call["p_privacy_version"]), ("2026-11-01", "2026-11-01"))
+
+    def test_default_14_consent_screen_unchanged(self):
+        at = self.start()
+        fake.CONSENT_MISSING = True
+        at.session_state["supabase_session"] = fake.session_for(fake.USER_ID, "x@example.com")
+        at.run()
+        keys = {b.key for b in at.button}
+        self.assertIn("reconsent_logout_btn", keys)
+        self.assertFalse(keys & {"reconsent_decline", "reconsent_under_age"})
+        self.assertTrue(any(b.label == "동의하지 않고 로그아웃" for b in at.button))
+
+    def test_upcoming_age_notice_before_effective_date(self):
+        at = self.start(TERMS_V2_UPCOMING_DATE="2099-01-01")
+        labels = [e.label for e in at.expander]
+        self.assertTrue(any("2099-01-01부터 고소미는 만 18세 이상만" in label for label in labels), labels)
+        self.assertIn("내 자료 모두 내려받기", self.texts(at))
+        past = self.start(TERMS_V2_UPCOMING_DATE="2020-01-01")
+        self.assertFalse(any("만 18세 이상만" in e.label for e in past.expander))
+        live = self.start(TERMS_V2_UPCOMING_DATE="2099-01-01", **AGE18)            # 시행 뒤(18세 설정)에는 사라짐
+        self.assertFalse(any("만 18세 이상만" in e.label for e in live.expander))
+
+
 class AiPauseTest(Base):
     MSG = "AI 기능을 점검 중입니다. 저장한 사건은 계속 확인할 수 있습니다."
 
