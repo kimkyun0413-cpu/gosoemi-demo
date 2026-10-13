@@ -45,3 +45,8 @@ The app reads all secrets and feature flags from environment variables (Streamli
 - Legal guidance shown to users must come from verified official sources (link them). Do not invent statutes, deadlines, precedents or overseas-transfer facts.
 - Drafts must not state that a crime was committed or predict outcomes; missing facts are marked `[확인 필요]`.
 - Feature flags that collect new personal data must stay off until the privacy policy version that lists them is in effect (see `draft_save_available()`).
+
+
+## 2026-10-14 운영 구조 보완 수정안
+
+재개할 때 [docs/production-repair-plan.md](docs/production-repair-plan.md)를 먼저 읽으세요. DB 변경 두 개는 운영 미적용입니다. 공개 AI는 새 준비 검사를 통과해야 하며 AI 멈춤이 항상 우선합니다. AI_USAGE_SERVICE_KEY는 사용량 RPC 전용 클라이언트에서만 사용하고 사건/파일/계정 조회에 사용하지 마세요. 실제 사용량을 모르는데 고소장 단가를 확정하지 마세요. 서버 이전 Docker/Caddy/compose 파일은 준비만 했고 실제 Docker 빌드·TLS·로그인 전환 검증이 필요합니다. 도메인 현재 선택은 gosomi.ai.kr입니다.

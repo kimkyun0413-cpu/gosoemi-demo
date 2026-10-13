@@ -1,0 +1,26 @@
+name: Verify application and unapplied SQL
+on:
+  pull_request:
+    paths: ['**.py', 'requirements.txt', 'supabase/**', 'deploy/**', 'Dockerfile', '.github/workflows/verify.yaml']
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save @electric-sql/pglite@0.5.9
+      - run: node supabase/tests/ai_usage_test.mjs
+      - run: cp .env.example .env
+      - run: docker compose --env-file .env -f deploy/compose.yaml config --quiet
+      - run: docker build -t gosomi-check .

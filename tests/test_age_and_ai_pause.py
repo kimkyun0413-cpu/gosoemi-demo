@@ -286,7 +286,7 @@ class AiPauseTest(Base):
         self.assertTrue(any(b.key == "delete_account_main" for b in at.button))       # 회원탈퇴는 그대로
 
     def test_default_not_paused(self):
-        at = self.start(user_id=fake.USER_ID)
+        at = self.start(user_id=fake.ADMIN_ID, ADMIN_USER_IDS=fake.ADMIN_ID)
         at.session_state["nav_page"] = "chat"
         at.run()
         self.assertFalse(any(i.value == self.MSG for i in at.info))
@@ -295,3 +295,4 @@ class AiPauseTest(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
