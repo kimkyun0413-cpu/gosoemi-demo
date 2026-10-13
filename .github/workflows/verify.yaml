@@ -35,4 +35,7 @@ jobs:
           curl -fsS http://127.0.0.1:8501/_stcore/health
           test "$(docker inspect -f '{{.State.Health.Status}}' gosomi-check)" != "unhealthy"
           docker exec gosomi-check sh -c 'id -un; ls -A /app; test ! -e /app/main.py && test ! -e /app/credentials.json && test ! -e /app/.env'
+          # 사용량 DB 드라이버와 점검 스크립트가 이미지 안에 있고, 주소가 없으면 연결하지 않고 실패하는지
+          docker exec gosomi-check python -c "import psycopg; print('psycopg', psycopg.__version__)"
+          if docker exec gosomi-check python scripts/check_ai_usage_db.py; then echo "check script must refuse without AI_USAGE_DB_URL"; exit 1; fi
           docker logs gosomi-check 2>&1 | tail -20

@@ -62,7 +62,7 @@ class EnvTemplateTest(unittest.TestCase):
                 "AI_CALLS_PER_HOUR": "30", "AI_CALLS_PER_HOUR_TOTAL": "300", "AI_CALLS_PER_DAY": "100",
                 "AI_CALLS_PER_DAY_TOTAL": "2000", "DRAFT_ATOMIC_SAVE_ENABLED": "false", "BILLING_MODE": "off"}
         self.assertEqual({k: v for k, v in filled.items() if safe.get(k) != v}, {}, "안전한 시작값 외의 값이 들어 있음")
-        for secret in ("SUPABASE_PUBLISHABLE_KEY", "GEMINI_API_KEY", "AI_USAGE_SERVICE_KEY", "SUPABASE_URL"):
+        for secret in ("SUPABASE_PUBLISHABLE_KEY", "GEMINI_API_KEY", "AI_USAGE_DB_URL", "SUPABASE_URL"):
             self.assertNotIn(secret, filled)
 
 
@@ -84,3 +84,6 @@ class DockerfileTest(unittest.TestCase):
         for script in ("deploy/lightsail/deploy.sh", "deploy/lightsail/setup.sh"):
             self.assertNotIn("app.env", read(script))
         self.assertIn("deploy/compose.yaml", read("deploy/lightsail/deploy.sh"))
+        self.assertIn("../certs:/run/certs:ro", compose)
+        self.assertNotIn("AI_USAGE_SERVICE_KEY", read(".env.example"))
+        self.assertNotIn("SUPABASE_SECRET_KEY=", "\n".join(l for l in read(".env.example").splitlines() if not l.startswith("#")))

@@ -66,3 +66,34 @@
 ## 6. 비용 (참고, [hosting-cost-comparison.md](hosting-cost-comparison.md))
 - Fly.io 도쿄 1GB 약 $8.8/월 · Lightsail 서울 1GB $7/월(+부가세 여부 미확인)
 - 시험 배포 기간에는 옛 앱(무료)과 새 서버가 함께 돌므로 새 서버 요금만 추가
+
+## 7. AI 사용량 기록 DB 연결 준비 (2026-10-14, 적용 안 함 — 운영자 승인 후)
+사용량 기록은 **전용 최소 권한 계정 `gosomi_ai_usage`**로만 씁니다(예약·완료 두 함수만 가능, 사건·계정·파일·사용량 표 읽기 불가). Supabase 관리자 키(service_role)는 서버에 두지 않습니다.
+
+**운영자가 할 일 (모두 Supabase 대시보드, 순서대로)**
+1. **DB 변경 적용(승인 후):** SQL Editor에서 `supabase/migrations/20261014000000_ai_usage.sql` 실행 → 사용량 표·함수·전용 계정이 만들어짐(되돌리기: `supabase/rollbacks/20261014000000_ai_usage_rollback.sql`, 사건·계정은 그대로)
+2. **비밀번호 정하기:** SQL Editor에서 `alter role gosomi_ai_usage password '<긴 무작위 값>';` — 값은 서버 `.env`에만 적고, 채팅·메일·저장소에 남기지 않음
+3. **암호화 강제:** Database Settings → SSL Configuration → **Enforce SSL on incoming connections** 켜기(DB가 잠깐 재시작됨, 작은 프로젝트는 수 초)
+4. **CA 인증서 내려받기:** 같은 화면의 SSL Configuration에서 인증서 파일을 받아 서버의 `/opt/gosomi/certs/supabase-ca.crt`로 저장(공개 인증서라 비밀은 아님. Fly는 fly.toml 주석대로 비밀값→파일)
+5. **연결 주소 만들기:** 대시보드 **Connect → Transaction pooler** 주소에서 사용자만 바꿔 서버 `.env`에 적기
+   `AI_USAGE_DB_URL=postgresql://gosomi_ai_usage.<프로젝트ref>:<비밀번호>@<지역>.pooler.supabase.com:6543/postgres?sslmode=verify-full&sslrootcert=/run/certs/supabase-ca.crt`
+   - 사용자 이름은 반드시 `gosomi_ai_usage.<프로젝트ref>`(ref를 빼면 'tenant or user not found')
+6. **연결 점검(Claude가 함께, 읽기만):** `docker compose --env-file .env -f deploy/compose.yaml exec app python scripts/check_ai_usage_db.py`
+   → 비밀번호 로그인·암호화(TLS)·인증서·호스트 확인, 틀린 비밀번호 거부, 비암호화 연결 거부, 권한(예약·완료만) 14개 항목이 모두 '통과'여야 함
+7. 통과한 뒤에만 `AI_USAGE_DB_ENABLED=true` (AI 멈춤·일반 공개 설정은 별도 결정)
+
+**적용 전 점검(읽기만, SQL Editor):** 새 계정도 모든 역할에 공통인 PUBLIC 권한을 받으므로, PUBLIC이 실행할 수 있는 public 함수 중 로그인 확인 없이 자료를 다루는 것이 없는지 확인
+```sql
+select p.proname, p.prosecdef from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname = 'public' and has_function_privilege('public', p.oid, 'execute') order by 1;
+```
+
+**30일 지난 기록 정리 (무료 요금제에서도 동작)**
+- 기본: **AI 요청을 예약할 때마다 30일 지난 기록을 함께 지움**(DB 함수 안, 키·예약 작업 불필요)
+- 추가(가능하면): Integrations → Cron에서 pg_cron을 켤 수 있으면 매일 정리
+  `select cron.schedule('gosomi-prune-ai-usage', '30 18 * * *', $$select public.prune_ai_usage()$$);` (매일 03:30 한국, 되돌리기 `select cron.unschedule('gosomi-prune-ai-usage');`)
+- pg_cron을 쓸 수 없으면: 운영자가 **주 1회** SQL Editor에서 `select public.prune_ai_usage();`(AI 이용이 뜸한 기간에도 30일을 넘기지 않게). 무료 요금제의 pg_cron 사용 가능 여부는 공식 문서에서 확인하지 못함
+
+**보고:** SQL Editor에서 `select public.ai_usage_report();`(계정 식별자·내용 없음)
+
+**로컬에서 확인한 것(2026-10-14):** 암호화·비밀번호만 받는 시험 서버(자체 시험 CA)에서 점검 스크립트 14/14 통과(TLS 1.3), 다른 CA 인증서·인증서에 없는 호스트 이름·`sslmode=require` 모두 거부, 앱 저장소로 실제 예약·완료 성공. **운영 Supabase 풀러 접속과 실제 CA 인증서는 미확인**(적용 후 6단계에서 확인)

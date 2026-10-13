@@ -1,5 +1,17 @@
 -- Unapplied. Server-only usage ledger; no case text, prompts, answers, audio or credentials.
+-- 기록은 전용 최소 권한 로그인 역할 gosomi_ai_usage만 쓴다(예약·완료 두 함수 실행만 가능, 어떤 표도 읽지 못함).
+-- service_role 키는 쓰지 않는다. 이용자(anon·authenticated)는 예약·완료를 부를 수 없다(조작 불가).
+-- 비밀번호는 이 파일에 없다. 적용 뒤 SQL Editor에서: alter role gosomi_ai_usage password '<긴 무작위 값>';
+-- 30일 정리: 예약 때마다 30일 지난 기록을 함께 지운다(요금제와 무관). pg_cron이 되면 매일 정리도 추가 가능(docs).
 begin;
+do $$ begin
+  if not exists (select from pg_roles where rolname = 'gosomi_ai_usage') then
+    create role gosomi_ai_usage login noinherit nosuperuser nocreatedb nocreaterole noreplication nobypassrls
+      connection limit 5;
+  end if;
+end $$;
+alter role gosomi_ai_usage set statement_timeout = '5s';
+alter role gosomi_ai_usage set idle_in_transaction_session_timeout = '10s';
 create schema if not exists ai_private;
 revoke all on schema ai_private from public, anon, authenticated;
 create table ai_private.requests (
@@ -34,6 +46,8 @@ begin
  if exists(select 1 from ai_private.requests where request_id=p_request_id) then
    raise exception 'duplicate AI request';
  end if;
+ -- 보관 기간 30일: 지난 기록은 여기서 함께 지운다(started_at 색인 사용, 보통 0건).
+ delete from ai_private.requests where started_at < n - interval '30 days';
  if (select count(*) from ai_private.requests where user_id=p_user_id and started_at > n-interval '1 hour') >= p_user_hour then return 'user_hour'; end if;
  if (select count(*) from ai_private.requests where started_at > n-interval '1 hour') >= p_total_hour then return 'total_hour'; end if;
  if (select count(*) from ai_private.requests where user_id=p_user_id and started_at > n-interval '24 hours') >= p_user_day then return 'user_day'; end if;
@@ -54,8 +68,8 @@ begin
 end $$;
 revoke all on function public.reserve_ai_usage(uuid,uuid,text,text,integer,integer,integer,integer) from public, anon, authenticated;
 revoke all on function public.finish_ai_usage(uuid,text,bigint,bigint,bigint,bigint) from public, anon, authenticated;
-grant execute on function public.reserve_ai_usage(uuid,uuid,text,text,integer,integer,integer,integer) to service_role;
-grant execute on function public.finish_ai_usage(uuid,text,bigint,bigint,bigint,bigint) to service_role;
+grant execute on function public.reserve_ai_usage(uuid,uuid,text,text,integer,integer,integer,integer) to gosomi_ai_usage;
+grant execute on function public.finish_ai_usage(uuid,text,bigint,bigint,bigint,bigint) to gosomi_ai_usage;
 create function public.my_ai_usage() returns jsonb language plpgsql security definer set search_path='' as $$
 declare uid uuid := auth.uid(); result jsonb;
 begin
@@ -75,7 +89,7 @@ begin
  return deleted;
 end $$;
 revoke all on function public.prune_ai_usage() from public, anon, authenticated;
-grant execute on function public.prune_ai_usage() to service_role;
+-- 실행: 운영자가 SQL Editor에서 또는 pg_cron(소유자 권한). 서버 계정·service_role에는 주지 않는다.
 
 create function public.ai_usage_report() returns jsonb language sql security definer set search_path='' as $$
  select coalesce(jsonb_agg(to_jsonb(r)), '[]'::jsonb) from (
@@ -90,5 +104,5 @@ create function public.ai_usage_report() returns jsonb language sql security def
  ) r
 $$;
 revoke all on function public.ai_usage_report() from public, anon, authenticated;
-grant execute on function public.ai_usage_report() to service_role;
+-- 보고: 운영자가 SQL Editor에서 select public.ai_usage_report(); (계정 식별자·내용 없음)
 commit;

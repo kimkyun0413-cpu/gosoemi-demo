@@ -17,7 +17,7 @@ async function denied(sql) { try { await db.exec(sql); return false; } catch { r
 const reserve = (user,id=randomUUID(), limits=[30,300,100,2000]) => scalar(
  'select public.reserve_ai_usage($1,$2,$3,$4,$5,$6,$7,$8)', [user,id,'draft','gemini-3.5-flash-lite',...limits]);
 try {
- await db.exec(`create role anon; create role authenticated; create role service_role;
+ await db.exec(`create role anon; create role authenticated; create role service_role bypassrls;
   create schema auth; create table auth.users(id uuid primary key);
   create function auth.uid() returns uuid language sql stable as $$
     select nullif(current_setting('request.jwt.claims',true)::json->>'sub','')::uuid $$;
@@ -32,7 +32,7 @@ try {
  check('ordinary users cannot finish usage',await denied(`select public.finish_ai_usage('${randomUUID()}','succeeded',1,1,1,3)`));
  await db.exec('reset role; set role anon');
  check('anonymous export forbidden',await denied('select public.my_ai_usage()'));
- await db.exec('reset role; set role service_role');
+ await db.exec('reset role; set role gosomi_ai_usage');
  const id=randomUUID();
  check('server reservation', await reserve(a,id,[1,2,100,2000])==='reserved');
  check('per-user hourly limit',await reserve(a,randomUUID(),[1,2,100,2000])==='user_hour');
@@ -48,17 +48,26 @@ try {
  check('export only own usage',own.length===1 && own.every(r=>r.user_id===a));
  await db.exec('reset role');
  await db.exec("update ai_private.requests set started_at=clock_timestamp()-interval '2 hours'");
- await db.exec('set role service_role');
+ await db.exec('set role gosomi_ai_usage');
  check('daily per-user limit',await reserve(a,randomUUID(),[30,300,1,2000])==='user_day');
  check('daily total limit',await reserve(b,randomUUID(),[30,300,100,2])==='total_day');
+ check('usage account cannot read ledger',await denied('select * from ai_private.requests'));
+ check('usage account cannot run report',await denied('select public.ai_usage_report()'));
+ check('usage account cannot run prune',await denied('select public.prune_ai_usage()'));
+ check('usage account cannot read own-usage export',await denied('select public.my_ai_usage()'));
+ await db.exec('reset role; set role service_role');
+ check('service_role cannot reserve (no admin key needed)',await denied(`select public.reserve_ai_usage('${a}','${randomUUID()}','draft','m',30,300,100,2000)`));
+ check('service_role cannot finish',await denied(`select public.finish_ai_usage('${randomUUID()}','succeeded',1,1,1,3)`));
+ await db.exec('reset role');
+ check('usage account has no RLS bypass',!(await scalar("select rolbypassrls from pg_roles where rolname='gosomi_ai_usage'")));
  const report=await scalar('select public.ai_usage_report()');
  check('operator report contains no account identifiers',!JSON.stringify(report).includes(a)&&!JSON.stringify(report).includes(b));
  await db.exec('reset role');
  await db.close(); db=new PGlite(dir);
  check('restart keeps reservations',await scalar('select count(*)::int from ai_private.requests')===2);
- await db.exec('set role service_role');
+ await db.exec('set role gosomi_ai_usage');
  check('restart does not reset daily limit',await reserve(a,randomUUID(),[30,300,1,2000])==='user_day');
- await db.exec('reset role; delete from ai_private.requests; set role service_role');
+ await db.exec('reset role; delete from ai_private.requests; set role gosomi_ai_usage');
  const answers=await Promise.all(Array.from({length:20},()=>reserve(a,randomUUID(),[5,50,100,2000])));
  check('queued concurrent requests grant exactly five',answers.filter(x=>x==='reserved').length===5);
  await db.exec('reset role');
@@ -66,13 +75,18 @@ try {
  check('no content/key columns',!columns.some(c=>/prompt|answer|audio|secret|password/.test(c)));
  await db.exec(`delete from auth.users where id='${a}'`);
  check('account deletion removes usage',await scalar('select count(*)::int from ai_private.requests')===0);
- await db.exec(`insert into auth.users values('${a}'); set role service_role`);
+ await db.exec(`insert into auth.users values('${a}'); set role gosomi_ai_usage`);
  await reserve(a); await db.exec('reset role');
- await db.exec("update ai_private.requests set started_at=clock_timestamp()-interval '31 days'; set role service_role");
- check('30-day retention purge',await scalar('select public.prune_ai_usage()')===1);
- await db.exec('reset role');
+ await db.exec("update ai_private.requests set started_at=clock_timestamp()-interval '31 days'");
+ check('30-day retention purge (operator/pg_cron)',await scalar('select public.prune_ai_usage()')===1);
+ await db.exec(`set role gosomi_ai_usage`); await reserve(a); await db.exec('reset role');
+ await db.exec("update ai_private.requests set started_at=clock_timestamp()-interval '31 days'; set role gosomi_ai_usage");
+ await reserve(b); await db.exec('reset role');
+ check('reservation also removes records older than 30 days (any plan)',await scalar("select count(*)::int from ai_private.requests where started_at < clock_timestamp()-interval '30 days'")===0
+   && await scalar('select count(*)::int from ai_private.requests')===1);
  await db.exec(rollback);
  check('rollback removes ledger only',await scalar("select to_regclass('ai_private.requests') is null")&&await scalar('select count(*)::int from auth.users')===2);
+ check('rollback removes the usage account',await scalar("select count(*)::int from pg_roles where rolname='gosomi_ai_usage'")===0);
  await db.exec(migration);
  check('migration re-applies after rollback',await scalar("select to_regclass('ai_private.requests') is not null"));
  // Existing draft schema + new atomic save RPC, with actual RLS permissions.

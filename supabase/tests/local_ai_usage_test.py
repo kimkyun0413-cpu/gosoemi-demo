@@ -1,8 +1,8 @@
 """로컬 임시 Postgres에서 AI 사용량 기록의 최소 권한 수정안을 검사한다. 운영 DB에는 접속하지 않는다.
 
-PR 원안(20261014000000_ai_usage.sql) 위에 supabase/proposals/ai_usage_least_privilege/least_privilege.sql을 적용하고,
-전용 역할 gosomi_ai_usage가 예약·완료만 할 수 있고 다른 자료·함수에는 닿지 못하는지, 이용자는 여전히 조작할 수 없는지,
-되돌리기가 되는지 확인한다.
+마이그레이션 20261014000000_ai_usage.sql을 적용하고, 전용 역할 gosomi_ai_usage가 예약·완료만 할 수 있고
+다른 자료·함수에는 닿지 못하는지, service_role·이용자는 예약·완료를 못 하는지, 30일 지난 기록이 예약 때 지워지는지,
+되돌리기가 되는지 실제 로그인으로 확인한다. (비밀번호·암호화 연결은 scripts/check_ai_usage_db.py로 따로 확인)
 실행: LOCAL_PG="host=127.0.0.1 port=54329 user=postgres" python3 supabase/tests/local_ai_usage_least_privilege_test.py
 """
 import os
@@ -15,7 +15,6 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 PG = os.environ.get("LOCAL_PG", "host=127.0.0.1 port=54329 user=postgres")
 if "supabase.co" in PG or "pooler" in PG:
     sys.exit("운영 DB 주소로는 실행하지 마세요. 로컬 임시 Postgres만 사용합니다.")
-PROPOSAL = f"{REPO}/supabase/proposals/ai_usage_least_privilege"
 TEST_PASSWORD = "local-test-" + uuid.uuid4().hex   # 로컬 시험용, 실행마다 새로 만듦
 
 admin = psycopg.connect(PG + " dbname=postgres", autocommit=True)
@@ -79,14 +78,10 @@ LIMITS = (30, 300, 100, 2000)
 RESERVE = "select public.reserve_ai_usage(%s, %s, 'chat', 'gemini-test', %s, %s, %s, %s)"
 FINISH = "select public.finish_ai_usage(%s, 'succeeded', 10, 20, 0, 30)"
 
-# 원안: service_role만 예약 가능, 이용자는 불가
-check("원안: service_role 예약 가능", as_role("service_role", RESERVE, (A, uuid.uuid4(), *LIMITS)) == "reserved")
-check("원안: 이용자(authenticated)는 예약 불가", as_role("authenticated", RESERVE, (A, uuid.uuid4(), *LIMITS), uid=A) == "ERROR")
-
-proposal = open(f"{PROPOSAL}/least_privilege.sql", encoding="utf-8").read()
-check("수정안에 비밀번호가 들어 있지 않음", "password '" not in proposal.split("-- 비밀번호는")[0] and "alter role gosomi_ai_usage password '<" in proposal)
-x(proposal)
+check("마이그레이션에 비밀번호가 들어 있지 않음", "password '" not in open(f"{REPO}/supabase/migrations/20261014000000_ai_usage.sql").read().replace("password '<", ""))
 x(f"alter role gosomi_ai_usage password '{TEST_PASSWORD}'")
+check("service_role: 예약 불가(관리자 키 필요 없음)", as_role("service_role", RESERVE, (A, uuid.uuid4(), *LIMITS)) == "ERROR")
+x("insert into ai_private.requests(request_id, user_id, feature, model) values (%s, %s, 'chat', 'm')", (uuid.uuid4(), A))  # A의 기존 1건
 
 # 전용 역할로 실제 로그인해서 확인(SET ROLE이 아니라 진짜 접속)
 host = dict(p.split("=") for p in PG.split())
@@ -131,14 +126,20 @@ w.close()
 check("이용자(authenticated): 예약 불가", as_role("authenticated", RESERVE, (A, uuid.uuid4(), *LIMITS), uid=A) == "ERROR")
 check("이용자(authenticated): 완료 기록 불가", as_role("authenticated", FINISH, (rid,), uid=A) == "ERROR")
 check("비로그인(anon): 예약 불가", as_role("anon", RESERVE, (A, uuid.uuid4(), *LIMITS)) == "ERROR")
-check("service_role: 예약 권한 회수됨", as_role("service_role", RESERVE, (A, uuid.uuid4(), *LIMITS)) == "ERROR")
 check("이용자: 본인 기록 보기는 그대로", isinstance(as_role("authenticated", "select public.my_ai_usage()", uid=B), list))
+# 30일 보관: 예약할 때 30일 지난 기록을 함께 지운다(pg_cron 없이도)
+x("update ai_private.requests set started_at = clock_timestamp() - interval '31 days' where user_id = %s", (A,))
+w2 = psycopg.connect(host=host.get("host"), port=host.get("port"), dbname="ai_usage_lp_test",
+                     user="gosomi_ai_usage", password=TEST_PASSWORD, autocommit=True)
+w2.execute(RESERVE, (B, uuid.uuid4(), *LIMITS)).fetchone()
+w2.close()
+check("예약 때 30일 지난 기록 삭제", x("select count(*) from ai_private.requests where started_at < clock_timestamp() - interval '30 days'").fetchone()[0] == 0)
 
 # 되돌리기
-x(open(f"{PROPOSAL}/least_privilege_rollback.sql", encoding="utf-8").read())
-check("되돌리기 후 전용 역할 없음", x("select count(*) from pg_roles where rolname='gosomi_ai_usage'").fetchone()[0] == 0)
-check("되돌리기 후 service_role 예약 다시 가능", as_role("service_role", RESERVE, (B, uuid.uuid4(), *LIMITS)) == "reserved")
-check("되돌려도 사용량 기록 유지", x("select count(*) from ai_private.requests").fetchone()[0] >= 3)
+x(open(f"{REPO}/supabase/rollbacks/20261014000000_ai_usage_rollback.sql", encoding="utf-8").read())
+check("되돌리기 후 전용 역할·사용량 표 없음", x("select count(*) from pg_roles where rolname='gosomi_ai_usage'").fetchone()[0] == 0
+      and x("select to_regclass('ai_private.requests') is null").fetchone()[0])
+check("되돌려도 사건 자료 유지", x("select count(*) from public.cases").fetchone()[0] == 1)
 
 db.close()
 admin.execute("drop database ai_usage_lp_test")

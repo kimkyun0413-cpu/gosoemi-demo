@@ -7,4 +7,5 @@ drop function if exists public.reserve_ai_usage(uuid,uuid,text,text,integer,inte
 drop function if exists public.finish_ai_usage(uuid,text,bigint,bigint,bigint,bigint);
 drop table if exists ai_private.requests;
 drop schema if exists ai_private;
+drop role if exists gosomi_ai_usage;
 commit;

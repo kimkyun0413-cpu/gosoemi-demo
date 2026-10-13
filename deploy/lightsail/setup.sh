@@ -14,5 +14,5 @@ if [ ! -f /swapfile ]; then
   sudo fallocate -l 1G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
   echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
 fi
-sudo mkdir -p /opt/gosomi && sudo chown "$USER":"$USER" /opt/gosomi
+sudo mkdir -p /opt/gosomi/certs && sudo chown -R "$USER":"$USER" /opt/gosomi   # certs: Supabase CA 인증서 자리
 echo "완료. 로그아웃 후 다시 접속하고, /opt/gosomi/.env 를 만든 뒤(.env.example 참고, chmod 600) 맥에서 deploy.sh 를 실행하세요."

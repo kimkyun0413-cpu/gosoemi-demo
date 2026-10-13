@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 from google.genai import types
-from ai_runtime import SupabaseUsageStore, UsageStoreUnavailable, generation_settings, public_ai_blockers, usage_counts
+from ai_runtime import PostgresUsageStore, UsageStoreUnavailable, usage_dsn_problems, generation_settings, public_ai_blockers, usage_counts
 import ai_runtime as runtime
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -49,26 +49,61 @@ class ControlsTest(unittest.TestCase):
             bad = {**ready, key: 14 if key == 'age' else False}
             self.assertEqual(len(public_ai_blockers(**bad)), 1)
 
-    def test_rpc_only_contains_usage_metadata(self):
-        client = Mock()
-        client.rpc.return_value.execute.return_value.data = 'reserved'
-        store = SupabaseUsageStore(client)
+    GOOD_DSN = ("postgresql://gosomi_ai_usage.abcd:pw-SECRET@aws-0-ap-northeast-2.pooler.supabase.com:6543/postgres"
+                "?sslmode=verify-full&sslrootcert=/run/certs/supabase-ca.crt")
+
+    def fake_connect(self, result):
+        calls = []
+
+        class Conn:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def execute(self, sql, params):
+                calls.append((sql, params))
+                return SimpleNamespace(fetchone=lambda: (result,))
+
+        def connect(dsn, **kwargs):
+            calls.append(("connect", kwargs))
+            return Conn()
+        return connect, calls
+
+    def test_usage_db_address_must_be_dedicated_and_verified_tls(self):
+        self.assertEqual(runtime.usage_dsn_problems(self.GOOD_DSN), [])
+        for bad in (self.GOOD_DSN.replace("verify-full", "require"), self.GOOD_DSN.replace("verify-full", "disable"),
+                    self.GOOD_DSN.split("&sslrootcert")[0], self.GOOD_DSN.replace("gosomi_ai_usage.abcd", "postgres.abcd"),
+                    "", "https://example.com"):
+            self.assertTrue(runtime.usage_dsn_problems(bad), bad)
+            with self.assertRaises(runtime.UsageStoreUnavailable):
+                runtime.PostgresUsageStore(bad)
+
+    def test_calls_only_usage_functions_with_metadata(self):
+        connect, calls = self.fake_connect("reserved")
+        store = runtime.PostgresUsageStore(self.GOOD_DSN, connect=connect)
         self.assertEqual(store.reserve('user','request','draft','model',
                          dict(user_hour=30,total_hour=300,user_day=100,total_day=2000)), 'reserved')
-        client.rpc.return_value.execute.return_value.data = True
+        connect, calls2 = self.fake_connect(True)
+        store = runtime.PostgresUsageStore(self.GOOD_DSN, connect=connect)
         store.finish('request', 'succeeded', SimpleNamespace(prompt_token_count=12, total_token_count=30,
                       prompt='PRIVATE', response='PRIVATE', api_key='SECRET'))
-        payload = client.rpc.call_args.args[1]
-        self.assertNotIn('PRIVATE', str(payload))
-        self.assertNotIn('SECRET', str(payload))
-        self.assertEqual(payload['p_input'], 12)
+        sqls = [c[0] for c in calls + calls2 if c[0] != "connect"]
+        self.assertEqual([q.split("(")[0] for q in sqls], ["select public.reserve_ai_usage", "select public.finish_ai_usage"])
+        self.assertNotIn('PRIVATE', str(calls2))
+        self.assertNotIn('SECRET', str(calls2))
+        self.assertEqual(calls2[1][1][2], 12)
+        self.assertEqual(calls[0][1]["prepare_threshold"], None)       # 풀러 transaction 모드
+        self.assertEqual(calls[0][1]["autocommit"], True)
 
-    def test_bad_rpc_results_fail_closed(self):
-        client = Mock()
-        client.rpc.return_value.execute.return_value.data = None
-        store = SupabaseUsageStore(client)
+    def test_bad_results_and_connection_errors_fail_closed_without_leaking(self):
+        connect, _ = self.fake_connect(None)
         with self.assertRaises(runtime.UsageStoreUnavailable):
-            store.reserve('u','r','chat','m',dict(user_hour=1,total_hour=1,user_day=1,total_day=1))
+            runtime.PostgresUsageStore(self.GOOD_DSN, connect=connect).reserve('u','r','chat','m',dict(user_hour=1,total_hour=1,user_day=1,total_day=1))
+
+        def broken(dsn, **kw):
+            raise RuntimeError(f"connection to {dsn} failed")
+        with self.assertRaises(runtime.UsageStoreUnavailable) as caught:
+            runtime.PostgresUsageStore(self.GOOD_DSN, connect=broken).finish('r', 'failed')
+        self.assertNotIn("SECRET", str(caught.exception))
+        self.assertIsNone(caught.exception.__cause__)
 
 
 def app_functions():

@@ -69,7 +69,7 @@ from chat_assistant import (
 )
 from data_export import (EVIDENCE_PART_MAX_BYTES, NOT_INCLUDED_NOTE, build_evidence_part, build_text_part,
                          evidence_summary_text)
-from ai_runtime import SupabaseUsageStore, generation_settings, public_ai_blockers, usage_counts
+from ai_runtime import PostgresUsageStore, generation_settings, public_ai_blockers, usage_counts
 from case_workspace import (
     STYLES, UNKNOWN, build_timeline, bundle_docx, bundle_text, draft_check_items, evidence_items, inconsistencies,
     link_issues, missing_questions, next_action, rewrite_changes, rewrite_prompt, suggestion_for, unknown_items,
@@ -1836,11 +1836,10 @@ def get_ai_usage_limiter() -> AiUsageLimiter:
 
 @st.cache_resource
 def get_ai_usage_store():
-    # Dedicated server-only client: never reuse for case/file/account queries or browser output.
-    key = os.environ.get("AI_USAGE_SERVICE_KEY")
-    if not key:
-        raise RuntimeError("usage service credential missing")
-    return SupabaseUsageStore(create_client(os.environ["SUPABASE_URL"], key))
+    # 전용 최소 권한 DB 계정(gosomi_ai_usage)으로만 연결한다. 이 계정은 예약·완료 함수만 실행할 수 있고
+    # 사건·파일·계정 자료는 읽지 못한다. Supabase service_role 키는 쓰지 않는다.
+    # 주소는 sslmode=verify-full + sslrootcert(Supabase CA)가 있어야 하며, 아니면 연결하지 않는다(AI 요청을 멈춤).
+    return PostgresUsageStore(os.environ.get("AI_USAGE_DB_URL", ""))
 
 
 def finish_ai_request(request_id, status, metadata=None, feature="chat"):

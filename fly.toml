@@ -23,6 +23,12 @@ primary_region = "nrt"   # 도쿄(서울 리전 없음). 방침의 국외 이전
     path = "/_stcore/health"
     timeout = "5s"
 
+# 사용량 DB를 켤 때: Supabase CA 인증서를 비밀값으로 넣고(base64) 파일로 연결한다.
+#   fly secrets set SUPABASE_CA_CERT=$(base64 < supabase-ca.crt)
+# [[files]]
+#   guest_path = "/run/certs/supabase-ca.crt"
+#   secret_name = "SUPABASE_CA_CERT"
+
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
