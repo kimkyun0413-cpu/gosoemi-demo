@@ -1,0 +1,29 @@
+# Fly.io 설정안 (2026-10-14 준비, 앱 미생성·미배포). 앱 이름은 만들 때 정해 바꾼다.
+# 비밀값·기능 설정은 이 파일에 넣지 않고 `fly secrets import < app.env`로 넣는다(deploy/app.env.example 참고).
+app = "gosomi-app"
+primary_region = "nrt"   # 도쿄(서울 리전 없음). 방침의 국외 이전 표에 반영해야 함
+
+[build]
+
+[http_service]
+  internal_port = 8501
+  force_https = true
+  auto_stop_machines = "off"   # Streamlit은 접속을 계속 잇는 방식이라 꺼지면 화면이 끊긴다
+  auto_start_machines = true
+  min_machines_running = 1
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 50
+    hard_limit = 80
+
+  [[http_service.checks]]
+    grace_period = "30s"
+    interval = "30s"
+    method = "GET"
+    path = "/_stcore/health"
+    timeout = "5s"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "1gb"

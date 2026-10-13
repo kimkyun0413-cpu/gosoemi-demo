@@ -1,0 +1,35 @@
+# AWS Lightsail(서울) 실행 설정안 (2026-10-14 준비, 서버 미생성).
+# 서버의 /opt/gosomi 에 앱 파일이 있고(deploy.sh가 복사), 비밀값은 /opt/gosomi/app.env (서버에서 직접 만들고 chmod 600).
+services:
+  app:
+    build:
+      context: ../..
+    env_file: ../../app.env
+    restart: unless-stopped
+    mem_limit: 768m          # 1GB 서버: 운영체제·Caddy 몫을 남김(스왑 1GB는 setup.sh가 만듦)
+    expose:
+      - "8501"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  caddy:                     # HTTPS 인증서 자동 발급·갱신(Let's Encrypt) + 앱으로 전달
+    image: caddy:2.8.4-alpine
+    restart: unless-stopped
+    depends_on: [app]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    env_file: ../../caddy.env  # APP_DOMAIN=app.gosomiapp.com 처럼 한 줄
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+volumes:
+  caddy_data:
+  caddy_config:

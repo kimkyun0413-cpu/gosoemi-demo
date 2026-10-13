@@ -1,0 +1,17 @@
+# 허용 목록 방식: 모두 빼고 앱에 필요한 파일만 다시 넣는다.
+# 개인정보·비밀 파일(credentials.json, token.json, cases.json, memory.json, schedules.json, .env, secrets.toml)과
+# 예전 개인 비서 코드, 백업 파일, 문서·테스트는 서버 이미지에 들어가지 않는다. 새 보조 모듈을 만들면 여기에 추가(테스트가 확인).
+*
+!requirements.txt
+!app.py
+!auth_ip.py
+!billing.py
+!calendar_ics.py
+!case_guide.py
+!case_workspace.py
+!chat_assistant.py
+!data_export.py
+!policy_text.py
+!precedent_search.py
+!voice_input.py
+!.streamlit/config.toml
