@@ -41,6 +41,8 @@
 
 ## 서버 이전 준비
 
+> 2026-10-14 통합: 서버 파일은 서버 이전 준비(main `e9b9c33`)와 합쳤습니다. 파일 목록·시험 배포·전환 목록·되돌리기의 최신본은 [server-migration-plan.md](server-migration-plan.md)입니다.
+
 Dockerfile, TLS 프록시(Caddy), compose 파일, 값이 비어 있는 `.env.example`을 준비했다.
 새 서버 생성·도메인 구매·DNS·결제·OAuth 관리 화면은 이번 작업에서 변경하지 않았다.
 

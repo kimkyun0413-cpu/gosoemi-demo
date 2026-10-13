@@ -1,4 +1,13 @@
+# GOSOMI_DOMAIN(기본 gosomi.ai.kr)으로 들어온 요청을 앱으로 넘긴다. 인증서는 Caddy가 자동으로 받는다.
 {$GOSOMI_DOMAIN} {
-    reverse_proxy app:8501
-    # Access logging is off: URLs may contain authentication parameters.
+	encode zstd gzip
+	reverse_proxy app:8501
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "SAMEORIGIN"
+		-Server
+	}
+	# 접속 기록(access log)은 켜지 않는다: 주소에 로그인 인증 값이 들어갈 수 있다.
 }

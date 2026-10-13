@@ -1,7 +1,7 @@
 name: Verify application and unapplied SQL
 on:
   pull_request:
-    paths: ['**.py', 'requirements.txt', 'supabase/**', 'deploy/**', 'Dockerfile', '.github/workflows/verify.yaml']
+    paths: ['**.py', 'requirements.txt', 'supabase/**', 'deploy/**', 'Dockerfile', '.dockerignore', '.env.example', 'fly.toml', '.github/workflows/verify.yaml']
   workflow_dispatch:
 jobs:
   verify:
@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.13'
           cache: pip
       - run: pip install -r requirements.txt
       - run: python -m unittest discover -s tests
@@ -24,3 +24,15 @@ jobs:
       - run: cp .env.example .env
       - run: docker compose --env-file .env -f deploy/compose.yaml config --quiet
       - run: docker build -t gosomi-check .
+      # 이미지가 실제로 뜨고 상태 확인에 응답하는지(가짜 값, 외부 서비스 연결 없음)
+      - name: Start image and check health
+        run: |
+          docker run -d --name gosomi-check -p 8501:8501 --env-file .env gosomi-check
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8501/_stcore/health; then echo; break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8501/_stcore/health
+          test "$(docker inspect -f '{{.State.Health.Status}}' gosomi-check)" != "unhealthy"
+          docker exec gosomi-check sh -c 'id -un; ls -A /app; test ! -e /app/main.py && test ! -e /app/credentials.json && test ! -e /app/.env'
+          docker logs gosomi-check 2>&1 | tail -20

@@ -1,17 +1,17 @@
-# 도메인(gosomiapp.com)·호스팅·메일 연결 준비 (2026-10-13, 아무것도 적용하지 않음)
+# 도메인(gosomi.ai.kr)·호스팅·메일 연결 준비 (2026-10-13 작성, 2026-10-14 도메인을 gosomi.ai.kr로 변경, 아무것도 적용하지 않음)
 
 **상태:** 도메인 구입 예정(미결제). DNS·로그인 연결 주소·운영 설정 변경 없음. 결제·계약 없음. AI 멈춤·이메일 신규 가입 중단 유지.
 **서비스 상태:** 현재 무료 시험 운영, 향후 유료 판매 예정(가격 미정).
 
-> **도메인만 사서는 사이트가 연결되지 않습니다.** 아래 1절처럼 지금 호스팅(Streamlit Community Cloud)은 내 도메인을 붙일 수 없어서, 주소창에 gosomiapp.com이 계속 보이게 하려면 호스팅을 옮기는 작업이 따로 필요합니다.
+> **도메인만 사서는 사이트가 연결되지 않습니다.** 아래 1절처럼 지금 호스팅(Streamlit Community Cloud)은 내 도메인을 붙일 수 없어서, 주소창에 gosomi.ai.kr이 계속 보이게 하려면 호스팅을 옮기는 작업이 따로 필요합니다.
 
 ## 1. 지금 Streamlit 앱에 도메인을 연결할 수 있는가 — 공식 문서 확인
 
 | 방식 | 가능? | 주소창 | 근거·문제 |
 |---|---|---|---|
-| **직접 연결**(gosomiapp.com에서 앱이 그대로 열림) | **불가** | — | 공식 문서는 `<원하는 이름>.streamlit.app` 형태의 하위 주소 변경만 안내함(6~63자). 내 도메인 연결 기능은 문서에 없음([App settings](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app/app-settings), [Deploy](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy)) |
-| **이동(리디렉트)**: gosomiapp.com을 열면 지금 주소로 넘어감 | 가능(도메인 업체의 '포워딩' 기능) | **…streamlit.app으로 바뀜** | 앱은 그대로. 로그인 연결 주소도 그대로라 안전. 단 아래 약관 문제는 그대로 |
-| **틀(iframe) 안에 넣기**: gosomiapp.com 페이지 안에 앱을 띄움 | 공개 앱은 `?embed=true`로 가능([Embed your app](https://docs.streamlit.io/deploy/streamlit-community-cloud/share-your-app/embed-your-app)) | gosomiapp.com 유지 | **추천하지 않음.** 고소미의 로그인 유지(브라우저 저장소)·Google·네이버 로그인이 다른 사이트 틀 안에서는 브라우저가 막을 수 있고(특히 Safari), 공식 문서도 이 부분을 다루지 않음. 약관 문제도 그대로 |
+| **직접 연결**(gosomi.ai.kr에서 앱이 그대로 열림) | **불가** | — | 공식 문서는 `<원하는 이름>.streamlit.app` 형태의 하위 주소 변경만 안내함(6~63자). 내 도메인 연결 기능은 문서에 없음([App settings](https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app/app-settings), [Deploy](https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy)) |
+| **이동(리디렉트)**: gosomi.ai.kr을 열면 지금 주소로 넘어감 | 가능(도메인 업체의 '포워딩' 기능) | **…streamlit.app으로 바뀜** | 앱은 그대로. 로그인 연결 주소도 그대로라 안전. 단 아래 약관 문제는 그대로 |
+| **틀(iframe) 안에 넣기**: gosomi.ai.kr 페이지 안에 앱을 띄움 | 공개 앱은 `?embed=true`로 가능([Embed your app](https://docs.streamlit.io/deploy/streamlit-community-cloud/share-your-app/embed-your-app)) | gosomi.ai.kr 유지 | **추천하지 않음.** 고소미의 로그인 유지(브라우저 저장소)·Google·네이버 로그인이 다른 사이트 틀 안에서는 브라우저가 막을 수 있고(특히 Safari), 공식 문서도 이 부분을 다루지 않음. 약관 문제도 그대로 |
 | (참고) 하위 주소만 바꾸기: 예) `gosomi.streamlit.app` | 가능 | …streamlit.app | 바꾸면 로그인 연결 주소 모두 바꿔야 함(4절) |
 
 **유료 판매 전 꼭 알아야 할 것 — Streamlit 이용약관(2025-11 갱신, [Terms of use](https://streamlit.io/terms-of-use) Addendum 4):**
@@ -32,7 +32,7 @@
 
 **처음 추천(갱신 전):**
 1. **지금(무료 시험 운영):** 안 A. 도메인을 사면 '포워딩'으로 지금 주소로만 이동시키고, 앱·로그인 설정은 그대로 둡니다. (원하면 도메인은 메일용으로만 먼저 써도 됩니다.)
-2. **유료 판매 전:** 안 B(Render Standard, 싱가포르)로 옮기고 `app.gosomiapp.com`(또는 gosomiapp.com)을 직접 연결. 옮기기 전에 방침의 위탁·국외 이전 표(Streamlit/Snowflake → Render)를 고치고 시행 절차를 거쳐야 합니다. Render와의 계약·결제는 운영자 승인 후.
+2. **유료 판매 전:** 안 B(Render Standard, 싱가포르)로 옮기고 `gosomi.ai.kr`(또는 gosomi.ai.kr)을 직접 연결. 옮기기 전에 방침의 위탁·국외 이전 표(Streamlit/Snowflake → Render)를 고치고 시행 절차를 거쳐야 합니다. Render와의 계약·결제는 운영자 승인 후.
 - 어떤 안이든 **DB(Supabase, 서울)·AI(Gemini)는 그대로**입니다. 옮기는 것은 화면을 돌리는 서버뿐입니다.
 
 ## 3. 메일 — '보내는 서비스'와 '받는 메일함'은 다른 것
@@ -40,7 +40,7 @@
 | 구분 | 용도 | 추천 | 비용(공식) | 필요한 것 |
 |---|---|---|---|---|
 | **보내는 서비스** | 가입 인증 메일, 비밀번호 찾기 메일(Supabase가 보냄) | **Resend** | Free: 월 3,000통·하루 100통·도메인 3개, Pro $20/월(월 5만 통) ([요금](https://resend.com/pricing)) | 도메인 DNS에 Resend가 알려 주는 기록 추가(인증) |
-| **받는 메일함** | 이용자 문의(예: help@gosomiapp.com) | (가) **Cloudflare Email Routing** — 받은 메일을 운영자의 기존 메일함으로 전달 / (나) 유료 업무 메일함(Google Workspace 등) | (가) Free 요금제에서 사용 가능([문서](https://developers.cloudflare.com/email-routing/)) / (나) 업체 요금 확인 필요 | (가) 도메인 DNS를 Cloudflare에서 관리해야 함([문서](https://developers.cloudflare.com/email-routing/get-started/enable-email-routing/)). 답장은 기존 메일 주소로 나감 → help@ 주소로 답장하려면 (나) |
+| **받는 메일함** | 이용자 문의(예: help@gosomi.ai.kr) | (가) **Cloudflare Email Routing** — 받은 메일을 운영자의 기존 메일함으로 전달 / (나) 유료 업무 메일함(Google Workspace 등) | (가) Free 요금제에서 사용 가능([문서](https://developers.cloudflare.com/email-routing/)) / (나) 업체 요금 확인 필요 | (가) 도메인 DNS를 Cloudflare에서 관리해야 함([문서](https://developers.cloudflare.com/email-routing/get-started/enable-email-routing/)). 답장은 기존 메일 주소로 나감 → help@ 주소로 답장하려면 (나) |
 
 - **왜 지금 필요한가:** Supabase 기본 메일은 팀원 주소에만, 시간당 2통만 보냅니다. 이용자에게 인증·비밀번호 메일을 보내려면 외부 메일(SMTP) 연결이 필요합니다([Supabase SMTP](https://supabase.com/docs/guides/auth/auth-smtp)). 연결 후 Supabase 기본 제한은 시간당 30통(대시보드 Rate Limits에서 조정).
 - **충돌 없게:** 보내는 기록(Resend)은 Resend가 안내하는 하위 주소용 기록, 받는 기록(MX)은 Cloudflare가 넣는 기록입니다. 서로 다른 기록이라 함께 쓸 수 있습니다(실제 값은 각 화면에서 복사).
@@ -49,7 +49,7 @@
 ### Supabase에 넣을 값 (Resend 공식 안내, [문서](https://resend.com/docs/send-with-supabase-smtp))
 | 칸 | 값 |
 |---|---|
-| Sender email | `noreply@gosomiapp.com` (예시, 도메인 인증 후) |
+| Sender email | `noreply@gosomi.ai.kr` (예시, 도메인 인증 후) |
 | Sender name | `고소미` |
 | Host | `smtp.resend.com` |
 | Port | `465` |

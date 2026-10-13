@@ -1,19 +1,20 @@
-.git
-.env
-.env.*
-.streamlit/secrets.toml
-credentials.json
-token.json
-**/__pycache__
-**/*.pyc
-tests
-docs
-supabase
-cases.json
-memory.json
-schedules.json
-*.zip
-*.wav
-*.docx
-venv
-.venv
+# 허용 목록 방식: 모두 빼고 앱에 필요한 파일만 다시 넣는다.
+# 개인정보·비밀 파일(credentials.json, token.json, cases.json, memory.json, schedules.json, .env, secrets.toml)과
+# 예전 개인 비서 코드(main.py 등), 백업 파일(app.before_*.py), 문서·테스트는 서버 이미지에 들어가지 않는다.
+# 새 보조 모듈을 만들면 여기에 추가(tests/test_deploy_files.py가 확인).
+*
+!requirements.txt
+!app.py
+!ai_runtime.py
+!auth_ip.py
+!billing.py
+!calendar_ics.py
+!case_guide.py
+!case_workspace.py
+!chat_assistant.py
+!data_export.py
+!policy_text.py
+!precedent_search.py
+!voice_input.py
+!scripts/ai_usage_report.py
+!.streamlit/config.toml
