@@ -33,6 +33,7 @@ import precedent_search as _precedent_search_module
 import case_workspace as _case_workspace_module
 import calendar_ics as _calendar_ics_module
 import data_export as _data_export_module
+import ai_runtime as _ai_runtime_module
 
 # Streamlit Cloud는 git push 뒤 app.py만 새로 실행하고, 이미 불러온 보조 모듈(case_guide, voice_input 등)은
 # 예전 버전을 메모리에 그대로 둘 수 있다. 그러면 새로 추가한 이름을 못 찾아 ImportError로 앱이 멈춘다
@@ -44,6 +45,7 @@ for _module in (
     _case_guide_module, _policy_text_module, _billing_module, _auth_ip_module, _voice_input_module,
     _chat_assistant_module, _precedent_search_module, _case_workspace_module, _calendar_ics_module,
     _data_export_module,   # 2026-10-13 운영 ImportError: 이 목록에 빠져 예전 data_export가 남아 있었음
+    _ai_runtime_module,
 ):
     try:
         importlib.reload(_module)
@@ -67,6 +69,7 @@ from chat_assistant import (
 )
 from data_export import (EVIDENCE_PART_MAX_BYTES, NOT_INCLUDED_NOTE, build_evidence_part, build_text_part,
                          evidence_summary_text)
+from ai_runtime import PostgresUsageStore, generation_settings, public_ai_blockers, usage_counts
 from case_workspace import (
     STYLES, UNKNOWN, build_timeline, bundle_docx, bundle_text, draft_check_items, evidence_items, inconsistencies,
     link_issues, missing_questions, next_action, rewrite_changes, rewrite_prompt, suggestion_for, unknown_items,
@@ -148,6 +151,7 @@ BILLING_PLANS = parse_plans(os.environ.get("BILLING_PLANS_JSON"))
 # 고소장 초안 저장. supabase/migrations/20261006000000_case_drafts.sql을 적용한 뒤 켠다.
 # 초안 저장을 적은 개인정보처리방침(v3) 시행일이 지나야 화면에 나타난다.
 DRAFT_SAVE_ENABLED = os.environ.get("DRAFT_SAVE_ENABLED") == "true"
+DRAFT_ATOMIC_SAVE_ENABLED = os.environ.get("DRAFT_ATOMIC_SAVE_ENABLED") == "true"
 # 음성 입력. 음성을 Gemini로 보내므로 이를 적은 개인정보처리방침(v3) 시행 후에만 나타난다.
 VOICE_INPUT_ENABLED = os.environ.get("VOICE_INPUT_ENABLED") == "true"
 # 새 AI 대화(이어지는 대화·사건 정보 정리)와 음성 대화. v3 방침에 적은 처리라 시행 전에는 관리자 시험 모드에서만 보인다.
@@ -1460,7 +1464,7 @@ def save_case_draft(case_id: str, draft_text: str, expected_at=False) -> str:
 
     expected_at을 주면(None 포함) 서버의 마지막 저장 시각이 그 값과 같을 때만 저장하고, 다르면 SaveConflict.
     """
-    if expected_at is not False:
+    if expected_at is not False and not DRAFT_ATOMIC_SAVE_ENABLED:
         current = load_case_draft(case_id)
         if (current or {}).get("updated_at") != expected_at:
             raise SaveConflict("draft")
@@ -1472,6 +1476,15 @@ def save_case_draft(case_id: str, draft_text: str, expected_at=False) -> str:
         raise ValueError("빈 초안은 저장할 수 없습니다. 내용을 적은 뒤 저장해 주세요.")
     if len(text) > CASE_DRAFT_MAX_CHARS:
         raise ValueError(f"초안은 {CASE_DRAFT_MAX_CHARS:,}자까지 저장할 수 있습니다. 조금 줄인 뒤 저장해 주세요.")
+    if DRAFT_ATOMIC_SAVE_ENABLED:
+        rows = get_authed_client().rpc("save_case_draft_checked", {
+            "p_case_id": str(case_id), "p_text": text,
+            "p_expected": None if expected_at is False else expected_at,
+            "p_check": expected_at is not False,
+        }).execute().data or []
+        if not rows:
+            raise SaveConflict("draft")
+        return rows[0]["updated_at"]
     response = (
         get_authed_client()
         .table(CASE_DRAFTS_TABLE)
@@ -1586,6 +1599,8 @@ def collect_my_data() -> dict:
         evidence_items += [{"case_id": case_id, "path": item["path"], "name": item["display_name"], "size": item.get("size")}
                            for item in items]
     account = {"email": session.get("email"), "method": current_account_label(session)[1]}
+    if AI_USAGE_DB_ENABLED:
+        account["ai_usage"] = fetch("AI 사용량 기록", lambda: client.rpc("my_ai_usage").execute())
     result = build_text_part(user_id, account, cases, {r["case_id"]: r for r in draft_rows}, {r["case_id"]: r for r in ws_rows},
                              consents, evidence_items, missing, datetime.datetime.now(KST), evidence_status=evidence)
     result["user_id"] = user_id
@@ -1747,12 +1762,17 @@ def map_workspace_save_error(error: Exception) -> str:
     return "저장하지 못했어요. 고친 내용은 화면에 그대로 있으니 잠시 후 '작업 저장'을 다시 눌러 주세요." + contact_hint()
 
 
-GEMINI_MODEL = "gemini-3.5-flash-lite"
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash-lite"
 GEMINI_TIMEOUT_MS = 90_000
 # 유료 API 비용 보호: 계정마다 1시간에 AI 호출(초안 생성·상담)을 이 횟수까지만 허용한다.
 AI_CALLS_PER_HOUR = int(os.environ.get("AI_CALLS_PER_HOUR") or 30)
 # 전체 이용자를 합친 1시간 호출 상한. 이용자가 많아져도 비용이 이 범위를 넘지 않게 한다.
 AI_CALLS_PER_HOUR_TOTAL = int(os.environ.get("AI_CALLS_PER_HOUR_TOTAL") or 300)
+AI_CALLS_PER_DAY = int(os.environ.get("AI_CALLS_PER_DAY") or 100)
+AI_CALLS_PER_DAY_TOTAL = int(os.environ.get("AI_CALLS_PER_DAY_TOTAL") or 2000)
+AI_USAGE_DB_ENABLED = os.environ.get("AI_USAGE_DB_ENABLED") == "true"
+# Off until migration/settings have been tested. This check does not verify billing remotely.
+AI_PUBLIC_LAUNCH_ENABLED = os.environ.get("AI_PUBLIC_LAUNCH_ENABLED") == "true"
 
 
 class AiUsageLimitError(RuntimeError):
@@ -1768,6 +1788,20 @@ class AiPausedError(AiUsageLimitError):
 AI_FEATURES_PAUSED = os.environ.get("AI_FEATURES_PAUSED") == "true"
 AI_PAUSED_MESSAGE = "AI 기능을 점검 중입니다. 저장한 사건은 계속 확인할 수 있습니다."
 AI_PAUSED_CASE_NOTE = "사건 내용은 지금도 저장할 수 있어요. 점검이 끝나면 '내 사건'에서 초안을 만들 수 있어요."
+
+
+def ai_unavailable_for_current_user():
+    if AI_FEATURES_PAUSED:
+        return True
+    if is_admin() and not AI_PUBLIC_LAUNCH_ENABLED:
+        return False  # Controlled operator test; no general-user calls.
+    if not AI_PUBLIC_LAUNCH_ENABLED:
+        return True
+    return bool(public_ai_blockers(
+        paid=os.environ.get("AI_PAID_TIER_VERIFIED") == "true",
+        hosting=os.environ.get("AI_HOSTING_VERIFIED") == "true",
+        age=MIN_USER_AGE, privacy_v3=privacy_v3_in_effect(), durable=AI_USAGE_DB_ENABLED,
+    ))
 
 
 class AiUsageLimiter:
@@ -1800,11 +1834,54 @@ def get_ai_usage_limiter() -> AiUsageLimiter:
     return AiUsageLimiter()
 
 
-def reserve_ai_call() -> None:
+@st.cache_resource
+def get_ai_usage_store():
+    # 전용 최소 권한 DB 계정(gosomi_ai_usage)으로만 연결한다. 이 계정은 예약·완료 함수만 실행할 수 있고
+    # 사건·파일·계정 자료는 읽지 못한다. Supabase service_role 키는 쓰지 않는다.
+    # 주소는 sslmode=verify-full + sslrootcert(Supabase CA)가 있어야 하며, 아니면 연결하지 않는다(AI 요청을 멈춤).
+    return PostgresUsageStore(os.environ.get("AI_USAGE_DB_URL", ""))
+
+
+def finish_ai_request(request_id, status, metadata=None, feature="chat"):
+    if request_id:
+        try:
+            get_ai_usage_store().finish(request_id, status, metadata)
+        except Exception:
+            # Keep reserved calls counted after DB errors. Never log exception messages or AI content.
+            print("[ai_usage] result=completion_unavailable", flush=True)
+    counts = usage_counts(metadata)
+    print("[ai_usage] " + json.dumps({"feature": feature, "status": status, **counts}), flush=True)
+
+
+def reserve_ai_call(feature="chat", model=None):
     """계정별·전체 1시간 호출 한도를 하나 쓴다. 넘으면 AiUsageLimitError. AI를 멈춘 동안에는 AiPausedError."""
-    if AI_FEATURES_PAUSED:
+    if ai_unavailable_for_current_user():
         raise AiPausedError(AI_PAUSED_MESSAGE)
     session = st.session_state.get("supabase_session") or {}
+    if AI_PUBLIC_LAUNCH_ENABLED:
+        blockers = public_ai_blockers(
+            paid=os.environ.get("AI_PAID_TIER_VERIFIED") == "true",
+            hosting=os.environ.get("AI_HOSTING_VERIFIED") == "true",
+            age=MIN_USER_AGE, privacy_v3=privacy_v3_in_effect(), durable=AI_USAGE_DB_ENABLED,
+        )
+        if blockers:
+            raise AiPausedError(AI_PAUSED_MESSAGE)
+    if AI_USAGE_DB_ENABLED:
+        user_id = verified_user_id(session)
+        if not user_id:
+            raise AiPausedError("로그인이 만료되었습니다. 다시 로그인해 주세요.")
+        request_id = str(uuid.uuid4())
+        try:
+            result = get_ai_usage_store().reserve(user_id, request_id, feature, model or GEMINI_MODEL, {
+                "user_hour": AI_CALLS_PER_HOUR, "total_hour": AI_CALLS_PER_HOUR_TOTAL,
+                "user_day": AI_CALLS_PER_DAY, "total_day": AI_CALLS_PER_DAY_TOTAL,
+            })
+        except Exception:
+            raise AiPausedError("AI 사용량을 확인하지 못해 요청을 멈췄어요. 잠시 후 다시 시도해 주세요.") from None
+        if result != "reserved":
+            unit = "하루" if result.endswith("day") else "1시간"
+            raise AiUsageLimitError(f"{unit} AI 사용 한도에 도달했어요. 저장한 사건은 계속 확인할 수 있어요.")
+        return request_id
     limiter = get_ai_usage_limiter()
     if not limiter.allow(session.get("user_id", ""), AI_CALLS_PER_HOUR):
         raise AiUsageLimitError(
@@ -1817,45 +1894,73 @@ def reserve_ai_call() -> None:
         )
 
 
-def call_gemini(contents, system_instruction=None) -> str:
-    reserve_ai_call()
+def call_gemini(contents, system_instruction=None, *, feature="chat") -> str:
+    settings = generation_settings(feature)
+    request_id = reserve_ai_call(feature, GEMINI_MODEL)
     client = genai.Client(
         api_key=os.environ["GEMINI_API_KEY"],
         http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_MS),
     )
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(system_instruction=system_instruction) if system_instruction else None,
-    )
+    try:
+        response = client.models.generate_content(
+            model=GEMINI_MODEL, contents=contents,
+            config=types.GenerateContentConfig(system_instruction=system_instruction, **settings),
+        )
+    except Exception:
+        finish_ai_request(request_id, "failed", feature=feature)
+        raise
+    # A cut-off draft must never look like a complete downloadable complaint.
+    if any(str(getattr(c, "finish_reason", "")).endswith("MAX_TOKENS") for c in (getattr(response, "candidates", None) or [])):
+        finish_ai_request(request_id, "failed", getattr(response, "usage_metadata", None), feature=feature)
+        raise RuntimeError("AI response exceeded configured output limit")
     text = (getattr(response, "text", None) or "").strip()
     if not text:
         # 안전 필터 등으로 빈 응답이 오면 'None'이 초안에 들어가지 않도록 실패로 처리한다.
+        finish_ai_request(request_id, "failed", getattr(response, "usage_metadata", None), feature=feature)
         raise RuntimeError("empty AI response")
+    finish_ai_request(request_id, "succeeded", getattr(response, "usage_metadata", None), feature=feature)
     return text
 
 
 def synthesize_speech(text: str, voice: str) -> str:
     """답변 글을 Gemini 음성 생성으로 WAV(base64)로 바꾼다. 키는 서버에서만 쓰고, 글·음성은 기록하지 않는다."""
-    reserve_ai_call()
     return base64.b64encode(request_tts_audio(text, voice)).decode("ascii")
 
 
 def request_tts_audio(text: str, voice: str) -> bytes:
     """공식 REST 주소로 음성 생성을 요청해 WAV 바이트를 돌려준다. 실패하면 TtsError(로그용 요약만 담음)."""
-    if AI_FEATURES_PAUSED:
+    if ai_unavailable_for_current_user():
         raise AiPausedError(AI_PAUSED_MESSAGE)
+    request_id = reserve_ai_call("tts", GEMINI_TTS_MODEL)
     key = os.environ["GEMINI_API_KEY"]
-    response = httpx.post(
-        TTS_ENDPOINT, json=tts_request(text, voice, GEMINI_TTS_MODEL),
-        headers={"x-goog-api-key": key, "Content-Type": "application/json"}, timeout=GEMINI_TTS_TIMEOUT_MS / 1000,
-    )
+    try:
+        response = httpx.post(
+            TTS_ENDPOINT, json=tts_request(text, voice, GEMINI_TTS_MODEL),
+            headers={"x-goog-api-key": key, "Content-Type": "application/json"}, timeout=GEMINI_TTS_TIMEOUT_MS / 1000,
+        )
+    except Exception:
+        finish_ai_request(request_id, "failed", feature="tts")
+        raise
     if response.status_code != 200:
+        finish_ai_request(request_id, "failed", feature="tts")
         raise tts_error_from_response(response.status_code, response.text, hide=(key, text))
     try:
-        return extract_tts_audio(response.json())
+        payload = response.json()
+    except ValueError:
+        finish_ai_request(request_id, "failed", feature="tts")
+        raise TtsError(200, "INVALID_JSON", "invalid audio response") from None
+    raw_usage = payload.get("usageMetadata") or {}
+    metadata = {
+        "prompt_token_count": raw_usage.get("promptTokenCount"), "candidates_token_count": raw_usage.get("candidatesTokenCount"),
+        "thoughts_token_count": raw_usage.get("thoughtsTokenCount"), "total_token_count": raw_usage.get("totalTokenCount"),
+    }
+    try:
+        audio = extract_tts_audio(payload)
     except ValueError as error:
+        finish_ai_request(request_id, "failed", metadata, feature="tts")
         raise TtsError(200, "NO_AUDIO", str(error)) from error
+    finish_ai_request(request_id, "succeeded", metadata, feature="tts")
+    return audio
 
 
 def log_tts_error(stage: str, error: Exception, voice: str = "") -> None:
@@ -1897,7 +2002,7 @@ def ai_error_message(error: Exception, default: str) -> str:
 def generate_case_draft(case):
     today_str = datetime.datetime.now(KST).date().isoformat()
     prompt = build_draft_prompt(case, today_str)
-    text = call_gemini([{"role": "user", "parts": [{"text": prompt}]}])
+    text = call_gemini([{"role": "user", "parts": [{"text": prompt}]}], feature="draft")
     return with_draft_disclaimer(text)
 
 
@@ -3030,7 +3135,7 @@ def render_voice_input() -> None:
                         text = call_gemini([
                             types.Part.from_text(text=transcription_prompt()),
                             types.Part.from_bytes(data=audio.getvalue(), mime_type=mime or "audio/wav"),
-                        ])
+                        ], feature="transcribe")
                 except Exception as error:
                     st.error(ai_error_message(error, "음성을 글로 바꾸지 못했습니다. 조용한 곳에서 다시 녹음하거나 잠시 후 시도해 주세요."))
                     st.caption("다시 시도할 수 있도록 음성을 잠시 남겨 두었습니다. 그만두려면 '녹음·파일 지우기'를 눌러 주세요. 탭을 닫아도 지워집니다.")
@@ -3068,7 +3173,7 @@ def render_voice_input() -> None:
             if st.button("입력칸으로 정리하기", key="voice_extract_btn"):
                 try:
                     with st.spinner("말한 내용을 입력칸별로 나누고 있습니다."):
-                        raw = call_gemini([{"role": "user", "parts": [{"text": extraction_prompt(transcript, list(DAMAGE_TYPES))}]}])
+                        raw = call_gemini([{"role": "user", "parts": [{"text": extraction_prompt(transcript, list(DAMAGE_TYPES))}]}], feature="extract")
                         proposal = parse_extraction(raw, transcript, list(DAMAGE_TYPES))
                 except ValueError:
                     st.error("정리 결과를 읽지 못했습니다. '입력칸으로 정리하기'를 한 번 더 눌러 주세요.")
@@ -3230,7 +3335,7 @@ def handle_voice_turn(payload) -> None:
         transcript = call_gemini([
             types.Part.from_text(text=transcription_prompt()),
             types.Part.from_bytes(data=wav, mime_type="audio/wav"),
-        ])
+        ], feature="transcribe")
     except Exception as error:
         del wav
         print(f"[voice_chat] stage=transcribe result={type(error).__name__}", flush=True)
@@ -3250,6 +3355,7 @@ def handle_voice_turn(payload) -> None:
         answer = call_gemini(
             model_contents(messages, transcript),
             voice_system_instruction(SERVICE_IDENTITY_INSTRUCTION, SAFE_DRAFT_INSTRUCTION),
+            feature="voice_chat",
         )
     except Exception as error:
         print(f"[voice_chat] stage=answer result={type(error).__name__}", flush=True)
@@ -3371,7 +3477,7 @@ def run_chat_extraction() -> None:
     transcript = user_statements(chat_messages())
     try:
         with st.spinner("대화에서 말씀하신 내용을 항목별로 나누고 있습니다."):
-            raw = call_gemini([{"role": "user", "parts": [{"text": extraction_prompt(transcript, list(DAMAGE_TYPES), SOURCE_CHAT)}]}])
+            raw = call_gemini([{"role": "user", "parts": [{"text": extraction_prompt(transcript, list(DAMAGE_TYPES), SOURCE_CHAT)}]}], feature="extract")
             proposal = parse_extraction(raw, transcript, list(DAMAGE_TYPES))
     except ValueError:
         st.error("정리 결과를 읽지 못했어요. '이 대화로 사건 정리하기'를 한 번 더 눌러 주세요.")
@@ -3429,11 +3535,11 @@ def render_answer_summary(message: dict, index: int, busy: bool) -> None:
             st.caption("AI가 위 답변만 줄여 쓴 것이에요. 자세한 내용은 위 답변을 확인해 주세요.")
         return
     if st.button("핵심만 보기 (짧게 요약)", key=f"chat_sum_{index}", icon=":material/summarize:", type="secondary",
-                 disabled=busy or AI_FEATURES_PAUSED,
+                 disabled=busy or ai_unavailable_for_current_user(),
                  help="긴 답변을 핵심과 다음에 할 일로 짧게 줄여 보여 드려요."):
         try:
             with st.spinner("답변을 줄이고 있어요."):
-                raw = call_gemini([{"role": "user", "parts": [{"text": summary_prompt(message["content"])}]}])
+                raw = call_gemini([{"role": "user", "parts": [{"text": summary_prompt(message["content"])}]}], feature="summary")
         except Exception as error:
             st.error(ai_error_message(error, "요약하지 못했어요. 잠시 후 다시 눌러 주세요."))
             return
@@ -3479,7 +3585,7 @@ def render_chat_text(voice_ok: bool) -> None:
 
     history_box = st.container()
     with history_box:
-        if not AI_FEATURES_PAUSED:
+        if not ai_unavailable_for_current_user():
             with st.chat_message("assistant"):
                 st.markdown(CHAT_WELCOME)
         for index, message in enumerate(messages):
@@ -3499,7 +3605,7 @@ def render_chat_text(voice_ok: bool) -> None:
             with col_x:
                 st.button("보내지 않기", key="chat_drop_failed_btn", on_click=drop_failed_question, width="stretch")
 
-    if has_user_text and not busy and not st.session_state.get("chat_proposal") and not AI_FEATURES_PAUSED:
+    if has_user_text and not busy and not st.session_state.get("chat_proposal") and not ai_unavailable_for_current_user():
         extract = st.button("이 대화로 사건 정리하기", key="chat_extract_btn", icon=":material/assignment:", type="secondary",
                             help="대화에서 직접 말씀하신 내용만 모아 고소장 작성 칸에 넣을 제안을 만들어요. 확인 전에는 아무것도 바뀌지 않아요.")
     if extract:
@@ -3513,8 +3619,8 @@ def render_chat_text(voice_ok: bool) -> None:
             col_input, col_mic = st.container(), None
         with col_input:
             prompt = st.chat_input(
-                "지금은 질문을 보낼 수 없어요" if AI_FEATURES_PAUSED else "답변을 만들고 있어요…" if busy else CHAT_INPUT_PLACEHOLDER,
-                max_chars=CHAT_MAX_INPUT_CHARS, key="chat_input_box", disabled=busy or AI_FEATURES_PAUSED,
+                "지금은 질문을 보낼 수 없어요" if ai_unavailable_for_current_user() else "답변을 만들고 있어요…" if busy else CHAT_INPUT_PLACEHOLDER,
+                max_chars=CHAT_MAX_INPUT_CHARS, key="chat_input_box", disabled=busy or ai_unavailable_for_current_user(),
             )
         if col_mic is not None:
             with col_mic:
@@ -3593,7 +3699,7 @@ def render_chat_voice() -> None:
 
 def render_chat_v2() -> None:
     st.markdown(CHAT_CSS, unsafe_allow_html=True)
-    voice_ok = voice_chat_available() and not AI_FEATURES_PAUSED   # AI 점검 중에는 음성 대화를 열지 않는다
+    voice_ok = voice_chat_available() and not ai_unavailable_for_current_user()   # AI 점검 중에는 음성 대화를 열지 않는다
     if voice_ok and st.session_state.get("chat_mode") == "voice":
         render_chat_voice()
     else:
@@ -4300,10 +4406,10 @@ def render_top_bar(identity: str, method: str) -> str:
 def render_home_page() -> None:
     st.markdown("## 무엇을 도와드릴까요?")
     choices = [
-        ("chat", "AI에게 질문하기", "AI 기능을 점검 중입니다." if AI_FEATURES_PAUSED
+        ("chat", "AI에게 질문하기", "AI 기능을 점검 중입니다." if ai_unavailable_for_current_user()
          else "궁금한 점을 글이나 말로 물어보세요." if voice_chat_available() else "궁금한 점을 글로 물어보세요.",
          ":material/chat:"),
-        ("case", "고소장 작성하기", "사건 내용을 정리해 저장해요. (초안 만들기는 점검 중)" if AI_FEATURES_PAUSED
+        ("case", "고소장 작성하기", "사건 내용을 정리해 저장해요. (초안 만들기는 점검 중)" if ai_unavailable_for_current_user()
          else "사건 내용을 바탕으로 초안을 만들어요.", ":material/edit_document:"),
         ("cases", "내 사건 보기", "저장한 사건을 확인하세요.", ":material/folder_open:"),
     ]
@@ -4320,7 +4426,7 @@ def render_home_page() -> None:
 
 
 def render_steps(current: int) -> None:
-    names = ["내용 적기", "확인하기", "저장" if AI_FEATURES_PAUSED else "정리·초안" if assist_preview() else "초안 받기"]
+    names = ["내용 적기", "확인하기", "저장" if ai_unavailable_for_current_user() else "정리·초안" if assist_preview() else "초안 받기"]
     items = []
     for i, name in enumerate(names, 1):
         state = "now" if i == current else ("done" if i < current else "")
@@ -4362,7 +4468,7 @@ def start_from_chat(voice: bool) -> None:
 
 
 def render_case_form() -> None:
-    if assist_preview() and not AI_FEATURES_PAUSED:
+    if assist_preview() and not ai_unavailable_for_current_user():
         with st.container(key="case_start_choice"):
             st.markdown("**어떻게 시작할까요?** 이야기로 시작하면 대화 내용을 이 칸에 옮길 수 있어요(옮기기 전에 확인해요).")
             options = [("AI와 글로 이야기하기", ":material/chat:", False)]
@@ -4374,7 +4480,7 @@ def render_case_form() -> None:
                     st.button(label, key=f"case_start_{'voice' if voice else 'text'}", icon=icon, width="stretch",
                               on_click=start_from_chat, args=(voice,))
             st.caption("직접 적으려면 아래 칸을 채워 주세요.")
-    if voice_input_available() and not AI_FEATURES_PAUSED:
+    if voice_input_available() and not ai_unavailable_for_current_user():
         render_voice_input()
     st.markdown("### 1. 어떤 피해인가요?")
     type_options = list(DAMAGE_TYPES) + [OTHER_TYPE]
@@ -4441,7 +4547,7 @@ def render_case_form() -> None:
         # 적던 내용은 다른 화면에 다녀와도 남지만, 새로고침·탭 닫기 때는 사라지므로 브라우저 확인 창을 띄운다.
         st.session_state["_unsaved_form"] = True
         st.caption("적은 내용은 '입력한 내용 확인하기' → '"
-                   + ("사건 저장하기" if AI_FEATURES_PAUSED else "저장하고 초안 만들기")
+                   + ("사건 저장하기" if ai_unavailable_for_current_user() else "저장하고 초안 만들기")
                    + "'를 눌러야 저장돼요. 새로고침하거나 탭을 닫으면 사라져요.")
     submitted = st.button("입력한 내용 확인하기", type="primary", key="case_form_submit", width="stretch",
                           icon=":material/fact_check:")
@@ -4521,7 +4627,7 @@ def render_case_review(review: dict) -> None:
     st.markdown("### 입력한 내용을 확인해 주세요")
     if assist_preview():
         render_review_questions(review)
-    st.caption(("이대로 사건을 저장해요(초안 만들기는 AI 점검이 끝난 뒤). " if AI_FEATURES_PAUSED else "이대로 저장하고 초안을 만들어요. ")
+    st.caption(("이대로 사건을 저장해요(초안 만들기는 AI 점검이 끝난 뒤). " if ai_unavailable_for_current_user() else "이대로 저장하고 초안을 만들어요. ")
                + "고칠 곳이 있으면 '고치러 가기'를 눌러 주세요. 적은 내용은 그대로 남아 있어요.")
     with st.container(border=True):
         for label, key in CASE_FIELDS:
@@ -4530,7 +4636,7 @@ def render_case_review(review: dict) -> None:
             st.markdown(f"**{label}**  \n{shown}")
     col_confirm, col_back = st.columns(2)
     with col_confirm:
-        confirm_clicked = st.button("사건 저장하기" if AI_FEATURES_PAUSED else "저장하고 초안 만들기", key="case_review_confirm",
+        confirm_clicked = st.button("사건 저장하기" if ai_unavailable_for_current_user() else "저장하고 초안 만들기", key="case_review_confirm",
                                     type="primary", width="stretch",
                                     icon=":material/auto_awesome:")
     with col_back:
@@ -4616,7 +4722,7 @@ def start_new_case_after_pending() -> None:
 
 
 def render_pending_draft() -> None:
-    if AI_FEATURES_PAUSED:
+    if ai_unavailable_for_current_user():
         # AI 점검 중: 사건은 저장됐다. 누를 수 없는 '초안 다시 만들기' 대신 다음에 할 일만 보여 준다.
         st.success("사건을 저장했어요. AI 기능 점검이 끝나면 '내 사건'에서 초안을 만들 수 있어요.")
         col_open, col_new = st.columns(2)
@@ -4632,7 +4738,7 @@ def render_pending_draft() -> None:
         st.caption(st.session_state.pending_draft_reason)
     col_retry, col_cancel = st.columns(2)
     with col_retry:
-        if st.button("초안 다시 만들기", key="retry_draft_button", type="primary", width="stretch", disabled=AI_FEATURES_PAUSED):
+        if st.button("초안 다시 만들기", key="retry_draft_button", type="primary", width="stretch", disabled=ai_unavailable_for_current_user()):
             entry = st.session_state.pending_draft_entry
             try:
                 with st.spinner("고소장 초안을 만들고 있어요. 보통 10~30초 걸려요."):
@@ -4652,7 +4758,7 @@ def render_pending_draft() -> None:
 
 def render_case_page() -> None:
     st.markdown("## 고소장 작성하기")
-    if AI_FEATURES_PAUSED:
+    if ai_unavailable_for_current_user():
         st.info(AI_PAUSED_MESSAGE)
         st.caption(AI_PAUSED_CASE_NOTE)
     review = st.session_state.get("case_review")
@@ -5104,10 +5210,10 @@ def render_ws_draft(case_id: str, case: dict, ws: dict, draft_key: str, editor_k
     draft = st.session_state.get(draft_key)
     if not draft:
         st.markdown("아직 초안이 없어요. 채운 내용으로 참고용 초안을 만들어요.")
-        if AI_FEATURES_PAUSED:
+        if ai_unavailable_for_current_user():
             st.caption(AI_PAUSED_MESSAGE)
         if st.button("초안 만들기", key=f"ws_make_{case_id}", type="primary", icon=":material/auto_awesome:",
-                     disabled=AI_FEATURES_PAUSED):
+                     disabled=ai_unavailable_for_current_user()):
             try:
                 with st.spinner("고소장 초안을 만들고 있어요. 보통 10~30초 걸려요."):
                     st.session_state[draft_key] = generate_case_draft(case)
@@ -5125,10 +5231,10 @@ def render_ws_draft(case_id: str, case: dict, ws: dict, draft_key: str, editor_k
     cols = st.columns(3)
     for col, (style, (label, _)) in zip(cols, STYLES.items()):
         with col:
-            if st.button(label, key=f"ws_style_{case_id}_{style}", width="stretch", disabled=AI_FEATURES_PAUSED):
+            if st.button(label, key=f"ws_style_{case_id}_{style}", width="stretch", disabled=ai_unavailable_for_current_user()):
                 try:
                     with st.spinner(f"{label} 바꾸고 있어요."):
-                        after = clean_transcript(call_gemini([{"role": "user", "parts": [{"text": rewrite_prompt(current, style)}]}]))
+                        after = clean_transcript(call_gemini([{"role": "user", "parts": [{"text": rewrite_prompt(current, style)}]}], feature="rewrite"))
                 except Exception as error:
                     st.error(ai_error_message(error, "표현을 바꾸지 못했어요. 지금 초안은 그대로 있어요."))
                 else:
@@ -5543,10 +5649,10 @@ def render_case_detail(case: dict, saved_at, can_save_drafts: bool) -> None:
                 st.caption("아직 저장된 초안이 없어요. 초안을 만든 뒤 '초안 저장'을 눌러 주세요.")
             else:
                 st.caption("저장한 내용으로 초안을 새로 만들어요. 초안은 서버에 저장되지 않으니 필요하면 내려받아 주세요.")
-            if AI_FEATURES_PAUSED:
+            if ai_unavailable_for_current_user():
                 st.caption(AI_PAUSED_MESSAGE)
             if st.button("AI로 새 초안 만들기", key=f"list_draft_btn_{case_id}", type="secondary" if saved_at else "primary",
-                         icon=":material/auto_awesome:", disabled=AI_FEATURES_PAUSED):
+                         icon=":material/auto_awesome:", disabled=ai_unavailable_for_current_user()):
                 try:
                     with st.spinner("고소장 초안을 만들고 있어요. 보통 10~30초 걸려요."):
                         st.session_state[list_draft_key] = generate_case_draft(case)
@@ -5699,22 +5805,22 @@ def render_public_chat() -> None:
     st.caption("일반 법률 정보를 안내해요. 법률 자문은 아니에요.")
     history_box = st.container()
     with history_box:
-        if not AI_FEATURES_PAUSED:
+        if not ai_unavailable_for_current_user():
             with st.chat_message("assistant"):
                 st.markdown(CHAT_WELCOME)
         for message in st.session_state.messages:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
     with st.container(key="public_chat_input_row"):  # 입력창을 대화 바로 아래에 둔다(화면 맨 아래 고정이 아니라)
-        prompt = st.chat_input("지금은 질문을 보낼 수 없어요" if AI_FEATURES_PAUSED else CHAT_INPUT_PLACEHOLDER, max_chars=3000,
-                               key="public_chat_input", disabled=AI_FEATURES_PAUSED)
+        prompt = st.chat_input("지금은 질문을 보낼 수 없어요" if ai_unavailable_for_current_user() else CHAT_INPUT_PLACEHOLDER, max_chars=3000,
+                               key="public_chat_input", disabled=ai_unavailable_for_current_user())
     with st.expander("대화는 어떻게 처리되나요?"):
         st.markdown(
             "- 대화 내용은 이 서비스에 저장하지 않아요. 새로고침하거나 로그아웃하면 사라져요.\n"
             "- 답변을 만들기 위해 질문이 Google Gemini로 전송돼요. Google은 오남용 방지를 위해 입력 기록을 일정 기간 보관할 수 있어요.\n"
             "- AI 답변은 일반 정보예요. 인터넷 검색을 하지 않아 최신 법·제도와 다를 수 있고, 범죄가 되는지나 결과는 수사기관·법원이 판단해요."
         )
-    if prompt and not AI_FEATURES_PAUSED:
+    if prompt and not ai_unavailable_for_current_user():
         st.session_state.messages.append({"role": "user", "content": prompt})
         with history_box:
             with st.chat_message("user"):
@@ -5731,7 +5837,7 @@ def render_public_chat() -> None:
 
 def render_chat_page() -> None:
     st.markdown("## AI에게 질문하기")
-    if AI_FEATURES_PAUSED:
+    if ai_unavailable_for_current_user():
         st.info(AI_PAUSED_MESSAGE)
     if chat_v2_available():
         render_chat_v2()
@@ -5767,3 +5873,4 @@ current_view = "|".join(str(x) for x in (
 if st.session_state.get("_last_view") != current_view:
     st.session_state._last_view = current_view
     _scroll_top_component(key="scroll_top", data={"view": current_view}, height=0)
+

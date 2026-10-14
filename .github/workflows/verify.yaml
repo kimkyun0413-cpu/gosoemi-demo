@@ -1,0 +1,41 @@
+name: Verify application and unapplied SQL
+on:
+  pull_request:
+    paths: ['**.py', 'requirements.txt', 'supabase/**', 'deploy/**', 'Dockerfile', '.dockerignore', '.env.example', 'fly.toml', '.github/workflows/verify.yaml']
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-save @electric-sql/pglite@0.5.9
+      - run: node supabase/tests/ai_usage_test.mjs
+      - run: cp .env.example .env
+      - run: docker compose --env-file .env -f deploy/compose.yaml config --quiet
+      - run: docker build -t gosomi-check .
+      # 이미지가 실제로 뜨고 상태 확인에 응답하는지(가짜 값, 외부 서비스 연결 없음)
+      - name: Start image and check health
+        run: |
+          docker run -d --name gosomi-check -p 8501:8501 --env-file .env gosomi-check
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8501/_stcore/health; then echo; break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8501/_stcore/health
+          test "$(docker inspect -f '{{.State.Health.Status}}' gosomi-check)" != "unhealthy"
+          docker exec gosomi-check sh -c 'id -un; ls -A /app; test ! -e /app/main.py && test ! -e /app/credentials.json && test ! -e /app/.env'
+          # 사용량 DB 드라이버와 점검 스크립트가 이미지 안에 있고, 주소가 없으면 연결하지 않고 실패하는지
+          docker exec gosomi-check python -c "import psycopg; print('psycopg', psycopg.__version__)"
+          if docker exec gosomi-check python scripts/check_ai_usage_db.py; then echo "check script must refuse without AI_USAGE_DB_URL"; exit 1; fi
+          docker logs gosomi-check 2>&1 | tail -20

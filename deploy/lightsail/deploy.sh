@@ -5,5 +5,5 @@ set -euo pipefail
 HOST="${1:?ubuntu@서버IP}"; KEY="${2:?SSH 키 파일 경로}"
 cd "$(dirname "$0")/../.."
 FILES=$(sed -n 's/^!//p' .dockerignore)
-rsync -az --relative -e "ssh -i $KEY" $FILES Dockerfile .dockerignore deploy/lightsail/docker-compose.yml deploy/lightsail/Caddyfile "$HOST":/opt/gosomi/
-ssh -i "$KEY" "$HOST" 'cd /opt/gosomi && test -f app.env && test -f caddy.env && docker compose -f deploy/lightsail/docker-compose.yml up -d --build && docker compose -f deploy/lightsail/docker-compose.yml ps'
+rsync -az --relative -e "ssh -i $KEY" $FILES Dockerfile .dockerignore deploy/compose.yaml deploy/Caddyfile "$HOST":/opt/gosomi/
+ssh -i "$KEY" "$HOST" 'cd /opt/gosomi && test -f .env && docker compose --env-file .env -f deploy/compose.yaml up -d --build && docker compose --env-file .env -f deploy/compose.yaml ps'

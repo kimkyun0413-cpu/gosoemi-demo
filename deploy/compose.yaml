@@ -1,0 +1,37 @@
+# 서버 실행 설정(AWS Lightsail 등 Docker 서버용). 서버 생성 전 — CI에서 문법만 확인.
+# 실행: docker compose --env-file .env -f deploy/compose.yaml up -d --build   (.env는 서버에만, chmod 600)
+services:
+  app:
+    build:
+      context: ..
+    env_file: ../.env
+    restart: unless-stopped
+    mem_limit: 768m            # 1GB 서버: 운영체제·Caddy 몫을 남김(스왑 1GB는 deploy/lightsail/setup.sh)
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    volumes:
+      - ../certs:/run/certs:ro   # Supabase CA 인증서(supabase-ca.crt). 사용량 DB 암호화 연결(verify-full)에 쓴다
+    # 8501은 밖으로 열지 않는다. HTTPS 프록시만 앱에 닿는다.
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+  proxy:                       # HTTPS 인증서 자동 발급·갱신(Let's Encrypt) + 앱으로 전달
+    image: caddy:2.10
+    environment:
+      GOSOMI_DOMAIN: ${GOSOMI_DOMAIN:-gosomi.ai.kr}
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+volumes:
+  caddy_data:
+  caddy_config:

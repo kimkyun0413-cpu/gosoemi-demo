@@ -233,6 +233,11 @@ def build_text_part(user_id: str, account: dict, cases: list, drafts: dict, work
                                 "part": no} for no, part in enumerate(parts, 2) for f in part],
             "missing": missing, "exported_at": now.isoformat(),
         }
+        if "ai_usage" in account:
+            # RPC derives auth.uid(); still filter the returned account id defensively.
+            data["ai_usage"] = [_clean(r) for r in account["ai_usage"] if str(r.get("user_id")) == str(user_id)]
+            z.writestr(f"{root}/AI사용량기록.json",
+                       json.dumps(data["ai_usage"], ensure_ascii=False, indent=1, default=str))
         z.writestr(f"{root}/전체자료.json", json.dumps(data, ensure_ascii=False, indent=1, default=str))
         z.writestr(f"{root}/읽어보세요.txt", readme_text(summary, missing, now, parts))
     return {"root": root, "text_part": buf.getvalue(), "parts": parts, "missing": missing, "complete": not missing,
@@ -262,3 +267,4 @@ def build_evidence_part(user_id: str, root: str, part: list, part_no: int, part_
                          if missing else ["[받지 못한 자료] 없음 — 이 묶음의 파일을 모두 담았습니다."])
         z.writestr(f"{root}/읽어보세요_{part_no}번묶음.txt", "\n".join(lines) + "\n")
     return {"data": buf.getvalue(), "missing": missing, "files": len(written)}
+

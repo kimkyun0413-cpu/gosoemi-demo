@@ -15,12 +15,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - [case_workspace.py](case_workspace.py) — rules for the per-case workspace (admin preview): missing-info questions, amount/date mismatch notes, timeline split from the user's own story (dates copied, never invented), evidence list with user-written notes (file contents are never analysed), draft rewording prompt and number-change check, bundled TXT/Word export.
 - [calendar_ics.py](calendar_ics.py) — user-chosen schedules as an .ics file (Asia/Seoul, optional alarm). The app sends no reminders and never calculates legal deadlines.
 - [data_export.py](data_export.py) — '내 자료 모두 내려받기' ZIP builder (Streamlit-free): per-case folders, readme with missing items, secrets excluded, other users' rows/paths filtered, part 1 = text + evidence list, evidence built one ~20MB part at a time on request (previous part dropped first, part dropped after download; no total cap). Export state is cleared on logout/account switch. The app collects data with the user's token only.
+- [ai_runtime.py](ai_runtime.py) — AI request controls (per-feature output limits/thinking level, token usage parsing, public-launch blockers, `PostgresUsageStore` for the least-privilege `gosomi_ai_usage` login; refuses DSNs without `sslmode=verify-full` + CA). Check a live connection read-only with `scripts/check_ai_usage_db.py`. Usage DB is off until migration 20261014000000 is applied.
 - [billing.py](billing.py) — paid-plan settings and display rules only. No payment provider is integrated; sales stay closed. DB/Edge Function drafts live in `supabase/proposals/billing/` and are not applied.
 - [auth_ip.py](auth_ip.py) — when to forward the user's IP to Supabase Auth (Sb-Forwarded-For).
 - [scripts/](scripts/) — Free-plan backup/restore, voice smoke test, privacy review packet builder. None of them run automatically.
 - [docs/decisions-2026-10.md](docs/decisions-2026-10.md), [docs/decisions-2026-10-12.md](docs/decisions-2026-10-12.md) — options prepared for the owner; the 10-12 file is the current single list (Gemini free tier, age terms, mail, backup, unused secrets).
-- [docs/domain-hosting-email-plan.md](docs/domain-hosting-email-plan.md) — gosomiapp.com, hosting move before paid sales (Streamlit Community Cloud terms allow only non-commercial use with personal data), Resend SMTP and inbox. Nothing applied.
-- `Dockerfile`, `.dockerignore` (allow-list: add every new helper module), `fly.toml`, [deploy/](deploy/) — prepared hosting move (Fly.io or AWS Lightsail Seoul), not deployed anywhere; order and cutover in [docs/server-migration-plan.md](docs/server-migration-plan.md). Streamlit Cloud ignores these files.
+- [docs/domain-hosting-email-plan.md](docs/domain-hosting-email-plan.md) — domain gosomi.ai.kr (gosomiapp.com was an earlier candidate), hosting move before paid sales (Streamlit Community Cloud terms allow only non-commercial use with personal data), Resend SMTP and inbox. Nothing applied.
+- `Dockerfile`, `.dockerignore` (allow-list: add every new helper module), `.env.example` (the one settings template), `fly.toml`, [deploy/](deploy/) (`compose.yaml` + Caddy for Docker servers, `lightsail/` scripts) — prepared hosting move for gosomi.ai.kr, not deployed anywhere; CI builds and starts the image; order and cutover in [docs/server-migration-plan.md](docs/server-migration-plan.md). Streamlit Cloud ignores these files.
 - [docs/launch-status.md](docs/launch-status.md) — current launch blockers and next steps; read this first when resuming work.
 - [supabase/](supabase/) — migrations, rollbacks, deployed Edge Function sources (`naver-auth`, `delete-account`), and access tests.
 - `main.py`, `calendar_test.py` — an old personal CLI assistant, not used by the app.
@@ -46,3 +47,8 @@ The app reads all secrets and feature flags from environment variables (Streamli
 - Legal guidance shown to users must come from verified official sources (link them). Do not invent statutes, deadlines, precedents or overseas-transfer facts.
 - Drafts must not state that a crime was committed or predict outcomes; missing facts are marked `[확인 필요]`.
 - Feature flags that collect new personal data must stay off until the privacy policy version that lists them is in effect (see `draft_save_available()`).
+
+
+## 2026-10-14 운영 구조 보완 수정안
+
+재개할 때 [docs/production-repair-plan.md](docs/production-repair-plan.md)를 먼저 읽으세요. DB 변경 두 개는 운영 미적용입니다. 공개 AI는 새 준비 검사를 통과해야 하며 AI 멈춤이 항상 우선합니다. 사용량 기록은 전용 최소 권한 DB 계정 gosomi_ai_usage(AI_USAGE_DB_URL, sslmode=verify-full 필수)로만 쓰고 service_role 키는 쓰지 마세요. 실제 사용량을 모르는데 고소장 단가를 확정하지 마세요. 서버 이전 Docker/Caddy/compose 파일은 준비만 했고 실제 Docker 빌드·TLS·로그인 전환 검증이 필요합니다. 도메인 현재 선택은 gosomi.ai.kr입니다.

@@ -104,16 +104,13 @@ class NavigationTest(unittest.TestCase):
         self.at.run()
         self.assertEqual([e.value for e in self.at.exception], [])
 
-    def test_public_chat_uses_agreed_texts_and_still_answers(self):
+    def test_public_chat_stays_disabled_until_launch_is_ready(self):
         fake.REPLIES[:] = ["가짜 답변입니다."]
         self.click("home_go_chat")
-        self.assertEqual(self.at.chat_message[0].markdown[0].value, "무엇이 궁금하신가요?")
-        self.assertEqual(self.at.chat_input(key="public_chat_input").proto.placeholder, "질문을 입력해 주세요")
+        self.assertEqual(self.at.chat_input(key="public_chat_input").proto.placeholder, "지금은 질문을 보낼 수 없어요")
+        self.assertTrue(self.at.chat_input(key="public_chat_input").disabled)
         self.assertFalse(any(b.key == "chat_new_btn" for b in self.at.button))  # 새 기능은 켜지 않는다
-        self.at.chat_input(key="public_chat_input").set_value("중고거래 사기를 당했어요").run()
-        texts = [m.markdown[0].value for m in self.at.chat_message if m.markdown]
-        self.assertIn("중고거래 사기를 당했어요", texts)
-        self.assertIn("가짜 답변입니다.", texts)
+        self.assertEqual(fake.CALLS, [])
 
     def scroll_marks(self):
         return [e for e in self.at.get("bidi_component") if "gosoemi_scroll_top" in str(e.proto)]
@@ -131,8 +128,8 @@ class NavigationTest(unittest.TestCase):
     def test_home_hides_navigation_and_cards_use_short_texts(self):
         self.assertFalse(self.nav_shown())
         texts = " ".join(m.value for m in self.at.markdown)
-        self.assertIn("궁금한 점을 글로 물어보세요.", texts)  # 음성이 꺼진 일반 계정
-        self.assertIn("사건 내용을 바탕으로 초안을 만들어요.", texts)
+        self.assertIn("AI 기능을 점검 중입니다.", texts)  # 일반 공개 준비 전
+        self.assertIn("사건 내용을 정리해 저장해요. (초안 만들기는 점검 중)", texts)
         self.assertIn("저장한 사건을 확인하세요.", texts)
         self.assertNotIn("초안을 다시", texts)
         self.click("home_go_case")
@@ -150,3 +147,4 @@ class NavigationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

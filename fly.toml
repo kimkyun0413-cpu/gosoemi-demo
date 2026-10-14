@@ -1,5 +1,5 @@
 # Fly.io 설정안 (2026-10-14 준비, 앱 미생성·미배포). 앱 이름은 만들 때 정해 바꾼다.
-# 비밀값·기능 설정은 이 파일에 넣지 않고 `fly secrets import < app.env`로 넣는다(deploy/app.env.example 참고).
+# 비밀값·기능 설정은 이 파일에 넣지 않고 `fly secrets import < .env`로 넣는다(.env.example 참고). 도메인 gosomi.ai.kr은 `fly certs add`로 연결.
 app = "gosomi-app"
 primary_region = "nrt"   # 도쿄(서울 리전 없음). 방침의 국외 이전 표에 반영해야 함
 
@@ -22,6 +22,12 @@ primary_region = "nrt"   # 도쿄(서울 리전 없음). 방침의 국외 이전
     method = "GET"
     path = "/_stcore/health"
     timeout = "5s"
+
+# 사용량 DB를 켤 때: Supabase CA 인증서를 비밀값으로 넣고(base64) 파일로 연결한다.
+#   fly secrets set SUPABASE_CA_CERT=$(base64 < supabase-ca.crt)
+# [[files]]
+#   guest_path = "/run/certs/supabase-ca.crt"
+#   secret_name = "SUPABASE_CA_CERT"
 
 [[vm]]
   cpu_kind = "shared"
