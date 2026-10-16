@@ -5174,7 +5174,7 @@ def render_ws_story(case_id: str, case: dict, ws: dict, file_names: list) -> Non
                "날짜가 필요한 일이면 '수정'에서 적어 주세요. 고치거나 더하고 지울 수 있어요.")
     render_item_list(
         case_id, ws, "timeline", timeline,
-        lambda i, r: (f"**{i + 1}.{' ' + md_escape(r['when']) if r.get('when') else ''}** — {md_escape(r.get('what') or '')}",
+        lambda i, r: ((f"**{i + 1}. {md_escape(r['when'])}** — " if r.get("when") else f"**{i + 1}.** ") + md_escape(r.get("what") or ""),
                       "관련 자료: " + (r.get("evidence") or NO_LINK)),
         "아직 적은 경위가 없어요. '사건 경위 추가'를 눌러 한 가지씩 적어 주세요.", names,
     )
@@ -5208,6 +5208,8 @@ def render_ws_story(case_id: str, case: dict, ws: dict, file_names: list) -> Non
 
 
 def render_ws_draft(case_id: str, case: dict, ws: dict, draft_key: str, editor_key: str) -> None:
+    ws_sync_saved_draft(ws, case_id, draft_key, editor_key)
+    render_ws_draft_sync_notice(case_id, ws, draft_key, editor_key)
     draft = st.session_state.get(draft_key)
     if not draft:
         st.markdown("아직 초안이 없어요. 채운 내용으로 참고용 초안을 만들어요.")
@@ -5254,6 +5256,8 @@ def render_ws_draft(case_id: str, case: dict, ws: dict, draft_key: str, editor_k
 
 
 def render_ws_download(case_id: str, ws: dict, editor_key: str, draft_key: str, case: dict) -> None:
+    ws_sync_saved_draft(ws, case_id, draft_key, editor_key)
+    render_ws_draft_sync_notice(case_id, ws, draft_key, editor_key)
     draft = st.session_state.get(editor_key) or st.session_state.get(draft_key) or ""
     timeline = ws["timeline"] if ws["timeline"] is not None else build_timeline(case)
     evidence = ws["evidence"] if ws["evidence"] is not None else evidence_items(case, ws.get("file_names"))
@@ -5271,6 +5275,12 @@ def render_ws_download(case_id: str, ws: dict, editor_key: str, draft_key: str, 
         return
     with st.expander("내려받을 내용 미리 보기"):
         st.text(text[:4000] + ("…" if len(text) > 4000 else ""))
+    if draft and include["draft"]:
+        saved = st.session_state.get(f"{editor_key}_saved")
+        if saved and saved["text"] == draft.strip():
+            st.caption(f"내려받는 초안: {format_created_at(saved.get('at')) if saved.get('at') else '방금'} 저장한 초안 그대로예요.")
+        elif draft_save_available():
+            st.caption("내려받는 초안: 이 화면에서 고친 뒤 아직 저장하지 않은 초안이에요.")
     st.caption("내려받은 파일을 제출하기 전에 사실관계를 직접 확인하고, 법률 전문가의 검토를 받아 주세요.")
     col_doc, col_txt = st.columns(2)
     with col_doc:
@@ -5391,6 +5401,58 @@ def ws_load(case: dict, case_id: str, ws: dict, draft_key: str, editor_key: str)
             st.session_state[draft_key] = draft_row["draft_text"]
             st.session_state[editor_key] = draft_row["draft_text"]
             st.session_state[f"{editor_key}_saved"] = {"text": draft_row["draft_text"].strip(), "at": draft_row.get("updated_at")}
+
+
+def ws_sync_saved_draft(ws: dict, case_id: str, draft_key: str, editor_key: str) -> None:
+    """초안·내려받기 단계를 그리기 전에 서버에 저장된 초안과 이 탭의 초안을 맞춘다.
+
+    탭마다 초안을 따로 들고 있어서, 다른 탭·기기에서 나중에 저장한 초안이 이 탭의 Word·TXT 내려받기에
+    반영되지 않은 일이 있었다(2026-10-17). 이 탭에 저장하지 않은 수정이 없으면 저장된 최신 초안으로 바꾸고,
+    수정이 있으면 덮어쓰지 않고 알려 준다(위젯을 그리기 전에만 부른다).
+    """
+    ws["remote_draft"] = None
+    if not draft_save_available():
+        return
+    try:
+        row = load_case_draft(case_id)
+    except Exception as error:
+        log_auth_error(error)
+        return
+    if not row or not (row.get("draft_text") or "").strip():
+        return
+    remote_text = row["draft_text"].strip()
+    saved = st.session_state.get(f"{editor_key}_saved")
+    if saved and saved.get("at") == row.get("updated_at"):
+        return
+    text = (st.session_state.get(editor_key) or st.session_state.get(draft_key) or "").strip()
+    if text and text != remote_text and (not saved or saved["text"] != text):
+        ws["remote_draft"] = row.get("updated_at") or "방금"  # 이 탭에 저장하지 않은 수정이 있어 그대로 둔다
+        return
+    if text != remote_text:
+        ws["draft_synced"] = True
+    st.session_state[draft_key] = row["draft_text"]
+    st.session_state[editor_key] = row["draft_text"]
+    st.session_state[f"{editor_key}_saved"] = {"text": remote_text, "at": row.get("updated_at")}
+
+
+def ws_take_saved_draft(case_id: str, draft_key: str, editor_key: str) -> None:
+    """'저장된 최신 초안 불러오기': 이 탭에서 고친 초안을 버리고 저장된 초안으로 바꾼다."""
+    st.session_state.pop(f"{editor_key}_saved", None)
+    st.session_state.pop(editor_key, None)
+    st.session_state.pop(draft_key, None)
+    ws_state(case_id)["draft_synced"] = True
+
+
+def render_ws_draft_sync_notice(case_id: str, ws: dict, draft_key: str, editor_key: str) -> None:
+    if ws.pop("draft_synced", False):
+        st.info("다른 탭이나 기기에서 저장한 최신 초안으로 바꿨어요.")
+    if ws.get("remote_draft"):
+        st.warning(
+            f"다른 탭이나 기기에서 더 나중에 저장한 초안이 있어요(저장 {format_created_at(ws['remote_draft'])}). "
+            "이 화면의 초안에는 저장하지 않은 수정이 있어 바꾸지 않았어요. 지금 내려받으면 이 화면의 초안으로 만들어져요."
+        )
+        st.button("저장된 최신 초안 불러오기 (이 화면에서 고친 초안은 버려요)", key=f"ws_take_draft_{case_id}",
+                  on_click=ws_take_saved_draft, args=(case_id, draft_key, editor_key))
 
 
 def ws_draft_dirty(draft_key: str, editor_key: str) -> bool:

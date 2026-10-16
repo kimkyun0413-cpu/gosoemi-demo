@@ -173,6 +173,39 @@ class WorkspaceSaveTest(unittest.TestCase):
         self.assertTrue(any("초안을 먼저 저장했어요" in w.value for w in at.warning))
         self.assertNotIn("고친 내용", fake.TABLES["case_drafts"][0]["draft_text"])
 
+    def seed_saved_draft(self, text, at):
+        fake.TABLES["case_drafts"].append({"user_id": fake.ADMIN_ID, "case_id": CID, "draft_text": text, "updated_at": at})
+
+    def preview(self, at):
+        return " ".join(t.value for t in at.text)
+
+    def test_download_uses_draft_saved_later_in_another_tab(self):
+        # 2026-10-17: 먼저 열어 둔 탭이 예전 초안을 들고 있어, 다른 탭에서 저장한 초안이 Word에 반영되지 않았다.
+        self.seed_saved_draft("고소장\n범죄 사실\n예전 문장", "2026-10-17T03:26:00+00:00")
+        at = self.open(step="download")
+        self.assertIn("예전 문장", self.preview(at))
+        fake.TABLES["case_drafts"][0].update(draft_text="고소장\n범죄 사실\n고친 문장", updated_at="2026-10-17T03:48:00+00:00")
+        at.session_state[f"ws_step_{CID}"] = "download"
+        at.run()
+        self.assertIn("고친 문장", self.preview(at))
+        self.assertNotIn("예전 문장", self.preview(at))
+        self.assertTrue(any("최신 초안으로 바꿨어요" in i.value for i in at.info))
+        self.assertTrue(any("저장한 초안 그대로" in c.value for c in at.caption))
+
+    def test_unsaved_edits_are_kept_and_newer_saved_draft_can_be_loaded(self):
+        self.seed_saved_draft("고소장\n범죄 사실\n예전 문장", "2026-10-17T03:26:00+00:00")
+        at = self.open(step="draft")
+        at.text_area(key=f"list_draft_editor_{CID}").input("고소장\n범죄 사실\n이 탭에서 고친 문장").run()
+        fake.TABLES["case_drafts"][0].update(draft_text="고소장\n범죄 사실\n다른 탭 문장", updated_at="2026-10-17T03:48:00+00:00")
+        at.session_state[f"ws_step_{CID}"] = "download"
+        at.run()
+        self.assertIn("이 탭에서 고친 문장", self.preview(at))  # 저장하지 않은 수정은 덮어쓰지 않는다
+        self.assertTrue(any("더 나중에 저장한 초안이 있어요" in w.value for w in at.warning))
+        self.assertTrue(any("아직 저장하지 않은 초안" in c.value for c in at.caption))
+        at.button(key=f"ws_take_draft_{CID}").click().run()
+        self.assertIn("다른 탭 문장", self.preview(at))
+        self.assertFalse(any("더 나중에 저장한 초안이 있어요" in w.value for w in at.warning))
+
     def test_partial_save_case_ok_workspace_failed_then_retry_only_rest(self):
         at = self.open(step="check")
         at.text_input(key=f"ws_edit_{CID}_witness").input("친구").run()
