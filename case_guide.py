@@ -847,7 +847,7 @@ def find_unsupported_details(draft: str, case: dict, today_str: str = "") -> lis
 
     people = sorted(set(_PEOPLE_COUNT_RE.findall(draft)) - set(_PEOPLE_COUNT_RE.findall(source)), key=int)
     if people:
-        warnings.append(f"입력에서 찾을 수 없는 인원({', '.join(p + '명' for p in people)})이 있습니다. 사람 수를 더해서 만든 숫자가 아닌지 확인해 주세요.")
+        warnings.append(f"입력에서 찾을 수 없는 인원({', '.join(p + '명' for p in people)})이 있습니다. 적은 사람 수와 같은지, 서로 다른 사람 수를 더한 숫자가 아닌지 확인해 주세요.")
 
     hedges = sorted({h for h in _HEDGE_RE.findall(draft) if h not in source})
     if hedges:
