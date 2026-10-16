@@ -47,10 +47,39 @@ class RulesTest(unittest.TestCase):
 
     def test_timeline_only_copies_written_dates(self):
         rows = w.build_timeline(CASE)
-        self.assertEqual([r["when"] for r in rows], ["9월 2일 오후 3시", "", "9월 4일"])
+        self.assertEqual([r["when"] for r in rows], ["9월 2일 오후 3시", "", "9월 4일부터"])
         joined = " ".join(r["what"] for r in rows)
         story_digits = set(re.findall(r"\d+", CASE["incident_description"]))
         self.assertTrue(set(re.findall(r"\d+", joined + " ".join(r["when"] for r in rows))) <= story_digits)
+
+    def test_timeline_keeps_written_period_and_leaves_undated_rows_empty(self):
+        story = (
+            "저는 ○○앱에서 방송합니다. 2026년 9월경부터 10월 11일까지 상대방이 여러 사람에게 거짓 내용을 전했습니다. "
+            "특히 2026년 10월 11일 공개 방송에서 같은 말을 했습니다. 이 과정에서 청취자들이 나갔습니다. "
+            "이 일로 2026년 9월부터 방송을 줄였습니다. 9월 2일~9월 5일 연락이 없었습니다."
+        )
+        rows = w.build_timeline({"incident_description": story})
+        self.assertEqual([r["when"] for r in rows], [
+            "", "2026년 9월경부터 10월 11일까지", "2026년 10월 11일", "", "2026년 9월부터", "9월 2일~9월 5일",
+        ])
+        # 날짜를 이어 붙이지 않는다: 쉼표로 나열한 두 날짜는 기간이 아니다.
+        self.assertEqual(w.build_timeline({"incident_description": "9월 2일 송금, 9월 5일 연락 끊김"})[0]["when"], "9월 2일")
+        text = w.bundle_text("", rows, [], {"draft": False, "timeline": True, "evidence": False})
+        self.assertIn("1. 저는 ○○앱에서 방송합니다", text)
+        self.assertIn("2. [2026년 9월경부터 10월 11일까지] 2026년 9월경부터", text)
+        self.assertNotIn("날짜 확인 필요", text)
+
+    def test_long_evidence_is_never_cut(self):
+        sentence = "관련 통화 녹음을 가지고 있습니다. 이 중에는 상대방이 별도 계정을 쓴 사실을 인정한 통화 녹음이 있습니다. 이 인정은 계정 사용에 관한 것입니다."
+        items = w.evidence_items({"evidence": sentence})
+        self.assertEqual([i["name"] for i in items], [sentence.rstrip(".")])
+        long_text = " ".join(f"자료설명{i}" for i in range(200))  # 한 덩어리가 이름 칸보다 길면 나눠 두되 글자는 버리지 않는다
+        items = w.evidence_items({"evidence": long_text})
+        self.assertTrue(all(len(i["name"]) <= w.EVIDENCE_NAME_MAX_CHARS for i in items))
+        self.assertEqual(" ".join(i["name"] for i in items), long_text)
+        text = w.bundle_text("", [], w.evidence_items({"evidence": sentence}), {"draft": False, "timeline": False, "evidence": True})
+        doc = Document(BytesIO(w.bundle_docx(text).getvalue()))
+        self.assertTrue(any("이 인정은 계정 사용에 관한 것입니다" in p.text for p in doc.paragraphs))
 
     def test_evidence_and_links(self):
         items = w.evidence_items(CASE, ["capture.jpg"])
@@ -82,7 +111,8 @@ class RulesTest(unittest.TestCase):
         rows, items = w.build_timeline(CASE), w.evidence_items(CASE)
         text = w.bundle_text("고소장\n본문", rows, items, {"draft": False, "timeline": True, "evidence": True})
         self.assertNotIn("고소장\n본문", text)
-        self.assertIn("날짜 확인 필요", text)
+        self.assertIn("2. 판매자가 내일 보낸다고 함", text)  # 날짜가 적히지 않은 줄은 날짜 표시 없이
+        self.assertNotIn("날짜 확인 필요", text)
         self.assertIn("파일 내용은 고소미가 확인하지 않았습니다", text)
         self.assertIn("법률 전문가의 검토", text)
         doc = Document(BytesIO(w.bundle_docx(text).getvalue()))
@@ -168,7 +198,7 @@ class WorkspaceAppTest(unittest.TestCase):
     def test_story_step_builds_timeline_and_evidence(self):
         at = self.open(step="story")
         ws = at.session_state[f"ws_{CID}"]
-        self.assertEqual([r["when"] for r in ws["timeline"]], ["9월 2일 오후 3시", "", "9월 4일"])
+        self.assertEqual([r["when"] for r in ws["timeline"]], ["9월 2일 오후 3시", "", "9월 4일부터"])
         self.assertEqual([e["name"] for e in ws["evidence"]], ["채팅 캡처", "이체 내역"])
 
     def test_rewrite_warns_on_changed_numbers_and_undo_restores(self):

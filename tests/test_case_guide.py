@@ -127,6 +127,12 @@ class DraftPromptTest(unittest.TestCase):
         self.assertIn("2026-10-06", prompt)
         self.assertNotIn("[참고]", prompt)
 
+    def test_prompt_keeps_firm_facts_every_fact_admission_scope_and_counts(self):
+        prompt = g.build_draft_prompt(filled_case(), "2026-10-06")
+        for phrase in ["단정한 그대로 옮기세요", "약하게 바꾸지 마세요", "빼지 말고", "적힌 범위만", "더하거나 합쳐", "따로따로"]:
+            self.assertIn(phrase, prompt)
+        self.assertIn("11. 작성일은 반드시 2026-10-06", prompt)
+
     def test_civil_type_adds_other_procedure_note(self):
         prompt = g.build_draft_prompt(filled_case(case_type="빌려준 돈·계약 분쟁"), "2026-10-06")
         self.assertIn("[참고]", prompt)
@@ -153,6 +159,19 @@ class UnsupportedDetailTest(unittest.TestCase):
         self.assertIn("100만원", joined)
         self.assertIn("9월 10일", joined)
         self.assertIn("010-9999-8888", joined)
+
+    def test_added_hedges_and_summed_people_counts_are_flagged(self):
+        case = filled_case(
+            incident_description="상대방이 한 말은 모두 사실이 아닙니다. 들은 증인은 약 5명입니다. 45만 원 송금.",
+            witness="증인 약 5명, 옆에서 본 목격자 1명",
+        )
+        draft = "고소인은 상대방의 말이 사실이 아니라고 생각합니다. 관련성은 자료로 확인될 것으로 추측됩니다. 증인은 총 6명입니다."
+        joined = "\n".join(g.find_unsupported_details(draft, case, "2026-10-06"))
+        self.assertIn("6명", joined)
+        self.assertIn("라고 생각합니다", joined)
+        self.assertIn("추측됩니다", joined)
+        faithful = "상대방이 한 말은 모두 사실이 아닙니다. 증인 약 5명, 목격자 1명이 있습니다."
+        self.assertEqual(g.find_unsupported_details(faithful, case, "2026-10-06"), [])
 
     def test_iso_date_of_an_entered_date_is_not_flagged_as_a_number(self):
         draft = "고소인은 2026-09-02에 45만 원을 송금하였습니다."

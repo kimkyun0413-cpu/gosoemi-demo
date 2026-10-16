@@ -1,8 +1,9 @@
 """사건 하나를 끝까지 정리하는 작업 공간의 규칙. Streamlit에 의존하지 않는다.
 
 - 빠진 정보·서로 다른 값 점검: 입력한 글만 보고 규칙으로 찾는다. 점수·확률·범죄 성립 판단은 만들지 않는다.
-- 사건 경위(타임라인): 사용자가 적은 경위를 나눠 보여 줄 뿐, 날짜나 사실을 만들지 않는다. 날짜가 안 보이면 비워 둔다.
-- 증거 목록: 사용자가 적은 자료 이름과 첨부한 파일 이름만 쓴다. 파일 내용은 분석하지 않는다.
+- 사건 경위(타임라인): 사용자가 적은 경위를 나눠 보여 줄 뿐, 날짜나 사실을 만들지 않는다. 날짜가 안 보이면 비워 두고,
+  '9월경부터 10월 11일까지'처럼 기간으로 적었으면 기간 그대로 옮긴다.
+- 증거 목록: 사용자가 적은 자료 이름과 첨부한 파일 이름만 쓴다. 적은 글을 자르지 않는다. 파일 내용은 분석하지 않는다.
 - 초안 표현 바꾸기: AI가 표현만 바꾸고, 바뀐 뒤 숫자(금액·날짜·번호)가 늘거나 빠지면 경고한다.
 """
 
@@ -32,8 +33,13 @@ QUESTIONS = [
 _SPLIT_RE = re.compile(r"\s*(?:→|->|\n|;|(?<=[.!?。])\s+)\s*")
 _DATE_TOKEN_RE = re.compile(
     r"\d{4}\s*(?:년|[.\-/])\s*\d{1,2}\s*(?:월|[.\-/])\s*\d{1,2}\s*일?|\d{1,2}\s*월\s*\d{1,2}\s*일"
-    r"|\d{1,2}\s*월\s*(?:초|중순|말)쯤?|어제|오늘|그저께|지난\s*주"
+    r"|(?:\d{4}\s*년\s*)?\d{1,2}\s*월\s*(?:초|중순|말)?\s*(?:경|쯤)?"
+    r"|어제|오늘|그저께|지난\s*주"
 )
+# 두 날짜가 '부터 … 까지', '~', '-'로 이어지면 하나의 기간으로 본다(두 날짜 사이 글자는 그대로 옮긴다).
+_RANGE_JOIN_RE = re.compile(r"\s*(?:부터\s*~?|~|-)\s*")
+_SINCE_RE = re.compile(r"\s*(부터|까지)")
+EVIDENCE_NAME_MAX_CHARS = 300  # 증거 한 항목의 이름(적은 글). 넘으면 문장 단위로 나눠 여러 항목으로 둔다.
 _TIME_TOKEN_RE = re.compile(r"(?:오전|오후|새벽|밤|저녁|아침)?\s*\d{1,2}\s*시(?:\s*\d{1,2}\s*분)?(?:\s*쯤)?")
 
 
@@ -89,6 +95,25 @@ def inconsistencies(case: dict) -> list:
     return notes
 
 
+def _when_text(part: str) -> str:
+    """문장에 적힌 날짜(또는 기간)·시각 글자를 그대로 돌려준다. 없으면 빈 문자열."""
+    dates = [m for m in _DATE_TOKEN_RE.finditer(part) if m.group(0).strip()]
+    if not dates:
+        when = ""
+    else:
+        start, end = dates[0].start(), dates[0].end()
+        for nxt in dates[1:]:
+            if not _RANGE_JOIN_RE.fullmatch(part[end:nxt.start()]):
+                break
+            end = nxt.end()
+        since = _SINCE_RE.match(part, end)
+        if since:
+            end = since.end()
+        when = part[start:end].strip()
+    time = _TIME_TOKEN_RE.search(part)
+    return " ".join(x for x in (when, time.group(0).strip() if time else "") if x)
+
+
 def build_timeline(case: dict) -> list:
     """사건 경위를 문장·화살표 단위로 나눈다. 날짜·시각은 그 문장에 적힌 글자만 그대로 옮긴다."""
     rows = []
@@ -96,11 +121,26 @@ def build_timeline(case: dict) -> list:
         part = part.strip(" .")
         if not part:
             continue
-        date = _DATE_TOKEN_RE.search(part)
-        time = _TIME_TOKEN_RE.search(part)
-        when = " ".join(x.group(0).strip() for x in (date, time) if x)
-        rows.append({"when": when, "what": part, "evidence": ""})
+        rows.append({"when": _when_text(part), "what": part, "evidence": ""})
     return rows
+
+
+def _evidence_pieces(text: str) -> list:
+    """적은 자료를 쉼표·줄 단위로 나눈다. 한 덩어리가 너무 길면 문장 단위로 나누고, 그래도 길면 띄어쓰기에서 나눈다(글은 버리지 않는다)."""
+    pieces = []
+    for name in re.split(r"\s*(?:,|/|·|\n|및)\s*", text):
+        name = name.strip(" .")
+        if len(name) <= EVIDENCE_NAME_MAX_CHARS:
+            pieces.append(name)
+            continue
+        for sentence in re.split(r"(?<=[.!?。])\s+", name):
+            while len(sentence) > EVIDENCE_NAME_MAX_CHARS:
+                cut = sentence.rfind(" ", 0, EVIDENCE_NAME_MAX_CHARS)
+                cut = cut if cut > 0 else EVIDENCE_NAME_MAX_CHARS
+                pieces.append(sentence[:cut].strip())
+                sentence = sentence[cut:].strip()
+            pieces.append(sentence.strip(" ."))
+    return [p for p in pieces if p]
 
 
 def evidence_items(case: dict, file_names=None) -> list:
@@ -108,10 +148,9 @@ def evidence_items(case: dict, file_names=None) -> list:
     items = []
     text = case.get("evidence") or ""
     if not is_missing(text) and not is_unknown(text):
-        for name in re.split(r"\s*(?:,|/|·|\n|및)\s*", text):
-            name = name.strip(" .")
-            if name and name not in ("없음", "없어요"):
-                items.append({"name": name[:60], "shows": "", "source": "적은 자료"})
+        for name in _evidence_pieces(text):
+            if name not in ("없음", "없어요"):
+                items.append({"name": name, "shows": "", "source": "적은 자료"})
     for name in file_names or []:
         items.append({"name": str(name)[:60], "shows": "", "source": "첨부 파일"})
     seen, unique = set(), []
@@ -198,9 +237,9 @@ def bundle_text(draft: str, timeline: list, evidence: list, include: dict) -> st
     if include.get("timeline") and timeline:
         lines = ["사건 경위 (직접 정리한 순서)"]
         for i, row in enumerate(timeline, 1):
-            when = row.get("when") or "날짜 확인 필요"
+            when = f"[{row['when']}] " if (row.get("when") or "").strip() else ""  # 날짜가 적히지 않은 줄은 날짜 없이 둔다
             link = f" — 관련 자료: {row['evidence']}" if row.get("evidence") else ""
-            lines.append(f"{i}. [{when}] {row.get('what', '')}{link}")
+            lines.append(f"{i}. {when}{row.get('what', '')}{link}")
         parts.append("\n".join(lines))
     if include.get("evidence") and evidence:
         lines = ["증거 목록 (파일 내용은 고소미가 확인하지 않았습니다)"]

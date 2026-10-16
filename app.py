@@ -71,7 +71,7 @@ from data_export import (EVIDENCE_PART_MAX_BYTES, NOT_INCLUDED_NOTE, build_evide
                          evidence_summary_text)
 from ai_runtime import PostgresUsageStore, generation_settings, public_ai_blockers, usage_counts
 from case_workspace import (
-    STYLES, UNKNOWN, build_timeline, bundle_docx, bundle_text, draft_check_items, evidence_items, inconsistencies,
+    EVIDENCE_NAME_MAX_CHARS, STYLES, UNKNOWN, build_timeline, bundle_docx, bundle_text, draft_check_items, evidence_items, inconsistencies,
     link_issues, missing_questions, next_action, rewrite_changes, rewrite_prompt, suggestion_for, unknown_items,
 )
 from calendar_ics import ALARM_CHOICES, KIND_LABELS, build_ics, clean_event, describe
@@ -4994,7 +4994,7 @@ def ws_item_submit(case_id: str) -> bool:
         item = {"when": (get("when") or "").strip()[:40], "what": what[:300], "evidence": "" if link in (None, NO_LINK) else link}
         label = what[:30]
     elif kind == "evidence":
-        name = (get("name") or "").strip()[:60]
+        name = (get("name") or "").strip()[:EVIDENCE_NAME_MAX_CHARS]
         if not name:
             ws["item_error"] = "'자료 이름' 칸을 적어 주세요."
             return False
@@ -5077,7 +5077,7 @@ def render_item_form(case_id: str, ws: dict, kind: str, evidence_names=()) -> No
             st.selectbox("이 일을 보여 주는 자료 (선택)", options, key=k("evidence"),
                          help="증거 목록에 있는 자료와 첨부한 파일 이름 중에서 골라요.")
         elif kind == "evidence":
-            st.text_input("자료 이름", key=k("name"), max_chars=60, placeholder="예: 채팅 캡처, 이체 내역")
+            st.text_area("자료 이름", key=k("name"), max_chars=EVIDENCE_NAME_MAX_CHARS, height=80, placeholder="예: 채팅 캡처, 이체 내역")
             st.text_area("이 자료가 보여 주는 것 (선택)", key=k("shows"), max_chars=200, height=80,
                          placeholder="예: 판매자가 물건을 보내겠다고 한 대화")
         else:
@@ -5170,10 +5170,11 @@ def render_ws_story(case_id: str, case: dict, ws: dict, file_names: list) -> Non
     timeline = ws_items(case, ws, "timeline")
     names = [e["name"] for e in evidence]
     st.markdown("#### 사건 경위")
-    st.caption("적은 사건 내용을 일 단위로 나눠 두었어요. 날짜는 적힌 글자만 옮겼어요. 고치거나 더하고 지울 수 있어요.")
+    st.caption("적은 사건 내용을 일 단위로 나눠 두었어요. 날짜는 그 문장에 적힌 글자(기간이면 기간 그대로)만 옮기고, 없으면 비워 둬요. "
+               "날짜가 필요한 일이면 '수정'에서 적어 주세요. 고치거나 더하고 지울 수 있어요.")
     render_item_list(
         case_id, ws, "timeline", timeline,
-        lambda i, r: (f"**{i + 1}. {md_escape(r.get('when') or '날짜 모름')}** — {md_escape(r.get('what') or '')}",
+        lambda i, r: (f"**{i + 1}.{' ' + md_escape(r['when']) if r.get('when') else ''}** — {md_escape(r.get('what') or '')}",
                       "관련 자료: " + (r.get("evidence") or NO_LINK)),
         "아직 적은 경위가 없어요. '사건 경위 추가'를 눌러 한 가지씩 적어 주세요.", names,
     )

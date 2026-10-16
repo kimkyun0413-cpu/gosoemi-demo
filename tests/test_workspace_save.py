@@ -293,7 +293,7 @@ class WorkspaceSaveTest(unittest.TestCase):
         ws = at.session_state[f"ws_{CID}"]
         index = [e["name"] for e in ws["evidence"]].index("채팅 캡처")
         at.button(key=f"ws_mod_{CID}_evidence_{index}").click().run()
-        at.text_input(key=f"ws_f_{CID}_evidence_name").input("은행 이체 확인증").run()
+        at.text_area(key=f"ws_f_{CID}_evidence_name").input("은행 이체 확인증").run()
         at.text_area(key=f"ws_f_{CID}_evidence_shows").input("45만 원을 보낸 기록").run()
         at.button(key=f"ws_fok_{CID}_evidence").click().run()
         ws = at.session_state[f"ws_{CID}"]
