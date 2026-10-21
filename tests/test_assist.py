@@ -85,26 +85,72 @@ class SummaryTest(unittest.TestCase):
 
 
 class PrecedentTest(unittest.TestCase):
-    SAMPLE = json.dumps({"PrecSearch": {"totalCnt": "2", "prec": [
-        {"판례일련번호": "1", "사건명": "사기", "사건번호": "2020도0000", "선고일자": "20200101", "법원명": "대법원"},
+    # 2026-10-22 실제 응답 모양(법제처 Open API, OC=test)을 줄여 옮김
+    SAMPLE = json.dumps({"PrecSearch": {"totalCnt": "2", "target": "prec", "prec": [
+        {"판례일련번호": "1", "사건명": "사기", "사건번호": "2020도0000", "선고일자": "2020.01.01", "법원명": "대법원",
+         "사건종류명": "형사", "판례상세링크": "/DRF/lawService.do?OC=secret&target=prec&ID=1&type=HTML"},
         {"판례일련번호": "2", "사건명": "", "사건번호": "", "선고일자": "", "법원명": ""},
     ]}}, ensure_ascii=False)
+    SINGLE = json.dumps({"PrecSearch": {"totalCnt": "1", "prec": {
+        "판례일련번호": "7", "사건명": "모욕", "사건번호": "2021도1", "선고일자": "20210101", "법원명": "대법원"}}}, ensure_ascii=False)
+    EMPTY = json.dumps({"PrecSearch": {"totalCnt": "0", "target": "prec", "키워드": "없는검색어"}}, ensure_ascii=False)
+    AUTH_FAIL = json.dumps({"result": "사용자 정보 검증에 실패하였습니다.",
+                            "msg": "OPEN API 호출 시 사용자 검증을 위하여 정확한 서버장비의 IP주소 및 도메인주소를 등록해 주세요."},
+                           ensure_ascii=False)
+    LAWS = json.dumps({"LawSearch": {"totalCnt": "3", "resultCode": "00", "law": [
+        {"법령명한글": "군형법", "법령구분명": "법률", "법령일련번호": "235555", "시행일자": "20220701", "현행연혁코드": "현행",
+         "법령상세링크": "/DRF/lawService.do?OC=secret&target=law&MST=235555"},
+        {"법령명한글": "형법 시행령", "법령구분명": "대통령령", "법령일련번호": "9", "시행일자": "20200101"},
+        {"법령명한글": "형법", "법령구분명": "법률", "법령일련번호": "290185", "시행일자": "20261002", "소관부처명": "법무부",
+         "현행연혁코드": "현행"},
+    ]}}, ensure_ascii=False)
 
-    def test_only_real_rows_with_source(self):
-        rows = p.parse_precedent_list(self.SAMPLE)
-        self.assertEqual(rows, [{"name": "사기", "case_no": "2020도0000", "date": "2020.01.01", "court": "대법원",
-                                 "source": p.OPEN_API_SOURCE}])
+    def test_only_real_rows_with_source_and_public_link(self):
+        result = p.parse_precedent_list(self.SAMPLE)
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["rows"], [{"name": "사기", "case_no": "2020도0000", "date": "2020.01.01", "court": "대법원",
+                                           "kind": "형사", "link": "https://www.law.go.kr/LSW/precInfoP.do?precSeq=1",
+                                           "source": p.OPEN_API_SOURCE}])
+        self.assertNotIn("secret", json.dumps(result))  # 인증값이 든 API 상세 링크는 쓰지 않는다
 
-    def test_search_requires_key_and_blocks_personal_numbers(self):
+    def test_single_result_comes_as_object(self):
+        self.assertEqual([r["case_no"] for r in p.parse_precedent_list(self.SINGLE)["rows"]], ["2021도1"])
+
+    def test_failures_are_errors_not_empty_results(self):
+        for raw in (self.AUTH_FAIL, "<html>오류</html>", "", json.dumps({"PrecSearch": "x"}),
+                    json.dumps({"PrecSearch": {"totalCnt": "5", "prec": []}})):
+            with self.assertRaises(p.LawApiError):
+                p.parse_precedent_list(raw)
+        with self.assertRaisesRegex(p.LawApiError, "사용자 정보 검증에 실패"):
+            p.search_precedents("사기", "oc", lambda u: self.AUTH_FAIL)
+        with self.assertRaises(p.LawApiError):
+            p.search_laws("형법", "oc", lambda u: self.AUTH_FAIL)
+        self.assertEqual(p.parse_precedent_list(self.EMPTY), {"total": 0, "rows": []})
+
+    def test_search_requires_key_blocks_personal_numbers_and_falls_back_to_full_text(self):
         with self.assertRaises(RuntimeError):
             p.search_precedents("사기", "", lambda u: self.SAMPLE)
         with self.assertRaises(ValueError):
             p.search_precedents("010-1234-5678", "oc", lambda u: self.SAMPLE)
         seen = []
-        rows = p.search_precedents("중고거래 사기", "oc", lambda u: seen.append(u) or self.SAMPLE)
-        self.assertEqual(len(rows), 1)
+        result = p.search_precedents("중고거래 사기", "oc", lambda u: seen.append(u) or self.SAMPLE)
+        self.assertEqual((result["scope"], len(result["rows"])), ("사건명", 1))
         self.assertIn("target=prec", seen[0])
+        self.assertIn("search=1", seen[0])
         self.assertTrue(seen[0].startswith("https://www.law.go.kr/DRF/lawSearch.do"))
+        replies, seen = [self.EMPTY, self.SAMPLE], []
+        result = p.search_precedents("중고거래 사기", "oc", lambda u: seen.append(u) or replies.pop(0))
+        self.assertEqual(result["scope"], "본문")  # 사건명에 없으면 본문에서 한 번 더
+        self.assertIn("search=2", seen[1])
+        result = p.search_precedents("없는검색어", "oc", lambda u: self.EMPTY)
+        self.assertEqual((result["total"], result["rows"]), (0, []))
+
+    def test_laws_exact_name_first_with_public_link(self):
+        result = p.search_laws("형법", "oc", lambda u: self.LAWS)
+        self.assertEqual([r["name"] for r in result["rows"]], ["형법", "군형법", "형법 시행령"])
+        self.assertEqual(result["rows"][0]["link"], "https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=290185")
+        self.assertEqual(result["rows"][0]["effective"], "2026.10.02")
+        self.assertNotIn("secret", json.dumps(result))
 
     def test_links_and_keywords(self):
         self.assertTrue(p.OFFICIAL_PRECEDENT_SEARCH[1].startswith("https://www.law.go.kr/"))
@@ -178,7 +224,7 @@ class AssistAppTest(unittest.TestCase):
     def test_admin_sees_new_helpers_and_regular_user_does_not(self):
         labels, links = self.pages(fake.ADMIN_ID)
         self.assertIn("📖 어려운 말 풀이", labels)
-        self.assertIn("🔎 판례 찾아보기 (외부 공식 사이트)", labels)
+        self.assertIn("🔎 판례 찾아보기 (외부 공식 사이트)", labels)  # 인증값이 없으면 링크만
         self.assertIn("✅ 진행 체크리스트", labels)
         self.assertTrue(any("상대방 이름이나 연락처를 모르면" in l for l in labels))
         self.assertTrue(any(u.startswith("https://www.law.go.kr/") for u in links))
@@ -186,6 +232,57 @@ class AssistAppTest(unittest.TestCase):
         ulabels, _ = self.pages(fake.USER_ID)
         for hidden in ("📖 어려운 말 풀이", "🔎 판례 찾아보기 (외부 공식 사이트)", "✅ 진행 체크리스트"):
             self.assertNotIn(hidden, ulabels)
+
+    def run_law_search(self, user_id, reply, kind="판례", query="모욕"):
+        responses = []
+
+        class Reply:
+            def __init__(self, body):
+                self.body = body
+
+            def read(self):
+                return self.body.encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def fake_urlopen(request, timeout=None):
+            responses.append(request.full_url)
+            return Reply(reply)
+
+        with mock.patch.dict(os.environ, {"LAW_OPEN_API_OC": "oc-test"}), mock.patch("urllib.request.urlopen", fake_urlopen):
+            at = self.start(user_id, "help")
+            if not any(r.key == "law_kind_중고거래 사기" for r in at.radio):
+                return at, None
+            at.radio(key="law_kind_중고거래 사기").set_value(kind).run()
+            at.text_input(key="prec_query_중고거래 사기").input(query).run()
+            at.button(key="prec_search_중고거래 사기").click().run()
+        return at, responses
+
+    def test_law_api_search_shows_only_fetched_rows_and_failure_is_not_empty(self):
+        at, calls = self.run_law_search(fake.ADMIN_ID, PrecedentTest.SAMPLE)
+        self.assertIn("🔎 판례·법령 찾아보기 (국가법령정보센터)", self.labels(at))
+        text = " ".join(m.value for m in at.markdown)
+        self.assertIn("**사기**", text)
+        self.assertIn("precInfoP.do?precSeq=1", text)
+        self.assertTrue(any("출처: 국가법령정보센터(법제처) Open API" in c.value for c in at.caption))
+        self.assertIn("OC=oc-test", calls[0])
+        at, _ = self.run_law_search(fake.ADMIN_ID, PrecedentTest.AUTH_FAIL)
+        self.assertTrue(any("조회에 실패했어요. 결과가 없다는 뜻이 아니에요" in e.value for e in at.error))
+        self.assertFalse(any("조회된" in i.value for i in at.info))
+        self.assertNotIn("**사기**", " ".join(m.value for m in at.markdown))
+        at, _ = self.run_law_search(fake.ADMIN_ID, PrecedentTest.EMPTY)
+        self.assertTrue(any("조회된 판례가 없어요" in i.value for i in at.info))
+        at, _ = self.run_law_search(fake.ADMIN_ID, PrecedentTest.LAWS, kind="법령", query="형법")
+        self.assertIn("lsInfoP.do?lsiSeq=290185", " ".join(m.value for m in at.markdown))
+
+    def test_law_api_search_is_admin_only_before_policy_v3(self):
+        at, calls = self.run_law_search(fake.USER_ID, PrecedentTest.SAMPLE)
+        self.assertIsNone(calls)
+        self.assertNotIn("🔎 판례·법령 찾아보기 (국가법령정보센터)", self.labels(at))
 
     def test_admin_diagnostics_only_on_account_page(self):
         home = self.start(page="home")

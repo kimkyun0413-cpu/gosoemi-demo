@@ -76,7 +76,8 @@ from case_workspace import (
 )
 from calendar_ics import ALARM_CHOICES, KIND_LABELS, build_ics, clean_event, describe
 from precedent_search import (
-    OFFICIAL_PRECEDENT_SEARCH, OPEN_API_SOURCE, check_query as check_precedent_query, search_precedents, suggest_keywords,
+    OFFICIAL_PRECEDENT_SEARCH, OPEN_API_SOURCE, LawApiError, check_query as check_precedent_query, search_laws, search_precedents,
+    suggest_keywords,
 )
 from auth_ip import auth_request_settings, client_ip_from, forwarded_chain_summary
 from billing import billing_mode, parse_plans, plan_summary, sales_open
@@ -1395,13 +1396,14 @@ def render_admin_diagnostics() -> None:
             f"새 AI 대화 공개: **{'켜짐' if chat_v2_public() else '꺼짐'}**, "
             f"음성 대화 공개: **{'켜짐' if VOICE_CHAT_ENABLED and chat_v2_public() else '꺼짐'}**, "
             f"보조 기능 공개: **{'켜짐' if ASSIST_V2_ENABLED else '꺼짐'}**, "
-            f"판례 Open API: **{'설정됨' if LAW_OPEN_API_OC else '없음'}**\n"
+            f"판례·법령 Open API: **{'설정됨' if LAW_OPEN_API_OC else '없음'}**\n"
             f"- AI 키: **{'설정됨' if os.environ.get('GEMINI_API_KEY') else '없음'}** (값은 표시하지 않음)"
         )
         st.caption(
             "IP 감지가 '안 됨'이면 IP 전달 기능을 켜도 효과가 없습니다. '됨'이어도 Streamlit 앞단 프록시가 "
             "헤더를 덮어쓰는지(이용자가 넣은 값을 지우는지) 공개 자료로 확인되기 전에는 켜지 마세요."
         )
+        render_law_api_check()
 
 
 def voice_input_available() -> bool:
@@ -2770,10 +2772,13 @@ def render_legal_terms_search(key: str) -> None:
 def render_precedent_finder(case_type: str) -> None:
     """공식 판례 검색으로 연결한다. 앱이 판례를 고르거나 만들어 보여 주지 않는다."""
     label, url = OFFICIAL_PRECEDENT_SEARCH
-    with st.expander("🔎 판례 찾아보기 (외부 공식 사이트)"):
+    api = law_api_available()
+    with st.expander("🔎 판례·법령 찾아보기 (국가법령정보센터)" if api else "🔎 판례 찾아보기 (외부 공식 사이트)"):
         st.caption(
-            "고소미는 판례를 직접 검색하지 않아요. 아래 버튼을 누르면 법제처 국가법령정보센터의 판례 검색 화면이 새 창으로 열려요. "
-            "검색어를 복사해 그 화면의 검색창에 붙여 넣어 주세요. 판례는 사건마다 사실관계가 달라 내 사건 결과를 뜻하지 않아요."
+            ("아래 버튼을 누르면 법제처 국가법령정보센터의 판례 검색 화면이 새 창으로 열려요. 맨 아래에서 바로 조회할 수도 있어요. "
+             if api else
+             "고소미는 판례를 직접 검색하지 않아요. 아래 버튼을 누르면 법제처 국가법령정보센터의 판례 검색 화면이 새 창으로 열려요. ")
+            + "검색어를 복사해 그 화면의 검색창에 붙여 넣어 주세요. 판례는 사건마다 사실관계가 달라 내 사건 결과를 뜻하지 않아요."
         )
         st.link_button(f"{label} 열기 ↗", url, width="stretch")
         keywords = suggest_keywords(case_type)
@@ -2782,34 +2787,78 @@ def render_precedent_finder(case_type: str) -> None:
             for word in keywords:
                 st.code(word, language=None)
         st.caption("검색창에 이름·전화번호·계좌번호 같은 개인정보는 넣지 마세요.")
-        if LAW_OPEN_API_OC:
-            render_precedent_api_search(case_type)
+        render_precedent_api_search(case_type)
+
+
+def law_api_available() -> bool:
+    """법제처 Open API 조회: 검색어가 법제처로 가므로 그 내용을 적은 개인정보처리방침(v3) 시행 전에는 관리자만."""
+    return bool(LAW_OPEN_API_OC) and (privacy_v3_in_effect() or is_admin())
+
+
+def fetch_law_api(url: str) -> str:
+    with urlopen(Request(url, headers={"User-Agent": "gosoemi"}), timeout=15) as response:
+        return response.read().decode("utf-8")
 
 
 def render_precedent_api_search(case_type: str) -> None:
-    """법제처 Open API가 설정된 경우에만: 실제로 조회된 판례 목록만 출처와 함께 보여 준다."""
-    query = st.text_input("국가법령정보센터에서 판례 목록 조회", key=f"prec_query_{case_type}", max_chars=40)
-    if st.button("목록 조회", key=f"prec_search_{case_type}"):
-        problem = check_precedent_query(query)
-        if problem:
-            st.warning(problem)
-            return
+    """법제처 Open API가 설정된 경우에만: 실제로 조회된 판례·법령 목록만 출처와 함께 보여 준다.
+
+    조회에 실패하면(인증 실패·연결 오류 등) 실패했다고만 알리고, 목록을 만들거나 '없다'고 하지 않는다.
+    """
+    if not law_api_available():
+        return
+    st.markdown("**국가법령정보센터에서 바로 조회**")
+    kind = st.radio("무엇을 찾을까요?", ["판례", "법령"], key=f"law_kind_{case_type}", horizontal=True)
+    query = st.text_input("검색어 (40자 이내)", key=f"prec_query_{case_type}", max_chars=40,
+                          placeholder="예: 모욕, 정보통신망 명예훼손" if kind == "판례" else "예: 형법, 정보통신망법")
+    st.caption("검색어는 법제처(국가법령정보센터)로 보내지고 고소미에는 저장하지 않아요. 이름·연락처 같은 개인정보는 넣지 마세요.")
+    if not st.button("조회", key=f"prec_search_{case_type}"):
+        return
+    problem = check_precedent_query(query)
+    if problem:
+        st.warning(problem)
+        return
+    try:
+        with st.spinner("국가법령정보센터에서 조회하고 있어요."):
+            result = (search_precedents if kind == "판례" else search_laws)(query, LAW_OPEN_API_OC, fetch_law_api)
+    except Exception as error:
+        print(f"[law_api] kind={'prec' if kind == '판례' else 'law'} result={type(error).__name__}", flush=True)
+        st.error("국가법령정보센터 조회에 실패했어요. 결과가 없다는 뜻이 아니에요. "
+                 "위 버튼으로 공식 사이트에서 직접 찾아 주세요.")
+        return
+    rows = result["rows"]
+    if not rows:
+        st.info(f"국가법령정보센터에 '{query.strip()}'(으)로 조회된 {kind}가 없어요. 다른 검색어로 찾아보세요.")
+        return
+    scope = f" · {result['scope']}에서 찾음" if result.get("scope") else ""
+    st.caption(f"모두 {result['total']:,}건 중 {len(rows)}건{scope}")
+    for row in rows:
+        if kind == "판례":
+            title = md_escape(row["name"])
+            meta = " · ".join(md_escape(x) for x in (row["court"], row["kind"], row["case_no"]) if x) + f" · 선고 {md_escape(row['date'])}"
+        else:
+            title = md_escape(row["name"]) + (f" ({md_escape(row['short'])})" if row["short"] else "")
+            meta = " · ".join(md_escape(x) for x in (row["kind"], row["ministry"], row["status"]) if x) + f" · 시행 {md_escape(row['effective'])}"
+        link = f" · [원문 보기 ↗]({row['link']})" if row["link"] else ""
+        st.markdown(f"**{title}**  \n{meta}{link}")
+    st.caption(f"출처: {OPEN_API_SOURCE}. 목록은 사건마다 사실관계가 달라 내 사건의 결과를 뜻하지 않아요.")
+
+
+def render_law_api_check() -> None:
+    """운영자 진단: 지금 서버에서 법제처 Open API가 실제로 응답하는지 확인한다(검색어 '형법' 고정)."""
+    if not LAW_OPEN_API_OC:
+        st.caption("법령 Open API: 인증값(LAW_OPEN_API_OC)이 없어 확인할 수 없어요.")
+        return
+    if st.button("법령 Open API 연결 확인", key="law_api_check"):
         try:
-            with st.spinner("국가법령정보센터에서 조회하고 있어요."):
-                rows = search_precedents(
-                    query, LAW_OPEN_API_OC,
-                    lambda u: urlopen(Request(u, headers={"User-Agent": "gosoemi"}), timeout=15).read().decode("utf-8"),
-                )
+            result = search_laws("형법", LAW_OPEN_API_OC, fetch_law_api)
+        except LawApiError as error:
+            st.error(f"법제처가 오류를 돌려줬어요: {error} (공동활용 누리집의 서버 IP·도메인 등록과 승인 상태를 확인하세요)")
         except Exception as error:
-            print(f"[precedent] result={type(error).__name__}", flush=True)
-            st.error("판례 목록을 받지 못했어요. 위 버튼으로 공식 사이트에서 직접 찾아 주세요.")
-            return
-        if not rows:
-            st.info("조회된 판례가 없어요. 다른 검색어로 찾아보세요.")
-        for row in rows:
-            st.markdown(f"**{md_escape(row['name'])}**  \n{md_escape(row['court'])} · {md_escape(row['case_no'])} · 선고 {md_escape(row['date'])}")
-        if rows:
-            st.caption(f"출처: {OPEN_API_SOURCE}. 전문은 위 공식 검색 화면에서 사건번호로 찾아 주세요.")
+            st.error(f"연결하지 못했어요: {type(error).__name__}")
+        else:
+            first = result["rows"][0]["name"] if result["rows"] else "(없음)"
+            st.success(f"정상 응답: '형법' 검색 {result['total']}건, 첫 항목 {first}")
 
 
 def render_case_progress(case_id: str) -> None:
