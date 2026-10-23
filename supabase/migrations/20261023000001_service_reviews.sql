@@ -11,6 +11,14 @@
 -- - 시험: supabase/tests/local_service_reviews_test.py (로컬 임시 Postgres)
 -- - 되돌리기: supabase/rollbacks/20261023000001_service_reviews_rollback.sql
 
+-- 공개 목록·운영자 함수는 security definer로 표를 읽는다. 표에 force row level security를 걸었으므로 함수 소유자(이 SQL을
+-- 실행하는 역할)가 RLS를 건너뛸 수 있어야 한다(Supabase의 postgres 역할). 아니면 적용을 멈춘다.
+do $$ begin
+    if not exists (select 1 from pg_roles where rolname = current_user and (rolbypassrls or rolsuper)) then
+        raise exception '이 SQL은 RLS를 건너뛸 수 있는 역할(Supabase SQL Editor의 postgres)로 실행해야 합니다. 지금 역할: %', current_user;
+    end if;
+end $$;
+
 create table public.review_admins (
     user_id uuid primary key references auth.users (id) on delete cascade
 );

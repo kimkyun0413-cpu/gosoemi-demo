@@ -31,7 +31,30 @@ grant execute on function auth.uid() to anon, authenticated, service_role;
 grant usage on schema public to anon, authenticated, service_role;
 alter default privileges in schema public grant all on tables to anon, authenticated, service_role;
 """)
-x(open(f"{REPO}/supabase/migrations/20261023000001_service_reviews.sql").read())
+# Supabase처럼 슈퍼유저가 아닌 역할(RLS는 건너뛸 수 있음)이 마이그레이션을 실행하고 함수를 소유하게 한다.
+x("""
+do $$ begin
+  if not exists (select from pg_roles where rolname='migrator') then create role migrator nologin nosuperuser bypassrls; end if;
+  if not exists (select from pg_roles where rolname='no_bypass') then create role no_bypass nologin nosuperuser nobypassrls; end if;
+end $$;
+grant usage, create on schema public to migrator, no_bypass;
+grant usage on schema auth to migrator, no_bypass;
+grant references, select on auth.users to migrator, no_bypass;
+grant authenticated, anon to migrator;
+""")
+SQL = open(f"{REPO}/supabase/migrations/20261023000001_service_reviews.sql").read()
+try:
+    with db.transaction():
+        x("set local role no_bypass")
+        x(SQL)
+    print("FAIL RLS를 건너뛸 수 없는 역할로는 적용이 멈춤"); sys.exit(1)
+except psycopg.Error as error:
+    print("PASS RLS를 건너뛸 수 없는 역할로는 적용이 멈춤:", str(error).splitlines()[0][:80])
+with db.transaction():
+    x("set local role migrator")
+    x(SQL)
+owner = x("select pg_get_userbyid(proowner) from pg_proc where proname = 'published_reviews'").fetchone()[0]
+print("함수 소유자:", owner)
 
 A, B, OP = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
 x("insert into auth.users values (%s),(%s),(%s)", (A, B, OP))
