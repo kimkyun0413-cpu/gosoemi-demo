@@ -192,7 +192,7 @@ class AssistAppTest(unittest.TestCase):
         self.assertNotIn("🛠 운영자 진단 (관리자에게만 보임)", self.labels(home))
         account = self.start(page="account")
         self.assertIn("🛠 운영자 진단 (관리자에게만 보임)", self.labels(account))
-        self.assertIn("궁금한 점을 글이나 말로 물어보세요.", " ".join(m.value for m in home.markdown))
+        self.assertIn("궁금한 점을 글이나 말로 물어보세요.", " ".join(m.value for m in list(home.markdown) + list(home.caption)))
 
     def test_checklist_is_not_saved(self):
         at = self.start(page="cases", open_case_id=CASE_ID, **{f"ws_step_{CASE_ID}": "next"})

@@ -76,7 +76,7 @@ from case_workspace import (
 )
 from calendar_ics import ALARM_CHOICES, KIND_LABELS, build_ics, clean_event, describe
 from precedent_search import (
-    OFFICIAL_PRECEDENT_SEARCH, OPEN_API_SOURCE, check_query as check_precedent_query, search_precedents, suggest_keywords,
+    OFFICIAL_LAW_SEARCH, OFFICIAL_PRECEDENT_SEARCH, OPEN_API_SOURCE, check_query as check_precedent_query, search_precedents, suggest_keywords,
 )
 from auth_ip import auth_request_settings, client_ip_from, forwarded_chain_summary
 from billing import billing_mode, parse_plans, plan_summary, sales_open
@@ -2346,6 +2346,57 @@ h3 { font-size: 1.2rem !important; color: var(--dgo-navy); padding-top: 0.8rem !
 footer {visibility: hidden;}
 [data-testid="stToolbar"] {visibility: hidden;}
 [data-testid="stAppDeployButton"] {display: none;}
+
+/* ── A안 메뉴(2026-10-23): 넓은 화면은 왼쪽 고정 메뉴, 휴대폰은 아래 고정 메뉴. 같은 버튼 두 벌 중 하나만 보인다. ── */
+.st-key-app_nav_side, .st-key-app_nav_tabs { display: none !important; }
+.st-key-mobile_top { justify-content: space-between; }
+.st-key-mobile_top .st-key-account_btn, .st-key-mobile_top .st-key-account_btn button { width: auto !important; }
+@media (min-width: 900px) {
+    .st-key-mobile_top { display: none !important; }
+    .st-key-app_nav_side {
+        display: flex !important; flex-direction: column; position: fixed; top: 0; left: 0; bottom: 0; width: 232px;
+        z-index: 999991; background: #FFFFFF; border-right: 1px solid #E1E6EE; padding: 18px 14px; gap: 2px !important; overflow-y: auto;
+    }
+    .st-key-app_nav_side button { justify-content: flex-start !important; min-height: 44px; border-radius: 10px !important; padding: 0 12px !important; }
+    .st-key-app_nav_side button p { font-size: 15px !important; }
+    .st-key-app_nav_side button > div { width: 100%; justify-content: flex-start !important; }
+    .st-key-app_nav_side button > div > span { display: flex; align-items: center; gap: 10px; }
+    .st-key-app_nav_side button[kind="primary"] { background: #E7EEF7 !important; color: var(--dgo-navy) !important; border: none !important; }
+    .st-key-app_nav_side button[kind="primary"] p { color: var(--dgo-navy) !important; font-weight: 700; }
+    .st-key-side_brand button p { font-size: 1.35rem !important; font-weight: 800 !important; color: var(--dgo-navy) !important; }
+    .st-key-side_brand { margin-bottom: 12px; }
+    .st-key-side_account { margin-top: auto; border-top: 1px solid #E1E6EE; padding-top: 8px; }
+    [data-testid="stMain"] { padding-left: 232px; }
+    [data-testid="stMainBlockContainer"] { max-width: 960px; }
+}
+@media (max-width: 899.98px) {
+    .st-key-app_nav_tabs {
+        display: flex !important; flex-wrap: nowrap !important; position: fixed; left: 0; right: 0; bottom: 0; z-index: 999991;
+        background: #FFFFFF; border-top: 1px solid #E1E6EE; gap: 0 !important;
+        padding: 4px 4px calc(6px + env(safe-area-inset-bottom)) 4px;
+    }
+    .st-key-app_nav_tabs > div, .st-key-app_nav_tabs [data-testid="stButton"] { flex: 1 1 0 !important; min-width: 0 !important; width: auto !important; }
+    .st-key-app_nav_tabs button {
+        width: 100%; min-height: 54px; padding: 2px !important; border: none !important; background: transparent !important;
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0;
+    }
+    .st-key-app_nav_tabs button p { font-size: 11px !important; color: #536175; }
+    .st-key-app_nav_tabs button > div, .st-key-app_nav_tabs button > div > span { display: flex; flex-direction: column; align-items: center; gap: 1px; }
+    .st-key-app_nav_tabs button > div > span > span { margin: 0 !important; }
+    .st-key-app_nav_tabs button span[data-testid="stIconMaterial"] { font-size: 22px; color: #536175; }
+    .st-key-app_nav_tabs button[kind="primary"] p, .st-key-app_nav_tabs button[kind="primary"] span[data-testid="stIconMaterial"] { color: var(--dgo-navy) !important; font-weight: 700; }
+    [data-testid="stMainBlockContainer"] { padding-bottom: 96px !important; }
+    /* 저장 영역은 아래 메뉴 위에 붙인다 */
+    [data-testid="stLayoutWrapper"]:has(> [class*="st-key-ws_savebar_"]) { bottom: calc(62px + env(safe-area-inset-bottom)) !important; }
+    /* 휴대폰에서 입력하는 동안(키보드가 올라온 동안)에는 아래 메뉴를 숨겨 입력칸·저장 버튼을 가리지 않게 한다 */
+    body:has(textarea:focus, input:focus) .st-key-app_nav_tabs { display: none !important; }
+    body:has(textarea:focus, input:focus) [data-testid="stLayoutWrapper"]:has(> [class*="st-key-ws_savebar_"]) { bottom: 0 !important; }
+}
+/* 첫 화면 */
+.st-key-home_start { background: var(--dgo-navy); border-radius: 16px; padding: 20px !important; }
+.st-key-home_start p, .st-key-home_start h3, .st-key-home_start [data-testid="stCaptionContainer"] { color: #FFFFFF !important; }
+.st-key-home_start .st-key-home_go_case button { background: #FFFFFF !important; color: var(--dgo-navy) !important; border: none !important; }
+.st-key-home_start .st-key-home_go_case button p { color: var(--dgo-navy) !important; font-weight: 700; }
 </style>
 """
 
@@ -4241,7 +4292,11 @@ export default function() {
 }
 """,
 )
-PAGES = {"home": "처음", "chat": "AI에게 질문", "case": "고소장 작성", "cases": "내 사건", "help": "도움말"}
+PAGES = {"home": "홈", "cases": "내 사건", "case": "고소장 작성", "chat": "AI 상담", "search": "법령·판례 검색", "help": "피해별 안내"}
+# A안(2026-10-23 확정): 넓은 화면은 왼쪽 고정 메뉴, 휴대폰은 아래 고정 메뉴(아래 다섯 칸). 내 계정은 왼쪽 메뉴 맨 아래·휴대폰 위쪽 오른쪽.
+NAV_ICONS = {"home": ":material/home:", "cases": ":material/folder_open:", "case": ":material/add_circle:",
+             "chat": ":material/chat:", "search": ":material/search:", "help": ":material/menu_book:"}
+TAB_PAGES = {"home": "홈", "cases": "내 사건", "case": "작성", "chat": "상담", "search": "검색"}
 
 
 def apply_nav(action: dict) -> None:
@@ -4264,12 +4319,6 @@ def request_nav(action: dict) -> None:
 
 def go_to(page: str) -> None:
     request_nav({"page": page})
-
-
-def on_nav_change() -> None:
-    choice = st.session_state.get("nav_choice")
-    if choice:  # 이미 고른 칸을 다시 눌러 선택이 풀린 경우에는 화면을 그대로 둔다
-        request_nav({"page": choice})
 
 
 @st.dialog("저장하지 않은 내용이 있어요", dismissible=False)
@@ -4380,49 +4429,105 @@ def render_account_page(identity: str, method: str) -> None:
 
 
 def render_top_bar(identity: str, method: str) -> str:
-    with st.container(key="top_bar"):
-        col_logo, col_account = st.columns([3, 2], vertical_alignment="center")
-        with col_logo:
-            st.button("고소미", key="brand_home_btn", icon=":material/balance:", type="tertiary", on_click=go_to, args=("home",),
-                      help="처음 화면으로 가기")
-        with col_account:
-            st.button("내 계정", key="account_btn", icon=":material/account_circle:", type="secondary",
-                      on_click=go_to, args=("account",))
-    # 지금 화면은 nav_page(일반 값)에 두고, 위쪽 이동 막대(nav_choice)는 그 값을 보여 주기만 한다.
+    """메뉴를 그리고 지금 화면 이름을 돌려준다. 같은 버튼을 두 벌(넓은 화면용 왼쪽 메뉴, 휴대폰용 아래 메뉴) 그리고 CSS로 하나만 보인다."""
     page = st.session_state.get("nav_page") or "home"
     if page not in PAGES and page != "account":
         page = "home"
     st.session_state.nav_page = page
-    if page == "home":
-        return page  # 처음 화면에서는 이동 막대 없이 카드 세 개로 고른다
-    st.session_state.nav_choice = page if page in PAGES else None
-    st.segmented_control(
-        "화면 이동", list(PAGES), format_func=PAGES.get, key="nav_choice", label_visibility="collapsed",
-        width="stretch", on_change=on_nav_change,
-    )
+    with st.container(key="mobile_top", horizontal=True, vertical_alignment="center"):
+        st.button("고소미", key="brand_home_btn", icon=":material/balance:", type="tertiary", on_click=go_to, args=("home",),
+                  help="홈으로 가기")
+        st.button("내 계정", key="account_btn", icon=":material/account_circle:", type="secondary",
+                  on_click=go_to, args=("account",))
+    with st.container(key="app_nav_side"):
+        st.button("고소미", key="side_brand", icon=":material/balance:", type="tertiary", on_click=go_to, args=("home",))
+        for key, label in PAGES.items():
+            st.button(label, key=f"side_nav_{key}", icon=NAV_ICONS[key], type="primary" if key == page else "tertiary",
+                      on_click=go_to, args=(key,), width="stretch")
+        st.button("내 계정", key="side_account", icon=":material/account_circle:", width="stretch",
+                  type="primary" if page == "account" else "tertiary", on_click=go_to, args=("account",))
+    with st.container(key="app_nav_tabs", horizontal=True):
+        for key, label in TAB_PAGES.items():
+            st.button(label, key=f"tab_nav_{key}", icon=NAV_ICONS[key], type="primary" if key == page else "tertiary",
+                      on_click=go_to, args=(key,))
     return page
 
 
+def latest_case_card() -> None:
+    """첫 화면 '이어서 하기': 가장 최근에 저장한 사건과 다음 할 일. 불러오지 못하면 카드를 그리지 않는다."""
+    cases, error = load_cases_safe()
+    if error or not cases:
+        return
+    case = cases[0]
+    case_id = str(case.get("case_id") or "")
+    with st.container(border=True, key="home_continue"):
+        st.caption(f"이어서 하기 · {format_created_at(case.get('created_at'))} 저장")
+        st.markdown(f"**{md_escape(case.get('case_type') or '유형 미입력')}**")
+        if assist_preview():
+            ws = st.session_state.get(f"ws_{case_id}") or {"answers": {}}
+            progress = {key: st.session_state.get(f"prog_{case_id}_{key}") for key, _ in PROGRESS_ITEMS}
+            has_draft = bool(st.session_state.get(f"list_draft_{case_id}"))
+            st.markdown(f"다음 할 일: **{next_action({**case, **ws['answers']}, has_draft, progress)}**")
+        st.button("이어서", key="home_continue_btn", type="secondary", on_click=open_case_from_home, args=(case_id,))
+
+
+def open_case_from_home(case_id: str) -> None:
+    request_nav({"page": "cases"})
+    if st.session_state.get("nav_page") == "cases":
+        st.session_state.open_case_id = case_id
+
+
 def render_home_page() -> None:
-    st.markdown("## 무엇을 도와드릴까요?")
-    choices = [
-        ("chat", "AI에게 질문하기", "AI 기능을 점검 중입니다." if ai_unavailable_for_current_user()
-         else "궁금한 점을 글이나 말로 물어보세요." if voice_chat_available() else "궁금한 점을 글로 물어보세요.",
-         ":material/chat:"),
-        ("case", "고소장 작성하기", "사건 내용을 정리해 저장해요. (초안 만들기는 점검 중)" if ai_unavailable_for_current_user()
-         else "사건 내용을 바탕으로 초안을 만들어요.", ":material/edit_document:"),
-        ("cases", "내 사건 보기", "저장한 사건을 확인하세요.", ":material/folder_open:"),
+    st.markdown("## 무엇을 할까요?")
+    paused = ai_unavailable_for_current_user()
+    with st.container(key="home_start"):
+        st.caption("처음이라면 여기서 시작하세요")
+        st.markdown("### 고소장 작성")
+        st.markdown("사건 내용을 정리해 저장해요. (초안 만들기는 점검 중)" if paused
+                    else "겪은 일을 차례로 적으면 참고용 초안을 만들어 드려요. 모르는 부분은 비워 두면 [확인 필요]로 남겨요.")
+        st.button("새 사건 시작하기", key="home_go_case", type="primary", on_click=go_to, args=("case",),
+                  icon=":material/edit_document:")
+    latest_case_card()
+    tiles = [
+        ("cases", "내 사건", "저장한 사건을 확인하세요."),
+        ("chat", "AI 상담", "AI 기능을 점검 중입니다." if paused
+         else "궁금한 점을 글이나 말로 물어보세요." if voice_chat_available() else "궁금한 점을 글로 물어보세요."),
+        ("search", "법령·판례 검색", "국가법령정보센터에서 찾아요."),
+        ("help", "피해별 안내", "준비할 자료와 법률 용어 풀이"),
     ]
-    columns = st.columns(3)
-    for column, (page, title, desc, icon) in zip(columns, choices):
-        with column:
-            with st.container(border=True, key=f"home_card_{page}"):
-                st.markdown(f"### {title}")
-                st.markdown(desc)
-                st.button(title, key=f"home_go_{page}", icon=icon, type="primary", width="stretch",
-                          on_click=go_to, args=(page,))
-    st.button("법률 용어·피해별 안내 보기", key="home_go_help", icon=":material/menu_book:", type="secondary",
-              on_click=go_to, args=("help",))
+    with st.container(key="home_tiles"):
+        for row in (tiles[:2], tiles[2:]):
+            for column, (page, title, desc) in zip(st.columns(2), row):
+                with column:
+                    with st.container(border=True, key=f"home_card_{page}"):
+                        st.markdown(f"**{title}**")
+                        st.caption(desc)
+                        st.button(title, key=f"home_go_{page}", icon=NAV_ICONS[page], type="secondary", width="stretch",
+                                  on_click=go_to, args=(page,))
+
+
+def render_search_page() -> None:
+    """법령·판례 검색: 국가법령정보센터 공식 검색 화면으로 연결한다(앱 안 바로 조회는 Open API 연결 뒤에)."""
+    st.markdown("## 법령·판례 검색")
+    st.caption("고소미는 판례나 법령을 직접 고르거나 만들어 보여 주지 않아요. 아래 버튼을 누르면 법제처 국가법령정보센터 검색 화면이 새 창으로 열려요.")
+    prec_label, prec_url = OFFICIAL_PRECEDENT_SEARCH
+    law_label, law_url = OFFICIAL_LAW_SEARCH
+    col_prec, col_law = st.columns(2)
+    with col_prec:
+        st.link_button(f"{prec_label} ↗", prec_url, width="stretch", type="primary")
+    with col_law:
+        st.link_button(f"{law_label} ↗", law_url, width="stretch")
+    types = list(DAMAGE_TYPES)
+    default_type = st.session_state.get("case_type_choice")
+    case_type = st.selectbox("피해 유형별 검색어 예시", types, key="search_type",
+                             index=types.index(default_type) if default_type in types else 0)
+    keywords = suggest_keywords(case_type)
+    if keywords:
+        st.caption("검색어를 복사해 공식 검색창에 붙여 넣어 주세요(오른쪽 위 아이콘으로 복사).")
+        for word in keywords:
+            st.code(word, language=None)
+    st.caption("검색창에 이름·전화번호·계좌번호 같은 개인정보는 넣지 마세요. 판례는 사건마다 사실관계가 달라 내 사건의 결과를 뜻하지 않아요.")
+    st.info("고소미 안에서 바로 찾아보는 기능은 준비 중이에요.")
 
 
 def render_steps(current: int) -> None:
@@ -5920,7 +6025,7 @@ if current_page == "account":
 else:
     {
         "home": render_home_page, "chat": render_chat_page, "case": render_case_page,
-        "cases": render_cases_page, "help": render_help_page,
+        "cases": render_cases_page, "search": render_search_page, "help": render_help_page,
     }[current_page]()
 if st.session_state.get("_pending_nav"):
     render_leave_dialog()

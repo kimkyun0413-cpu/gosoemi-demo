@@ -16,6 +16,10 @@ OFFICIAL_PRECEDENT_SEARCH = (
     "국가법령정보센터 판례 검색",
     "https://www.law.go.kr/LSW/precSc.do?menuId=7&subMenuId=47&tabMenuId=213",
 )
+OFFICIAL_LAW_SEARCH = (
+    "국가법령정보센터 현행법령 검색",
+    "https://www.law.go.kr/LSW/lsSc.do?menuId=1&subMenuId=15&tabMenuId=81",  # 확인 2026-10-23: 현행법령 검색 화면
+)
 OPEN_API_SOURCE = "국가법령정보센터(법제처) Open API"
 OPEN_API_URL = "https://www.law.go.kr/DRF/lawSearch.do"
 QUERY_MAX_CHARS = 40

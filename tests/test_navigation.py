@@ -100,9 +100,8 @@ class NavigationTest(unittest.TestCase):
         keys = {b.key for b in self.at.button}
         self.assertTrue({"logout_btn_main", "privacy_policy_view_btn_main", "terms_of_service_view_btn_main",
                          "delete_account_main"} <= keys)
-        self.at.session_state["nav_choice"] = "chat"  # 위쪽 막대로 다른 화면 고르기
-        self.at.run()
-        self.assertEqual([e.value for e in self.at.exception], [])
+        self.click("tab_nav_chat")  # 아래 메뉴로 다른 화면 고르기
+        self.assertEqual(self.at.session_state["nav_page"], "chat")
 
     def test_public_chat_stays_disabled_until_launch_is_ready(self):
         fake.REPLIES[:] = ["가짜 답변입니다."]
@@ -121,19 +120,36 @@ class NavigationTest(unittest.TestCase):
         self.at.text_area(key="case_field_reporter_info").input("홍길동").run()
         self.assertFalse(self.scroll_marks())       # 같은 화면에서 입력할 때는 올리지 않는다
 
-    def nav_shown(self):
-        return any(getattr(e, "key", None) == "nav_choice" or "nav_choice" in str(getattr(e, "proto", ""))[:400]
-                   for e in self.at.get("button_group"))
+    def nav_keys(self):
+        return {b.key for b in self.at.button if b.key and b.key.startswith(("side_nav_", "tab_nav_"))}
 
-    def test_home_hides_navigation_and_cards_use_short_texts(self):
-        self.assertFalse(self.nav_shown())
-        texts = " ".join(m.value for m in self.at.markdown)
+    def test_menu_is_on_every_page_and_home_cards_use_short_texts(self):
+        # A안: 홈에서도 메뉴(넓은 화면 왼쪽·휴대폰 아래)가 보인다. 아래 메뉴는 다섯 칸.
+        self.assertEqual({k for k in self.nav_keys() if k.startswith("tab_nav_")},
+                         {"tab_nav_home", "tab_nav_cases", "tab_nav_case", "tab_nav_chat", "tab_nav_search"})
+        self.assertIn("side_nav_help", self.nav_keys())
+        texts = " ".join(m.value for m in list(self.at.markdown) + list(self.at.caption))
         self.assertIn("AI 기능을 점검 중입니다.", texts)  # 일반 공개 준비 전
         self.assertIn("사건 내용을 정리해 저장해요. (초안 만들기는 점검 중)", texts)
         self.assertIn("저장한 사건을 확인하세요.", texts)
         self.assertNotIn("초안을 다시", texts)
-        self.click("home_go_case")
-        self.assertTrue(self.nav_shown())
+        self.click("tab_nav_search")
+        self.assertEqual(self.at.session_state["nav_page"], "search")
+        self.assertTrue(any("고소미 안에서 바로 찾아보는 기능은 준비 중" in i.value for i in self.at.info))
+        links = [b.proto.url for b in self.at.get("link_button")]
+        self.assertTrue(any("precSc.do" in u for u in links) and any("lsSc.do" in u for u in links))
+        self.click("side_nav_cases")
+        self.assertEqual(self.at.session_state["nav_page"], "cases")
+
+    def test_continue_card_opens_latest_case(self):
+        case_id = "44444444-4444-4444-8444-444444444444"
+        fake.CASES.append({"case_id": case_id, "user_id": fake.USER_ID, "case_type": "투자 사기",
+                           "incident_description": "300만 원 입금", "created_at": "2026-10-02T00:00:00+00:00"})
+        self.click("tab_nav_cases")
+        self.click("tab_nav_home")
+        self.click("home_continue_btn")
+        self.assertEqual(self.at.session_state["nav_page"], "cases")
+        self.assertEqual(self.at.session_state["open_case_id"], case_id)
 
     def test_cases_caption_does_not_promise_saved_drafts_when_saving_is_off(self):
         fake.CASES.append({"case_id": "33333333-3333-4333-8333-333333333333", "user_id": fake.USER_ID,
