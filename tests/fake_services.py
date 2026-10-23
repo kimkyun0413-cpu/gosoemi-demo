@@ -30,7 +30,7 @@ def session_for(user_id: str, email: str) -> dict:
     }
 
 
-TABLES = {"cases": CASES, "case_workspace": [], "case_drafts": [], "case_draft_archive": []}
+TABLES = {"cases": CASES, "case_workspace": [], "case_drafts": [], "case_draft_archive": [], "service_reviews": []}
 FAIL_NEXT = []  # 다음 요청을 실패시킬 (표, 동작) 목록. 예: [("case_workspace", "update")]
 # 가짜 consent_records에 있는 열. 운영처럼 '동의한 때' 열이 없다고 두고, 없는 열을 고르면 PostgREST처럼 42703 오류를 낸다.
 CONSENT_COLUMNS = ("user_id", "terms_version", "privacy_version")
@@ -105,6 +105,10 @@ class FakeQuery:
             row = dict(self.payload)
             if self.table_name == "case_draft_archive":
                 row["archived_at"] = _now_iso()
+            if self.table_name == "service_reviews":  # DB 트리거 흉내: 상태는 공개 방식으로만 정한다
+                row["review_id"] = row.get("review_id") or f"r{len(rows) + 1:04d}-0000-4000-8000-000000000000"
+                row.update(status="pending" if row.get("visibility") == "public" else "private", published_at=None,
+                           reject_reason=None, created_at=_now_iso(), updated_at=_now_iso())
             if self.table_name == "case_workspace":
                 if any(r["user_id"] == row["user_id"] and r["case_id"] == row["case_id"] for r in rows):
                     raise RuntimeError('duplicate key value violates unique constraint "case_workspace_pkey" (23505)')
@@ -133,6 +137,9 @@ class FakeQuery:
                         r["edit_version"] = int(r.get("edit_version") or 1) + 1
                     if self.table_name == "case_draft_archive":
                         r["archived_at"] = _now_iso()
+                    if self.table_name == "service_reviews":
+                        r.update(status="pending" if r.get("visibility") == "public" else "private", published_at=None,
+                                 reject_reason=None, updated_at=_now_iso())
                     out.append(dict(r))
             return SimpleNamespace(data=out)
         return SimpleNamespace(data=[])
@@ -196,7 +203,30 @@ class FakeSupabase:
 
     def rpc(self, name, params=None):
         RPC_CALLS.append((name, params))
+        if name in ("published_reviews", "reviews_for_moderation", "moderate_review"):
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=_review_rpc(name, params or {})))
         return FakeQuery("rpc:" + name)
+
+
+def _review_rpc(name, params):
+    """후기 DB 함수 흉내. 운영자 확인(review_admins)·RLS는 로컬 Postgres 시험에서 검사한다."""
+    rows = TABLES["service_reviews"]
+    if ("rpc:" + name, "execute") in FAIL_NEXT:
+        FAIL_NEXT.remove(("rpc:" + name, "execute"))
+        raise RuntimeError("fake network error")
+    if name == "published_reviews":
+        out = sorted((r for r in rows if r.get("status") == "published"), key=lambda r: r.get("published_at") or "", reverse=True)
+        return [{k: r.get(k) for k in ("rating", "helpful", "improve", "published_at")} for r in out][: params.get("p_limit", 20)]
+    if name == "reviews_for_moderation":
+        return [{k: v for k, v in r.items() if k != "user_id"} for r in rows if r.get("status") == params.get("p_status")]
+    changed = 0
+    for r in rows:
+        if r.get("review_id") == params.get("p_review_id") and r.get("visibility") == "public":
+            publish = params.get("p_action") == "publish"
+            r.update(status="published" if publish else "rejected", published_at=_now_iso() if publish else None,
+                     reject_reason=None if publish else params.get("p_reason"))
+            changed = 1
+    return changed
 
 
 def fake_create_client(*args, **kwargs):
@@ -265,6 +295,7 @@ def reset():
     TABLES["case_workspace"].clear()
     TABLES["case_drafts"].clear()
     TABLES["case_draft_archive"].clear()
+    TABLES["service_reviews"].clear()
     FAIL_NEXT.clear()
 
 

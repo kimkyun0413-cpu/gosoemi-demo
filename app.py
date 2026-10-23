@@ -34,6 +34,7 @@ import case_workspace as _case_workspace_module
 import calendar_ics as _calendar_ics_module
 import data_export as _data_export_module
 import ai_runtime as _ai_runtime_module
+import service_reviews as _service_reviews_module
 
 # Streamlit Cloud는 git push 뒤 app.py만 새로 실행하고, 이미 불러온 보조 모듈(case_guide, voice_input 등)은
 # 예전 버전을 메모리에 그대로 둘 수 있다. 그러면 새로 추가한 이름을 못 찾아 ImportError로 앱이 멈춘다
@@ -45,7 +46,7 @@ for _module in (
     _case_guide_module, _policy_text_module, _billing_module, _auth_ip_module, _voice_input_module,
     _chat_assistant_module, _precedent_search_module, _case_workspace_module, _calendar_ics_module,
     _data_export_module,   # 2026-10-13 운영 ImportError: 이 목록에 빠져 예전 data_export가 남아 있었음
-    _ai_runtime_module,
+    _ai_runtime_module, _service_reviews_module,
 ):
     try:
         importlib.reload(_module)
@@ -69,6 +70,10 @@ from chat_assistant import (
 )
 from data_export import (EVIDENCE_PART_MAX_BYTES, NOT_INCLUDED_NOTE, build_evidence_part, build_text_part,
                          evidence_summary_text)
+from service_reviews import (
+    DO_NOT_WRITE, REJECT_REASONS, REVIEW_NOTICE, STATUS_LABELS, TEXT_MAX_CHARS as REVIEW_TEXT_MAX, VISIBILITY, VISIBILITY_HELP,
+    clean_review, review_flags, review_problems,
+)
 from ai_runtime import PostgresUsageStore, generation_settings, public_ai_blockers, usage_counts
 from case_workspace import (
     CASE_STEPS, EVIDENCE_NAME_MAX_CHARS, STEP_DONE_NOTE, STYLES, UNKNOWN, build_timeline, clean_steps_done, bundle_docx, bundle_text, draft_check_items, evidence_items, inconsistencies,
@@ -169,6 +174,9 @@ ASSIST_V2_ENABLED = os.environ.get("ASSIST_V2_ENABLED") == "true"
 CASE_WORKSPACE_SAVE_ENABLED = os.environ.get("CASE_WORKSPACE_SAVE_ENABLED") == "true"
 # 이전 초안 보관(supabase/migrations/20261023000000_case_draft_archive.sql, 운영 미적용). 적용 전에는 켜지 않는다.
 DRAFT_ARCHIVE_ENABLED = os.environ.get("DRAFT_ARCHIVE_ENABLED") == "true"
+# 이용 후기(supabase/migrations/20261023000001_service_reviews.sql, 운영 미적용). 적용 전에는 켜지 않는다.
+REVIEWS_ENABLED = os.environ.get("REVIEWS_ENABLED") == "true"
+REVIEWS_TABLE = "service_reviews"
 # 법제처 국가법령정보 Open API 사용자 ID(OC). 사용 신청·서버 IP 등록 전에는 비워 둔다. 값은 화면·로그에 내지 않는다.
 LAW_OPEN_API_OC = (os.environ.get("LAW_OPEN_API_OC") or "").strip()
 # 관리자(운영자) 계정의 Supabase 사용자 ID 목록(쉼표로 구분). 공개 기능을 켜지 않고 음성 입력 시험과
@@ -1333,6 +1341,40 @@ def draft_save_available() -> bool:
     return DRAFT_SAVE_ENABLED and (privacy_v3_in_effect() or is_admin())
 
 
+def reviews_writable() -> bool:
+    """후기 쓰기: 후기 글(새 개인정보)을 적은 방침(v3) 시행 전에는 관리자만."""
+    return REVIEWS_ENABLED and (privacy_v3_in_effect() or is_admin())
+
+
+def fetch_published_reviews(limit: int = 20, offset: int = 0) -> list:
+    """게시된 후기만(작성자 정보 없음). 불러오지 못하면 빈 목록 대신 오류를 낸다(가짜로 채우지 않는다)."""
+    return get_authed_client().rpc("published_reviews", {"p_limit": limit, "p_offset": offset}).execute().data or []
+
+
+def fetch_my_reviews() -> list:
+    session = st.session_state.get("supabase_session") or {}
+    response = (get_authed_client().table(REVIEWS_TABLE).select("*").eq("user_id", session.get("user_id", ""))
+                .order("created_at", desc=True).execute())
+    return response.data or []
+
+
+def save_review(values: dict, review_id: str = "") -> None:
+    """후기를 넣거나 고친다. 상태·게시 시각은 DB 트리거가 정한다(공개를 고치면 다시 확인 대기)."""
+    session = ensure_active_session()
+    if not session or not session.get("user_id"):
+        raise RuntimeError("로그인이 만료되었습니다. 다시 로그인해 주세요.")
+    table = get_authed_client().table(REVIEWS_TABLE)
+    if review_id:
+        table.update(values).eq("user_id", session["user_id"]).eq("review_id", review_id).execute()
+    else:
+        table.insert({**values, "user_id": session["user_id"]}).execute()
+
+
+def delete_review(review_id: str) -> None:
+    session = ensure_active_session() or {}
+    get_authed_client().table(REVIEWS_TABLE).delete().eq("user_id", session.get("user_id", "")).eq("review_id", review_id).execute()
+
+
 def draft_archive_available() -> bool:
     """이전 초안을 DB에 보관할 수 있을 때만 '새로 만들기'를 연다(새로고침·재로그인 뒤에도 되돌릴 수 있어야 하므로)."""
     return DRAFT_ARCHIVE_ENABLED and draft_save_available()
@@ -1624,6 +1666,8 @@ def collect_my_data() -> dict:
                        .eq("user_id", user_id).execute(), optional_table=True)
     ws_rows = fetch("사건 정리 기록(경위·증거 설명·일정·체크)", lambda: client.table(WORKSPACE_TABLE).select("*")
                     .eq("user_id", user_id).execute(), optional_table=True)
+    review_rows = fetch("이용 후기", lambda: client.table(REVIEWS_TABLE).select("*").eq("user_id", user_id).execute(),
+                        optional_table=True) if REVIEWS_ENABLED else []
     archive_rows = fetch("보관한 이전 초안", lambda: client.table(DRAFT_ARCHIVE_TABLE).select("case_id, user_id, draft_text, archived_at")
                          .eq("user_id", user_id).execute(), optional_table=True)
     consents = [{**row, "created_at": next((row[k] for k in CONSENT_TIME_KEYS if row.get(k)), row.get("created_at"))}
@@ -1648,7 +1692,7 @@ def collect_my_data() -> dict:
         account["ai_usage"] = fetch("AI 사용량 기록", lambda: client.rpc("my_ai_usage").execute())
     result = build_text_part(user_id, account, cases, {r["case_id"]: r for r in draft_rows}, {r["case_id"]: r for r in ws_rows},
                              consents, evidence_items, missing, datetime.datetime.now(KST), evidence_status=evidence,
-                             archives={r["case_id"]: r for r in archive_rows})
+                             archives={r["case_id"]: r for r in archive_rows}, reviews=review_rows)
     result["user_id"] = user_id
     return result
 
@@ -4448,9 +4492,257 @@ def keep_widget_values() -> None:
             st.session_state[key] = st.session_state[key]
 
 
+
+# ── 이용 후기(A안) ─────────────────────────────────────────────
+# 첫 화면 아래 공개 후기 + '후기 더 보기', 내려받은 뒤 선택 안내, 내 후기(내 계정), 운영자 검토. 실제 후기가 없으면 빈 화면.
+REVIEW_PAGES = {"reviews": "이용 후기", "review_write": "후기 남기기", "review_admin": "후기 검토"}
+REVIEW_WIDGETS = ("review_rating", "review_helpful", "review_improve", "review_visibility")
+
+
+def review_stars(rating) -> str:
+    n = max(0, min(5, int(rating or 0)))
+    return "★" * n + "☆" * (5 - n)
+
+
+def render_review_card(row: dict) -> None:
+    with st.container(border=True):
+        when = format_created_at(row.get("published_at"))[:10] if row.get("published_at") else ""
+        st.markdown(f"{review_stars(row.get('rating'))}  :gray[익명{' · ' + when if when else ''}]")
+        if (row.get("helpful") or "").strip():
+            st.markdown(f"**도움이 된 점** {md_escape(row['helpful'])}")
+        if (row.get("improve") or "").strip():
+            st.markdown(f"**개선할 점** {md_escape(row['improve'])}")
+
+
+def render_home_reviews() -> None:
+    if not REVIEWS_ENABLED:
+        return
+    st.markdown("#### 이용 후기")
+    try:
+        rows = fetch_published_reviews(2)
+    except Exception as error:
+        log_auth_error(error)
+        st.caption("후기를 불러오지 못했어요.")
+        return
+    if rows:
+        st.caption("운영자가 확인한 익명 후기만 보여요.")
+        for row in rows:
+            render_review_card(row)
+        st.caption(REVIEW_NOTICE)
+    else:
+        with st.container(border=True, key="home_reviews_empty"):
+            st.markdown("**아직 공개된 후기가 없어요**")
+            st.caption("고소장을 내려받은 뒤 후기를 남길 수 있어요. 운영자가 확인한 익명 후기만 여기에 보여요.")
+    st.button("후기 더 보기", key="home_reviews_more", icon=":material/chevron_right:", type="tertiary",
+              on_click=go_to, args=("reviews",))
+
+
+def render_reviews_page() -> None:
+    st.button("홈으로", key="reviews_back", icon=":material/arrow_back:", type="tertiary", on_click=go_to, args=("home",))
+    st.markdown("## 이용 후기")
+    if not REVIEWS_ENABLED:
+        st.info("후기 기능은 준비 중이에요.")
+        return
+    limit = st.session_state.setdefault("reviews_limit", 20)
+    try:
+        rows = fetch_published_reviews(limit)
+    except Exception as error:
+        log_auth_error(error)
+        st.error("후기를 불러오지 못했어요. 잠시 후 다시 열어 주세요.")
+        return
+    if not rows:
+        with st.container(border=True, key="reviews_empty"):
+            st.markdown("**아직 공개된 후기가 없어요**")
+            st.caption("후기는 운영자가 개인정보가 없는지 확인한 뒤에 익명으로 게시돼요.")
+    else:
+        st.caption(f"운영자가 확인한 익명 후기 · 최신순")
+        for row in rows:
+            render_review_card(row)
+        if len(rows) >= limit and limit < 50:
+            st.button("더 불러오기", key="reviews_more",
+                      on_click=lambda: st.session_state.__setitem__("reviews_limit", min(limit + 20, 50)))
+    st.caption(REVIEW_NOTICE)
+
+
+def open_review_write(review=None) -> None:
+    """후기 쓰기(review=None) 또는 고치기. 고칠 때는 지금 값을 입력칸에 채운다."""
+    for key in REVIEW_WIDGETS:
+        st.session_state.pop(key, None)
+    st.session_state.review_edit = dict(review) if review else None
+    if review:
+        st.session_state.review_rating = int(review.get("rating") or 1) - 1
+        st.session_state.review_helpful = review.get("helpful") or ""
+        st.session_state.review_improve = review.get("improve") or ""
+        st.session_state.review_visibility = review.get("visibility")
+    st.session_state.review_error = None
+    request_nav({"page": "review_write"})
+
+
+def render_review_write_page() -> None:
+    edit = st.session_state.get("review_edit")
+    st.markdown("## 후기 고치기" if edit else "## 후기 남기기")
+    if not reviews_writable():
+        st.info("후기 기능은 준비 중이에요.")
+        return
+    st.caption("후기는 선택이에요. 남기지 않아도 모든 기능을 그대로 쓸 수 있어요.")
+    st.markdown("**별점**")
+    rating_index = st.feedback("stars", key="review_rating")
+    st.text_area("도움이 된 점 (선택)", key="review_helpful", max_chars=REVIEW_TEXT_MAX, height=90,
+                 placeholder="예: 일을 순서대로 정리하기 쉬웠어요")
+    st.text_area("개선할 점 (선택)", key="review_improve", max_chars=REVIEW_TEXT_MAX, height=90,
+                 placeholder="예: 이 부분이 어려웠어요")
+    st.radio("어떻게 보낼까요?", list(VISIBILITY), format_func=VISIBILITY.get, key="review_visibility", index=None,
+             captions=[VISIBILITY_HELP[key] for key in VISIBILITY])
+    if edit and edit.get("status") == "published":
+        st.info("게시된 후기를 고치면 공개가 잠시 내려가고, 운영자가 다시 확인한 뒤 게시돼요.")
+    st.warning("**적지 마세요:** " + DO_NOT_WRITE)
+    values = clean_review(None if rating_index is None else int(rating_index) + 1, st.session_state.get("review_helpful"),
+                          st.session_state.get("review_improve"), st.session_state.get("review_visibility") or "")
+    flags = review_flags(values["helpful"] + "\n" + values["improve"])
+    if values["visibility"] == "public" and flags["warn"]:
+        st.warning("공개 후기에 " + "·".join(flags["warn"]) + "이(가) 보여요. 구체적인 사건 내용이라면 지워 주세요.")
+    error = st.session_state.pop("review_error", None)
+    if error:
+        st.error(error)
+    col_cancel, col_send = st.columns([1, 2])
+    with col_cancel:
+        st.button("취소", key="review_cancel", width="stretch", on_click=go_to, args=("account" if edit else "home",))
+    with col_send:
+        send = st.button("보내기" if not edit else "고친 내용 보내기", key="review_send", type="primary", width="stretch")
+    if not send:
+        return
+    problems = review_problems(values)
+    if problems:
+        for problem in problems:
+            st.error(problem)
+        return
+    try:
+        save_review(values, (edit or {}).get("review_id") or "")
+    except Exception as error:
+        log_auth_error(error)
+        st.error("후기를 보내지 못했어요. 잠시 후 다시 눌러 주세요. 적은 내용은 그대로 있어요." + contact_hint())
+        return
+    for key in REVIEW_WIDGETS:
+        st.session_state.pop(key, None)
+    st.session_state.review_edit = None
+    st.session_state.account_notice = ("후기를 보냈어요. 운영자가 확인하면 공개돼요." if values["visibility"] == "public"
+                                       else "후기를 보냈어요. 운영자에게만 전달돼요.")
+    st.session_state.nav_page = "account"
+    st.rerun()
+
+
+def render_my_reviews() -> None:
+    if not reviews_writable():
+        return
+    st.markdown("### 내 후기")
+    try:
+        rows = fetch_my_reviews()
+    except Exception as error:
+        log_auth_error(error)
+        st.caption("내 후기를 불러오지 못했어요.")
+        rows = None
+    if rows == []:
+        st.caption("아직 쓴 후기가 없어요. 후기는 선택이에요.")
+    for row in rows or []:
+        review_id = str(row.get("review_id"))
+        with st.container(border=True, key=f"my_review_{review_id}"):
+            st.markdown(f"**{STATUS_LABELS.get(row.get('status'), row.get('status'))}** · {review_stars(row.get('rating'))}")
+            if (row.get("helpful") or "").strip():
+                st.markdown(f"도움이 된 점: {md_escape(row['helpful'])}")
+            if (row.get("improve") or "").strip():
+                st.markdown(f"개선할 점: {md_escape(row['improve'])}")
+            note = {"pending": "익명 공개를 골랐어요. 운영자가 확인하면 게시돼요.",
+                    "published": "고치면 공개가 잠시 내려가고, 운영자가 다시 확인한 뒤 게시돼요.",
+                    "rejected": "공개되지 않았어요." + (f" 이유: {row['reject_reason']}" if row.get("reject_reason") else ""),
+                    "private": "공개되지 않는 의견이에요."}.get(row.get("status"), "")
+            if note:
+                st.caption(note)
+            confirm_key = f"my_review_del_ask_{review_id}"
+            cols = st.columns(2)
+            with cols[0]:
+                st.button("고치기", key=f"my_review_edit_{review_id}", width="stretch", on_click=open_review_write, args=(row,))
+            with cols[1]:
+                if not st.session_state.get(confirm_key):
+                    st.button("지우기", key=f"my_review_del_{review_id}", width="stretch",
+                              on_click=lambda k=confirm_key: st.session_state.__setitem__(k, True))
+                elif st.button("정말 지우기", key=f"my_review_del_ok_{review_id}", width="stretch", type="primary"):
+                    try:
+                        delete_review(review_id)
+                    except Exception as error:
+                        log_auth_error(error)
+                        st.error("후기를 지우지 못했어요. 잠시 후 다시 눌러 주세요.")
+                    else:
+                        st.session_state.pop(confirm_key, None)
+                        st.session_state.account_notice = "후기를 지웠어요."
+                        st.rerun()
+    st.button("후기 남기기", key="my_review_new", icon=":material/rate_review:", on_click=open_review_write)
+
+
+ADMIN_REVIEW_TABS = {"pending": "공개 요청 · 확인 대기", "published": "게시됨", "rejected": "게시 안 함", "private": "운영자에게만 온 의견"}
+
+
+def render_review_admin_page() -> None:
+    st.button("내 계정으로", key="review_admin_back", icon=":material/arrow_back:", type="tertiary", on_click=go_to, args=("account",))
+    st.markdown("## 후기 검토 (운영자)")
+    if not (REVIEWS_ENABLED and is_admin()):
+        st.info("운영자만 볼 수 있어요.")
+        return
+    st.caption("공개를 고른 후기는 여기서 ‘게시하기’를 눌러야 첫 화면에 나와요. 고친 후기도 다시 확인 대기로 들어와요. 작성자 정보는 보여 주지 않아요.")
+    status = st.segmented_control("검토 목록", list(ADMIN_REVIEW_TABS), format_func=ADMIN_REVIEW_TABS.get, key="review_admin_tab",
+                                  default="pending", label_visibility="collapsed") or "pending"
+    st.info("**게시 전 확인** · 실명·상대방 이름·연락처·계좌 없음 · 날짜·금액·장소 같은 구체적인 사건 내용 없음 · "
+            "특정인을 비방하거나 결과를 보장하는 말 없음. 주황색 표시는 의심되는 부분을 찾아 주는 것일 뿐이니 글을 직접 읽고 판단하세요.")
+    notice = st.session_state.pop("review_admin_notice", None)
+    if notice:
+        st.success(notice)
+    try:
+        rows = get_authed_client().rpc("reviews_for_moderation", {"p_status": status}).execute().data or []
+    except Exception as error:
+        log_auth_error(error)
+        st.error("검토 목록을 불러오지 못했어요.")
+        return
+    if not rows:
+        st.caption("이 목록에 있는 후기가 없어요.")
+    for row in rows:
+        review_id = str(row.get("review_id"))
+        flags = review_flags((row.get("helpful") or "") + "\n" + (row.get("improve") or ""))
+        with st.container(border=True, key=f"admin_review_{review_id}"):
+            marks = flags["block"] + flags["warn"]
+            st.markdown(f"{review_stars(row.get('rating'))}  :gray[{format_created_at(row.get('updated_at'))}]"
+                        + ("  " + " ".join(f":orange-badge[{m}]" for m in marks) if marks else ""))
+            st.markdown(f"**도움이 된 점** {md_escape(row.get('helpful') or '(비어 있음)')}")
+            st.markdown(f"**개선할 점** {md_escape(row.get('improve') or '(비어 있음)')}")
+            if row.get("reject_reason"):
+                st.caption(f"게시 안 함 이유: {row['reject_reason']}")
+            if row.get("visibility") != "public":
+                continue
+            cols = st.columns([1, 1, 2])
+            with cols[0]:
+                publish = st.button("게시하기", key=f"admin_pub_{review_id}", type="primary", width="stretch",
+                                    disabled=status == "published")
+            with cols[2]:
+                reason = st.selectbox("게시 안 함 이유", REJECT_REASONS, key=f"admin_reason_{review_id}", label_visibility="collapsed")
+            with cols[1]:
+                reject = st.button("게시 안 함", key=f"admin_rej_{review_id}", width="stretch", disabled=status == "rejected")
+            if publish or reject:
+                try:
+                    changed = get_authed_client().rpc("moderate_review", {
+                        "p_review_id": review_id, "p_action": "publish" if publish else "reject", "p_reason": reason if reject else None,
+                    }).execute().data
+                except Exception as error:
+                    log_auth_error(error)
+                    st.error("바꾸지 못했어요. 잠시 후 다시 눌러 주세요.")
+                else:
+                    st.session_state.review_admin_notice = ("게시했어요." if publish else "게시하지 않기로 했어요.") if changed else "바뀐 것이 없어요(이미 지워졌을 수 있어요)."
+                    st.rerun()
+
+
 def render_account_page(identity: str, method: str) -> None:
     """내 계정: 로그아웃·방침·약관·문의·탈퇴. 확인 창이 다른 메뉴에 가리지 않도록 별도 화면으로 둔다."""
     st.markdown("## 내 계정")
+    account_notice = st.session_state.pop("account_notice", None)
+    if account_notice:
+        st.success(account_notice)
     st.markdown(f"{identity} ({method} 로그인)")
     if st.button("로그아웃", key="logout_btn_main", type="primary", icon=":material/logout:"):
         perform_logout()
@@ -4468,6 +4760,7 @@ def render_account_page(identity: str, method: str) -> None:
     if not sales_open(BILLING_MODE, BILLING_PLANS):
         st.caption("지금은 모든 기능이 무료예요. 결제를 요청하지 않아요.")
     render_my_data_export("account")
+    render_my_reviews()
     st.markdown("### 회원탈퇴")
     st.markdown("탈퇴하면 계정과 저장한 사건" + (", 초안" if draft_save_available() else "")
                 + (", 증거파일" if EVIDENCE_UPLOAD_ENABLED else "") + "이 모두 삭제돼요. 누르면 삭제할 내용을 한 번 더 보여 드려요.")
@@ -4475,13 +4768,15 @@ def render_account_page(identity: str, method: str) -> None:
         render_delete_account_dialog()
     if is_admin():
         st.markdown("### 운영자")
+        if REVIEWS_ENABLED:
+            st.button("후기 검토", key="go_review_admin", icon=":material/rate_review:", on_click=go_to, args=("review_admin",))
         render_admin_diagnostics()
 
 
 def render_top_bar(identity: str, method: str) -> str:
     """메뉴를 그리고 지금 화면 이름을 돌려준다. 같은 버튼을 두 벌(넓은 화면용 왼쪽 메뉴, 휴대폰용 아래 메뉴) 그리고 CSS로 하나만 보인다."""
     page = st.session_state.get("nav_page") or "home"
-    if page not in PAGES and page != "account":
+    if page not in PAGES and page != "account" and page not in REVIEW_PAGES:
         page = "home"
     st.session_state.nav_page = page
     with st.container(key="mobile_top", horizontal=True, vertical_alignment="center"):
@@ -4554,6 +4849,7 @@ def render_home_page() -> None:
                         st.caption(desc)
                         st.button(title, key=f"home_go_{page}", icon=NAV_ICONS[page], type="secondary", width="stretch",
                                   on_click=go_to, args=(page,))
+    render_home_reviews()
 
 
 def render_search_page() -> None:
@@ -5592,12 +5888,29 @@ def render_ws_download(case_id: str, ws: dict, editor_key: str, draft_key: str, 
     with col_doc:
         st.download_button("Word로 내려받기", data=bundle_docx(text), file_name=f"case_{case_id}_bundle.docx",
                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                           key=f"ws_dl_doc_{case_id}", width="stretch", type="primary", icon=":material/download:")
+                           key=f"ws_dl_doc_{case_id}", width="stretch", type="primary", icon=":material/download:",
+                           on_click=ws_mark_downloaded, args=(case_id,))
     with col_txt:
         st.download_button("TXT로 내려받기", data=text, file_name=f"case_{case_id}_bundle.txt", mime="text/plain",
-                           key=f"ws_dl_txt_{case_id}", width="stretch")
-    st.button("다음: 다음 할 일", key=f"ws_to_next_{case_id}", icon=":material/arrow_forward:",
+                           key=f"ws_dl_txt_{case_id}", width="stretch", on_click=ws_mark_downloaded, args=(case_id,))
+    if ws.get("downloaded") and reviews_writable() and not st.session_state.get("review_prompt_dismissed"):
+        # 내려받은 뒤에만, 선택으로 안내한다. 쓰지 않아도 아무 제한이 없다.
+        with st.container(border=True, key=f"review_prompt_{case_id}"):
+            st.markdown("**고소미가 도움이 되었나요? (선택)**")
+            st.caption("짧은 후기를 남겨 주시면 서비스를 고치는 데 써요. 남기지 않아도 모든 기능을 그대로 쓸 수 있어요.")
+            col_write, col_later = st.columns([2, 1])
+            with col_write:
+                st.button("후기 남기기", key=f"review_prompt_write_{case_id}", type="primary", width="stretch",
+                          on_click=open_review_write)
+            with col_later:
+                st.button("다음에", key=f"review_prompt_later_{case_id}", width="stretch",
+                          on_click=lambda: st.session_state.__setitem__("review_prompt_dismissed", True))
+    st.button("다음: 일정·제출 준비", key=f"ws_to_next_{case_id}", icon=":material/arrow_forward:",
               on_click=ws_go, args=(case_id, "next"))
+
+
+def ws_mark_downloaded(case_id: str) -> None:
+    ws_state(case_id)["downloaded"] = True
 
 
 def render_ws_next(case_id: str, case: dict, ws: dict) -> None:
@@ -6276,6 +6589,7 @@ else:
     {
         "home": render_home_page, "chat": render_chat_page, "case": render_case_page,
         "cases": render_cases_page, "search": render_search_page, "help": render_help_page,
+        "reviews": render_reviews_page, "review_write": render_review_write_page, "review_admin": render_review_admin_page,
     }[current_page]()
 if st.session_state.get("_pending_nav"):
     render_leave_dialog()

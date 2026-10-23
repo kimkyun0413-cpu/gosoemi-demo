@@ -33,7 +33,8 @@ class StaleModuleReloadTest(unittest.TestCase):
     def test_app_reloads_every_local_helper_it_imports_from(self):
         source = open(os.path.join(ROOT, "app.py"), encoding="utf-8").read()
         reload_block = source.split("importlib.reload(_module)")[0]
-        for module in ("case_guide", "policy_text", "billing", "auth_ip", "voice_input", "chat_assistant", "precedent_search", "case_workspace", "calendar_ics"):
+        for module in ("case_guide", "policy_text", "billing", "auth_ip", "voice_input", "chat_assistant", "precedent_search", "case_workspace", "calendar_ics",
+                       "data_export", "ai_runtime", "service_reviews"):
             self.assertIn(f"import {module} as _{module}_module", reload_block)
             self.assertIn(f"from {module} import", source)
 

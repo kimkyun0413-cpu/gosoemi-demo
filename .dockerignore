@@ -15,6 +15,7 @@
 !data_export.py
 !policy_text.py
 !precedent_search.py
+!service_reviews.py
 !voice_input.py
 !scripts/check_ai_usage_db.py
 !.streamlit/config.toml
