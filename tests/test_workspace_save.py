@@ -206,6 +206,26 @@ class WorkspaceSaveTest(unittest.TestCase):
         self.assertIn("다른 탭 문장", self.preview(at))
         self.assertFalse(any("더 나중에 저장한 초안이 있어요" in w.value for w in at.warning))
 
+    def test_step_done_marks_are_saved_reopened_and_shown_in_list(self):
+        at = self.open(step="check")
+        self.assertTrue(any("증거가 충분하다거나 제출 준비가 끝났다는 뜻은 아니에요" in c.value for c in at.caption))
+        at.checkbox(key=f"ws_done_{CID}_check").check().run()
+        at.session_state[f"ws_step_{CID}"] = "story"                          # 다른 단계로 옮겨도 표시는 남는다
+        at.run()
+        at.checkbox(key=f"ws_done_{CID}_story").check().run()
+        self.assertTrue(any("(2/4)" in c.value for c in at.caption))
+        self.save_button(at).click().run()
+        self.assertEqual(self.workspace_rows()[0]["checklist"]["steps_done"], ["check", "story"])
+        again = self.open(step="draft")
+        self.assertEqual([k for k in ("check", "story", "draft", "download") if again.session_state[f"ws_done_{CID}_{k}"]],
+                         ["check", "story"])
+        again.session_state["open_case_id"] = None                            # 목록으로 돌아가기
+        again.run()
+        self.assertTrue(any("정리 표시: ✓ 사건 내용 · ✓ 증거 · 고소장 초안 · 내려받기" in c.value for c in again.caption))
+        again.session_state["cases_filter"] = "all_done"
+        again.run()
+        self.assertTrue(any("‘4단계 정리 표시’에 해당하는 사건이 없어요." in i.value for i in again.info))
+
     def test_partial_save_case_ok_workspace_failed_then_retry_only_rest(self):
         at = self.open(step="check")
         at.text_input(key=f"ws_edit_{CID}_witness").input("친구").run()
@@ -283,7 +303,7 @@ class WorkspaceSaveTest(unittest.TestCase):
         at.button(key=f"ws_fok_{CID}_timeline").click().run()
 
     def test_timeline_add_edit_move_delete_then_saved_and_reopened(self):
-        at = self.open(step="story")
+        at = self.open(step="check")
         self.assertFalse(any(True for _ in at.get("arrow_data_frame")))  # 더블클릭 표 없음
         self.add_timeline(at, "9월 5일", "판매자 계정이 사라짐", "채팅 캡처")
         ws = at.session_state[f"ws_{CID}"]
@@ -306,12 +326,12 @@ class WorkspaceSaveTest(unittest.TestCase):
         self.save_button(at).click().run()
         self.assertIn("저장했어요", self.texts(at))
         self.assertEqual(self.workspace_rows()[0]["timeline"], timeline)
-        again = self.open(step="story")                                        # 다시 열어도 저장한 경위가 보인다
+        again = self.open(step="check")                                        # 다시 열어도 저장한 경위가 보인다
         self.assertIn("판매자 계정이 사라졌어요", self.texts(again))
         self.assertNotIn("수정한 내용이 아직 저장되지 않았습니다.", self.texts(again))
 
     def test_timeline_needs_what_and_keeps_typed_text(self):
-        at = self.open(step="story")
+        at = self.open(step="check")
         at.button(key=f"ws_add_{CID}_timeline").click().run()
         at.text_input(key=f"ws_f_{CID}_timeline_when").input("9월 6일").run()
         at.button(key=f"ws_fok_{CID}_timeline").click().run()
@@ -321,8 +341,10 @@ class WorkspaceSaveTest(unittest.TestCase):
         self.assertTrue(any(b.key == f"ws_add_{CID}_timeline" for b in at.button))
 
     def test_evidence_rename_and_delete_follow_timeline_links(self):
-        at = self.open(step="story")
+        at = self.open(step="check")                                           # 사건 경위는 '사건 내용' 단계에 있다
         self.add_timeline(at, "9월 2일", "송금", "채팅 캡처")
+        at.session_state[f"ws_step_{CID}"] = "story"                         # 증거는 '증거' 단계
+        at.run()
         ws = at.session_state[f"ws_{CID}"]
         index = [e["name"] for e in ws["evidence"]].index("채팅 캡처")
         at.button(key=f"ws_mod_{CID}_evidence_{index}").click().run()
@@ -418,7 +440,7 @@ class WorkspaceSaveTest(unittest.TestCase):
             at.text_area(key=p + "what").input(what).run()
 
     def test_pending_item_is_added_and_saved_with_work_save(self):
-        at = self.open(step="story")
+        at = self.open(step="check")
         self.start_timeline(at, "9월 6일", "경찰서에 문의함")
         self.assertIn("작성 중인 사건 경위 항목이 있어요.", self.texts(at))
         self.assertFalse(self.save_button(at).disabled)
@@ -429,7 +451,7 @@ class WorkspaceSaveTest(unittest.TestCase):
         self.assertIsNone(at.session_state[f"ws_{CID}"]["editing"])
 
     def test_incomplete_pending_item_blocks_save_and_guides_to_field(self):
-        at = self.open(step="story")
+        at = self.open(step="check")
         self.start_timeline(at, when="9월 6일")                       # '무슨 일' 칸이 비어 있음
         self.save_button(at).click().run()
         self.assertEqual(self.workspace_rows(), [])                   # 아무것도 저장하지 않는다
@@ -439,14 +461,14 @@ class WorkspaceSaveTest(unittest.TestCase):
         at.session_state[f"ws_step_{CID}"] = "draft"                  # 다른 단계로 갔다가
         at.run()
         at.button(key=f"ws_goform_{CID}").click().run()               # '작성 중인 칸으로 가기'
-        self.assertEqual(at.session_state[f"ws_step_{CID}"], "story")
+        self.assertEqual(at.session_state[f"ws_step_{CID}"], "check")
         self.assertEqual(at.text_input(key=f"ws_f_{CID}_timeline_when").value, "9월 6일")
         at.text_area(key=f"ws_f_{CID}_timeline_what").input("경찰서에 문의함").run()
         self.save_button(at).click().run()
         self.assertEqual(self.workspace_rows()[0]["timeline"][-1], {"when": "9월 6일", "what": "경찰서에 문의함", "evidence": ""})
 
     def test_pending_item_alone_counts_as_unsaved_when_leaving(self):
-        at = self.open(step="story")
+        at = self.open(step="check")
         self.start_timeline(at, when="9월 6일")
         at.session_state[f"ws_step_{CID}"] = "draft"
         at.run()
@@ -460,7 +482,7 @@ class WorkspaceSaveTest(unittest.TestCase):
 
     def test_typing_then_one_click_saves(self):
         """입력칸에 적고 바로 '작업 저장'을 한 번만 눌러도 저장된다(적은 값과 누름이 같은 실행에 함께 온다)."""
-        at = self.open(step="story")
+        at = self.open(step="check")
         at.button(key=f"ws_add_{CID}_timeline").click().run()
         at.text_area(key=f"ws_f_{CID}_timeline_what").input("판매글이 삭제됨")      # 아직 실행하지 않음(칸을 벗어나기 전)
         self.save_button(at).click().run()
@@ -468,7 +490,7 @@ class WorkspaceSaveTest(unittest.TestCase):
         self.assertIn("저장했어요", self.texts(at))
 
     def test_untouched_open_form_is_not_unsaved(self):
-        at = self.open(step="story")
+        at = self.open(step="check")
         at.button(key=f"ws_add_{CID}_timeline").click().run()
         self.assertNotIn("수정한 내용이 아직 저장되지 않았습니다.", self.texts(at))
         self.assertNotIn("작성 중인", self.texts(at))

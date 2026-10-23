@@ -71,7 +71,7 @@ from data_export import (EVIDENCE_PART_MAX_BYTES, NOT_INCLUDED_NOTE, build_evide
                          evidence_summary_text)
 from ai_runtime import PostgresUsageStore, generation_settings, public_ai_blockers, usage_counts
 from case_workspace import (
-    EVIDENCE_NAME_MAX_CHARS, STYLES, UNKNOWN, build_timeline, bundle_docx, bundle_text, draft_check_items, evidence_items, inconsistencies,
+    CASE_STEPS, EVIDENCE_NAME_MAX_CHARS, STEP_DONE_NOTE, STYLES, UNKNOWN, build_timeline, clean_steps_done, bundle_docx, bundle_text, draft_check_items, evidence_items, inconsistencies,
     link_issues, missing_questions, next_action, rewrite_changes, rewrite_prompt, suggestion_for, unknown_items,
 )
 from calendar_ics import ALARM_CHOICES, KIND_LABELS, build_ics, clean_event, describe
@@ -1526,6 +1526,16 @@ def load_workspace_row(case_id: str):
     return (response.data or [None])[0]
 
 
+def load_workspace_index() -> dict:
+    """내 사건 목록용: 사건마다 저장된 준비 체크(정리 마침 표시·제출 표시). 한 번에 불러온다."""
+    session = st.session_state.get("supabase_session") or {}
+    response = (
+        get_authed_client().table(WORKSPACE_TABLE).select("case_id, checklist")
+        .eq("user_id", session.get("user_id", "")).execute()
+    )
+    return {str(row.get("case_id")): row.get("checklist") or {} for row in response.data or []}
+
+
 def _table_missing(error: Exception) -> bool:
     """테이블 자체가 아직 없을 때만 True. 열이 없다는 오류(42703)는 0건으로 숨기지 않고 '받지 못한 자료'로 알린다."""
     code = str(getattr(error, "code", "") or "").upper()
@@ -2177,9 +2187,11 @@ h3 { font-size: 1.2rem !important; color: var(--dgo-navy); padding-top: 0.8rem !
 .st-key-nav_choice button[aria-checked="true"] p, .st-key-help_section button[aria-checked="true"] p { color: #FFFFFF !important; font-weight: 700; }
 @media (max-width: 640px) {
     /* 휴대폰: 세 칸씩 같은 너비로 두 줄에 배치 */
-    .st-key-nav_choice [data-testid="stButtonGroup"] > div,
-    [class*="st-key-ws_nav_"] [data-testid="stButtonGroup"] > div { display: grid !important; grid-template-columns: repeat(3, 1fr); }
-    [class*="st-key-ws_nav_"] button { width: 100%; padding: 0 4px; font-size: 0.95rem; }
+    .st-key-nav_choice [data-testid="stButtonGroup"] > div { display: grid !important; grid-template-columns: repeat(3, 1fr); }
+    /* 사건 네 단계는 휴대폰에서도 한 줄에 */
+    [class*="st-key-ws_nav_"] [data-testid="stButtonGroup"] > div { display: grid !important; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+    [class*="st-key-ws_nav_"] button { width: 100%; padding: 0 2px; min-height: 52px; }
+    [class*="st-key-ws_nav_"] button p { font-size: 0.8rem !important; line-height: 1.25; white-space: normal; }
     .st-key-nav_choice button { width: 100%; padding: 0 4px; font-size: 0.95rem; }
 }
 
@@ -2951,7 +2963,7 @@ def save_draft_from_editor(editor_key: str, case_id: str) -> None:
 
 
 def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str, show_save: bool = True,
-                       show_download: bool = True) -> None:
+                       show_download: bool = True, show_missing: bool = True) -> None:
     # 사건 작업 공간에서는 화면 아래 '작업 저장' 버튼 하나로 초안까지 저장하므로 이 패널의 저장 버튼은 숨긴다.
     can_save = draft_save_available() and show_save
     saved = st.session_state.get(f"{editor_key}_saved")
@@ -2964,7 +2976,7 @@ def render_draft_panel(editor_key: str, original: str, case: dict, case_id: str,
     if editor_key not in st.session_state:
         st.session_state[editor_key] = saved["text"] if saved else original
 
-    missing = missing_info_items(case)
+    missing = missing_info_items(case) if show_missing else []
     if missing:
         st.warning(
             "제출 전에 확인할 항목입니다. 초안의 '[확인 필요]' 부분을 채우거나 지워 주세요.\n\n"
@@ -4391,7 +4403,7 @@ def keep_widget_values() -> None:
     """화면에 없는 입력칸의 값은 Streamlit이 지우므로, 적던 사건 내용·초안 편집·체크리스트 값을 다시 적어 둔다."""
     for key in list(st.session_state.keys()):
         if (
-            key.startswith(("case_field_", "prog_", "ws_f_"))
+            key.startswith(("case_field_", "prog_", "ws_f_", "ws_done_"))
             or key in ("case_type_choice", "case_type_custom", "case_data_consent", "case_draft_editor", "chat_retry_text")
             or re.fullmatch(r"list_draft_editor_[0-9A-Za-z-]+", key)
         ):
@@ -4908,7 +4920,22 @@ def close_case() -> None:
 # ── 사건 작업 공간(관리자 미리보기): 빠진 정보 → 경위·증거 → 초안 → 내려받기 → 다음 할 일 ──────────
 # CASE_WORKSPACE_SAVE_ENABLED가 켜져 있으면 '작업 저장'으로 case_workspace·cases·case_drafts에 저장한다
 # (migrations/20261012000000, 운영 미적용). 꺼져 있으면 이 탭의 서버 메모리에만 있는 미리보기다.
-WS_STEPS = {"check": "빠진 정보", "story": "경위·증거", "draft": "초안", "download": "내려받기", "next": "다음 할 일"}
+WS_STEPS = dict(CASE_STEPS)  # 사건 내용(빠진 정보·사건 경위) → 증거 → 고소장 초안 → 내려받기
+WS_EXTRA_STEPS = {"next": "일정·제출 준비"}  # 단계 표시줄 밖, 사건 화면 아래 링크로 연다
+
+
+def ws_done_key(case_id: str, step: str) -> str:
+    return f"ws_done_{case_id}_{step}"
+
+
+def ws_steps_done(case_id: str) -> list:
+    return [key for key, _ in CASE_STEPS if st.session_state.get(ws_done_key(case_id, key))]
+
+
+def render_step_done(case_id: str, step: str) -> None:
+    """단계 끝의 '정리 마침' 표시. 이용자가 스스로 표시하는 것이며 증거·제출 준비를 판단하지 않는다."""
+    st.checkbox(f"‘{WS_STEPS[step]}’ 정리를 마쳤어요", key=ws_done_key(case_id, step))
+    st.caption(STEP_DONE_NOTE)
 
 
 def ws_state(case_id: str) -> dict:
@@ -4976,7 +5003,7 @@ def render_ws_check(case_id: str, case: dict, ws: dict) -> None:
                       args=(case_id, key, True))
     elif not issues:
         st.success("비어 있는 칸은 없어요. 그래도 내용이 맞는지는 직접 확인해 주세요.")
-        st.button("다음: 경위·증거 정리", key=f"ws_to_story_{case_id}", type="primary", on_click=ws_go, args=(case_id, "story"))
+        st.button("다음: 증거", key=f"ws_to_story_{case_id}", type="primary", on_click=ws_go, args=(case_id, "story"))
     unknown = unknown_items(case)
     if unknown:
         st.caption("'모름'으로 진행한 항목: " + ", ".join(unknown) + " — 초안에 [확인 필요]로 남아요.")
@@ -5034,7 +5061,7 @@ def ws_item_open(case_id: str, kind: str, index) -> None:
     ws["form_base"] = {key: value for key, value in st.session_state.items() if key.startswith(prefix)}
 
 
-ITEM_STEPS = {"timeline": "story", "evidence": "story", "schedules": "next"}
+ITEM_STEPS = {"timeline": "check", "evidence": "story", "schedules": "next"}
 
 
 def ws_form_pending(case_id: str, ws: dict):
@@ -5270,10 +5297,9 @@ def ws_add_file(case_id: str, name: str) -> None:
     ws["item_notice"] = {"kind": "evidence", "text": f"'{name[:30]}' 목록에 넣었어요. '수정'을 눌러 무엇을 보여 주는지 적어 주세요. {ws_saved_hint()}"}
 
 
-def render_ws_story(case_id: str, case: dict, ws: dict, file_names: list) -> None:
-    evidence = ws_items(case, ws, "evidence")
+def render_ws_timeline(case_id: str, case: dict, ws: dict) -> None:
     timeline = ws_items(case, ws, "timeline")
-    names = [e["name"] for e in evidence]
+    names = [e["name"] for e in ws_items(case, ws, "evidence")]
     st.markdown("#### 사건 경위")
     st.caption("적은 사건 내용을 일 단위로 나눠 두었어요. 날짜는 그 문장에 적힌 글자(기간이면 기간 그대로)만 옮기고, 없으면 비워 둬요. "
                "날짜가 필요한 일이면 '수정'에서 적어 주세요. 고치거나 더하고 지울 수 있어요.")
@@ -5284,6 +5310,12 @@ def render_ws_story(case_id: str, case: dict, ws: dict, file_names: list) -> Non
         "아직 적은 경위가 없어요. '사건 경위 추가'를 눌러 한 가지씩 적어 주세요.", names,
     )
 
+
+
+def render_ws_story(case_id: str, case: dict, ws: dict, file_names: list) -> None:
+    evidence = ws_items(case, ws, "evidence")
+    timeline = ws_items(case, ws, "timeline")
+    names = [e["name"] for e in evidence]
     st.markdown("#### 증거 자료")
     st.caption("자료마다 무엇을 보여 주는지 적어 주세요. 고소미는 파일 내용을 열어 보지 않아요.")
     render_item_list(
@@ -5332,10 +5364,19 @@ def render_ws_draft(case_id: str, case: dict, ws: dict, draft_key: str, editor_k
         return
     current = st.session_state.get(editor_key) or draft
     check_lines = draft_check_items(current)
-    if check_lines:
-        with st.expander(f"직접 채울 곳 {len(check_lines)}군데 ([확인 필요])"):
-            st.markdown("\n".join(f"- {md_escape(line[:120])}" for line in check_lines))
-    st.markdown("**표현 바꾸기** — 사실·금액·날짜는 그대로 두고 문장만 바꿔요.")
+    missing = missing_info_items(case)
+    if check_lines or missing:
+        # 처음엔 접어 두어 초안 본문이 넓게 보이게 한다(휴대폰).
+        with st.expander(f"직접 채울 곳 {len(check_lines) or len(missing)}군데 [확인 필요]", key=f"ws_fill_{case_id}"):
+            if missing:
+                st.markdown("**비어 있거나 모른다고 한 항목**\n" + "\n".join(f"- {md_escape(item)}" for item in missing))
+            if check_lines:
+                st.markdown("**초안에서 [확인 필요]가 있는 줄**\n" + "\n".join(f"- {md_escape(line[:120])}" for line in check_lines))
+            st.caption("초안의 [확인 필요]를 직접 채우거나 지워 주세요. 빈 항목은 '사건 내용' 단계에서 채울 수 있어요.")
+            st.button("사건 내용에서 채우기", key=f"ws_fill_go_{case_id}", type="tertiary", icon=":material/edit:",
+                      on_click=ws_go, args=(case_id, "check"))
+    st.markdown("**문장 다듬기** — 사실·금액·날짜는 그대로 두고 문장만 짧게(간결하게) 또는 자세하게 바꿔요. "
+                "숫자가 달라지면 알려 드리고, ‘바로 전 초안으로’로 되돌릴 수 있어요.")
     cols = st.columns(3)
     for col, (style, (label, _)) in zip(cols, STYLES.items()):
         with col:
@@ -5355,7 +5396,8 @@ def render_ws_draft(case_id: str, case: dict, ws: dict, draft_key: str, editor_k
                   on_click=lambda: (st.session_state.__setitem__(editor_key, ws["history"].pop()), ws.pop("rewrite_notes", None)))
     for note in ws.get("rewrite_notes") or []:
         st.warning(note + " 바뀐 부분을 꼭 확인하거나 '바로 전 초안으로'를 눌러 주세요.")
-    render_draft_panel(editor_key, draft, case, case_id, show_save=not workspace_save_available(), show_download=False)
+    render_draft_panel(editor_key, draft, case, case_id, show_save=not workspace_save_available(), show_download=False,
+                       show_missing=False)
     st.button("다음: 내려받기", key=f"ws_to_download_{case_id}", type="primary", icon=":material/arrow_forward:",
               on_click=ws_go, args=(case_id, "download"))
 
@@ -5442,6 +5484,7 @@ def ws_payload(case_id: str, case: dict, ws: dict) -> dict:
         "submitted_to": (st.session_state.get(p + "to") or "")[:PROGRESS_PLACE_MAX_CHARS],
         "submitted_on": on.isoformat() if isinstance(on, datetime.date) else "",
         "next_note": (st.session_state.get(p + "note") or "")[:PROGRESS_NOTE_MAX_CHARS],
+        "steps_done": ws_steps_done(case_id),
     })
     return {
         "timeline": [{"when": r.get("when", ""), "what": r.get("what", ""), "evidence": r.get("evidence") or ""} for r in timeline],
@@ -5480,6 +5523,9 @@ def ws_apply_row(case_id: str, ws: dict, row: dict) -> None:
     except ValueError:
         st.session_state[p + "on"] = None
     st.session_state[p + "note"] = checklist.get("next_note") or ""
+    done = clean_steps_done(checklist.get("steps_done"))
+    for key, _ in CASE_STEPS:
+        st.session_state[ws_done_key(case_id, key)] = key in done
     ws["version"] = row.get("version")
     ws["saved_at"] = row.get("updated_at")
 
@@ -5768,13 +5814,19 @@ def render_case_workspace(case: dict, case_id: str, draft_key: str, editor_key: 
             st.caption("고친 내용은 화면 아래 '작업 저장'을 눌러야 저장돼요. 단계를 옮겨도 고친 내용은 그대로 있어요.")
         else:
             st.caption("🧪 미리보기: 이 화면에서 정리한 경위·증거 설명·일정·체크는 저장되지 않아요. 새로고침하거나 로그아웃하면 사라져요.")
-    st.session_state[f"ws_nav_{case_id}"] = step
-    st.segmented_control("정리 단계", list(WS_STEPS), format_func=WS_STEPS.get, key=f"ws_nav_{case_id}",
-                         label_visibility="collapsed", width="stretch", on_change=ws_on_nav, args=(case_id,))
+    done = set(ws_steps_done(case_id))
+    st.session_state[f"ws_nav_{case_id}"] = step if step in WS_STEPS else None
+    st.segmented_control(
+        "정리 단계", list(WS_STEPS), key=f"ws_nav_{case_id}", label_visibility="collapsed", width="stretch",
+        format_func=lambda key: f"{list(WS_STEPS).index(key) + 1} {WS_STEPS[key]}" + (" ✓" if key in done else ""),
+        on_change=ws_on_nav, args=(case_id,),
+    )
+    st.caption(f"✓ 표시: 내가 정리를 마쳤다고 표시한 단계 ({len(done)}/{len(WS_STEPS)}). 증거가 충분하다거나 제출 준비가 끝났다는 뜻은 아니에요.")
     if step == "check":
         render_ws_check(case_id, effective, ws)
         if can_save:
             render_case_edit(case_id, case, ws)
+        render_ws_timeline(case_id, effective, ws)
     elif step == "story":
         render_ws_story(case_id, effective, ws, ws["file_names"])
     elif step == "draft":
@@ -5782,7 +5834,13 @@ def render_case_workspace(case: dict, case_id: str, draft_key: str, editor_key: 
     elif step == "download":
         render_ws_download(case_id, ws, editor_key, draft_key, effective)
     else:
+        st.markdown(f"#### {WS_EXTRA_STEPS['next']}")
         render_ws_next(case_id, effective, ws)
+    if step in WS_STEPS:
+        render_step_done(case_id, step)
+    st.button(f"{WS_EXTRA_STEPS['next']} 열기" if step != "next" else "사건 단계로 돌아가기", key=f"ws_extra_{case_id}",
+              type="tertiary", icon=":material/event_note:" if step != "next" else ":material/arrow_back:",
+              on_click=ws_go, args=(case_id, "next" if step != "next" else "check"))
     # 저장 영역은 아래 화면(목록 편집 등)을 그린 뒤에 그려야 방금 고친 내용이 상태에 반영된다. CSS로 화면 아래에 붙여 둔다.
     if can_save and render_ws_save_bar(case, case_id, ws, draft_key, editor_key):
         st.session_state["_unsaved"] = {"case": case, "case_id": case_id, "draft_key": draft_key, "editor_key": editor_key}
@@ -5901,7 +5959,30 @@ def render_cases_page() -> None:
         return
     opened_items = ["저장한 초안" if can_save_drafts else "새 초안 만들기"] + (["증거파일"] if EVIDENCE_UPLOAD_ENABLED else [])
     st.caption(f"저장한 사건 {len(unique)}건 · 사건을 열면 " + "·".join(opened_items) + "을 이용할 수 있어요.")
-    for case in unique:
+    marks = {}
+    if workspace_save_available():
+        try:
+            marks = load_workspace_index()
+        except Exception as error:
+            log_auth_error(error)
+            st.caption("정리 표시를 불러오지 못했어요. 사건은 그대로 열 수 있어요.")
+    if marks or workspace_save_available():
+        def case_group(case):
+            checklist = marks.get(str(case.get("case_id"))) or {}
+            if checklist.get("submitted"):
+                return "submitted"
+            return "all_done" if len(clean_steps_done(checklist.get("steps_done"))) == len(CASE_STEPS) else "working"
+        groups = {"all": "전체", "working": "정리 중", "all_done": "4단계 정리 표시", "submitted": "제출 표시"}
+        counts = {key: sum(1 for c in unique if case_group(c) == key) for key in groups if key != "all"}
+        st.segmented_control("사건 거르기", list(groups), key="cases_filter", default="all", label_visibility="collapsed",
+                             format_func=lambda key: f"{groups[key]} {len(unique) if key == 'all' else counts[key]}")
+        chosen = st.session_state.get("cases_filter") or "all"
+        shown = [c for c in unique if chosen == "all" or case_group(c) == chosen]
+        if not shown:
+            st.info(f"‘{groups[chosen]}’에 해당하는 사건이 없어요.")
+    else:
+        shown = unique
+    for case in shown:
         case_id = case.get("case_id", "")
         with st.container(border=True):
             col_text, col_open = st.columns([4, 1], vertical_alignment="center")
@@ -5921,6 +6002,9 @@ def render_cases_page() -> None:
                     gaps = len(missing_questions({**case, **ws["answers"]}))
                     st.markdown(f"**다음 할 일: {next_action({**case, **ws['answers']}, has_draft, progress)}**"
                                 + (f"  \n:gray[빠진 정보 {gaps}개]" if gaps else ""))
+                    if workspace_save_available():
+                        done = clean_steps_done((marks.get(str(case_id)) or {}).get("steps_done"))
+                        st.caption("정리 표시: " + " · ".join(("✓ " if key in done else "") + label for key, label in CASE_STEPS))
             with col_open:
                 st.button("열기", key=f"open_case_{case_id}", on_click=open_case, args=(case_id,), width="stretch",
                           type="secondary")

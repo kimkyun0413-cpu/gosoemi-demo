@@ -19,6 +19,16 @@ from case_guide import (
 
 UNKNOWN = "모름"
 
+# 사건 화면의 네 단계(A안). '정리 마침' 표시는 이용자가 그 단계 정리를 마쳤다고 스스로 표시한 것일 뿐이다.
+CASE_STEPS = [("check", "사건 내용"), ("story", "증거"), ("draft", "고소장 초안"), ("download", "내려받기")]
+STEP_DONE_NOTE = "내가 이 단계 정리를 마쳤다는 표시예요. 증거가 충분하다거나 제출 준비가 끝났다는 뜻은 아니에요."
+
+
+def clean_steps_done(value) -> list:
+    """저장된 '정리 마침' 표시에서 아는 단계 이름만, 단계 순서대로 남긴다."""
+    names = {str(x) for x in value} if isinstance(value, (list, tuple)) else set()
+    return [key for key, _ in CASE_STEPS if key in names]
+
 # 꼭 필요한 순서대로 하나씩 묻는다(필수 입력인 신고인 정보·경위는 이미 확인을 거쳤다).
 QUESTIONS = [
     ("incident_datetime", "언제 있었던 일인가요?", "정확하지 않으면 '9월 초쯤'처럼 기억나는 범위만 적어도 돼요."),

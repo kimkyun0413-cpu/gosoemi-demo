@@ -17,6 +17,7 @@ import zipfile
 
 from calendar_ics import ALARM_CHOICES, KIND_LABELS
 from case_guide import CASE_FIELDS, PROGRESS_ITEMS
+from case_workspace import CASE_STEPS, clean_steps_done
 
 # 증거파일 묶음 하나의 최대 크기(목록에 적힌 크기 기준). 한 번에 이 묶음 하나만 메모리에 올린다.
 # 증거파일은 하나에 최대 10MB라 묶음마다 1개 이상 들어간다. 크기를 모르는 파일은 10MB로 보고 나눈다.
@@ -86,6 +87,9 @@ def workspace_text(row: dict) -> str:
     for key, label in (("submitted_to", "제출한 곳"), ("submitted_on", "제출한 날"), ("next_note", "다음에 할 일 메모")):
         if checklist.get(key):
             out.append(f"- {label}: {checklist[key]}")
+    done = clean_steps_done(checklist.get("steps_done"))
+    out += ["", "[정리 마침 표시한 단계] (내가 표시한 것. 증거가 충분하다거나 제출 준비가 끝났다는 뜻이 아님)",
+            ", ".join(label for key, label in CASE_STEPS if key in done) or "(없음)"]
     if row.get("updated_at"):
         out += ["", f"마지막 저장: {row['updated_at']}"]
     return "\n".join(out) + "\n"
