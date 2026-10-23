@@ -563,7 +563,7 @@ class WorkspaceSaveTest(unittest.TestCase):
         at.button(key="leave_save").click().run()
         self.assertIsNone(at.session_state["case_draft_id"])            # 저장한 뒤 새 사건 화면
         self.assertTrue(self.workspace_rows()[0]["checklist"]["story"])
-        self.assertTrue(any(b.key == "case_form_submit" for b in at.button))
+        self.assertTrue(any(b.key == "case_form_next" for b in at.button))      # 새 사건 첫 단계
 
     def test_new_case_button_without_saving_and_when_clean(self):
         at = self.open_case_page()
@@ -585,6 +585,8 @@ class WorkspaceSaveTest(unittest.TestCase):
         at.session_state["nav_page"] = "case"
         at.run()
         self.assertFalse(at.session_state["_unsaved_form"])
+        at.selectbox(key="case_type_choice").select("중고거래 사기").run()
+        at.button(key="case_form_next").click().run()
         at.text_area(key="case_field_incident_description").input("9월 2일 45만 원 송금").run()
         self.assertTrue(at.session_state["_unsaved_form"])
         self.assertTrue(any("새로고침하거나 탭을 닫으면 사라져요" in c.value for c in at.caption))

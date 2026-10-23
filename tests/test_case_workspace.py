@@ -240,11 +240,7 @@ class WorkspaceAppTest(unittest.TestCase):
         at.session_state["nav_page"] = "case"
         at.run()
         self.assertTrue(any(b.key == "case_start_text" for b in at.button))  # 글로 이야기하기로 시작 가능
-        at.selectbox(key="case_type_choice").select("중고거래 사기").run()
-        at.text_area(key="case_field_reporter_info").input("홍길동").run()
-        at.text_area(key="case_field_incident_description").input("9월 2일 45만 원 송금").run()
-        at.checkbox(key="case_data_consent").check().run()
-        at.button(key="case_form_submit").click().run()
+        fake.fill_new_case(at)
         self.assertTrue(any("언제 있었던 일인가요?" in m.value for m in at.markdown))
         at.text_input(key="review_ans_incident_datetime").input("9월 2일 오후 3시").run()
         at.button(key="review_put_incident_datetime").click().run()

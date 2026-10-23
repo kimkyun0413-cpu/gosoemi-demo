@@ -257,11 +257,7 @@ class AiPauseTest(Base):
         at.session_state["nav_page"] = "case"
         at.run()
         self.assertTrue(any(i.value == self.MSG for i in at.info))
-        at.selectbox(key="case_type_choice").select("중고거래 사기").run()
-        at.text_area(key="case_field_reporter_info").input("홍길동(시험)").run()
-        at.text_area(key="case_field_incident_description").input("9월 2일 45만 원 송금 후 연락 끊김").run()
-        at.checkbox(key="case_data_consent").check().run()
-        at.button(key="case_form_submit").click().run()
+        fake.fill_new_case(at, reporter="홍길동(시험)", story="9월 2일 45만 원 송금 후 연락 끊김")
         confirm = at.button(key="case_review_confirm")
         self.assertEqual(confirm.label, "사건 저장하기")
         confirm.click().run()

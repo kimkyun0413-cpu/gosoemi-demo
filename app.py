@@ -2978,6 +2978,8 @@ def reset_case_form() -> None:
     st.session_state.case_review = None
     st.session_state.case_notice = None
     st.session_state.review_skipped = []
+    st.session_state.case_form_step = 1
+    st.session_state.case_form_error = None
 
 
 def restore_original_draft(editor_key: str, original: str) -> None:
@@ -4620,62 +4622,121 @@ def start_from_chat(voice: bool) -> None:
     st.session_state.chat_mode = "voice" if voice else "text"
 
 
-def render_case_form() -> None:
-    if assist_preview() and not ai_unavailable_for_current_user():
-        with st.container(key="case_start_choice"):
-            st.markdown("**어떻게 시작할까요?** 이야기로 시작하면 대화 내용을 이 칸에 옮길 수 있어요(옮기기 전에 확인해요).")
-            options = [("AI와 글로 이야기하기", ":material/chat:", False)]
-            if voice_chat_available():
-                options.append(("AI와 말로 이야기하기", ":material/graphic_eq:", True))
-            cols = st.columns(len(options))
-            for col, (label, icon, voice) in zip(cols, options):
-                with col:
-                    st.button(label, key=f"case_start_{'voice' if voice else 'text'}", icon=icon, width="stretch",
-                              on_click=start_from_chat, args=(voice,))
-            st.caption("직접 적으려면 아래 칸을 채워 주세요.")
-    if voice_input_available() and not ai_unavailable_for_current_user():
-        render_voice_input()
-    st.markdown("### 1. 어떤 피해인가요?")
-    type_options = list(DAMAGE_TYPES) + [OTHER_TYPE]
-    case_type_choice = st.selectbox(
-        "피해 유형 (필수)", type_options, index=None, placeholder="눌러서 고르기", key="case_type_choice",
-        help="고르면 그 유형에 맞는 작성 예시가 입력칸에 나타나요. 맞는 유형이 없으면 '기타'를 고르세요.",
-    )
-    case_type_custom = ""
-    if case_type_choice == OTHER_TYPE:
-        case_type_custom = st.text_input(
-            "피해 유형 직접 적기 (필수)", max_chars=CASE_FIELD_MAX_CHARS["case_type"],
-            placeholder="예: 렌터카 보증금 미반환", key="case_type_custom",
-        )
-    if case_type_choice:
-        render_case_type_help(case_type_choice)
+# 새 사건은 네 단계로 나눠 적는다(A안). 적은 값은 단계를 오가도 남는다(case_field_* 는 keep_widget_values가 지킨다).
+FORM_STEPS = ["피해 유형", "무슨 일", "상대방·증거", "확인·저장"]
+FORM_STEP_FIELDS = {2: ("reporter_info", "incident_description", "incident_datetime", "incident_location"),
+                    3: ("suspect_info", "damage_details", "evidence", "witness", "punishment_intent")}
+FORM_REQUIRED = ("reporter_info", "incident_description")
 
-    guide_type = case_type_choice or ""
-    field_values = {}
+
+def form_step_problem(step: int) -> str:
+    """다음 단계로 넘어가기 전에 이 단계의 필수 칸을 확인한다. 문제가 없으면 빈 문자열."""
+    if step == 1:
+        choice = st.session_state.get("case_type_choice")
+        if not choice:
+            return "피해 유형을 골라 주세요."
+        if choice == OTHER_TYPE and not (st.session_state.get("case_type_custom") or "").strip():
+            return "'피해 유형 직접 적기' 칸에 피해 유형을 적어 주세요."
+    if step == 2:
+        empty = [field_label(key) for key in FORM_REQUIRED if not (st.session_state.get(f"case_field_{key}") or "").strip()]
+        if empty:
+            return "필수 칸을 적어 주세요: " + ", ".join(empty)
+    return ""
+
+
+def form_go(step: int, check: bool) -> None:
+    current = st.session_state.get("case_form_step") or 1
+    problem = form_step_problem(current) if check else ""
+    st.session_state.case_form_error = problem or None
+    if not problem:
+        st.session_state.case_form_step = step
+
+
+def render_case_form() -> None:
+    step = st.session_state.get("case_form_step") or 1
+    st.session_state.case_form_step = step
+    st.caption(f"{step} / {len(FORM_STEPS)} 단계 · " + " → ".join(
+        f"**{name}**" if i == step else name for i, name in enumerate(FORM_STEPS, 1)))
+    st.progress(step / len(FORM_STEPS))
+    guide_type = st.session_state.get("case_type_choice") or ""
 
     def field(key: str, required: bool) -> None:
-        label = field_label(key) + (" (필수)" if required else "")
+        label = field_label(key) + (" (필수)" if required else " (선택)")
         widget = st.text_area if key in CASE_LONG_TEXT_FIELDS else st.text_input
-        field_values[key] = widget(
-            label, max_chars=CASE_FIELD_MAX_CHARS[key], placeholder=field_placeholder(key, guide_type),
-            help=FIELD_GUIDES[key]["help"], key=f"case_field_{key}",
-        )
+        widget(label, max_chars=CASE_FIELD_MAX_CHARS[key], placeholder=field_placeholder(key, guide_type),
+               help=FIELD_GUIDES[key]["help"], key=f"case_field_{key}")
         if key == "suspect_info":
             with st.expander("상대방 이름이나 연락처를 모르면?"):
                 st.markdown(SUSPECT_UNKNOWN_GUIDE)
 
-    # 폼(st.form)을 쓰지 않는다: 폼 안에 적은 글은 제출 전까지 앱이 볼 수 없어,
-    # 음성 입력이 기존 내용을 덮어쓰는지 확인할 수 없기 때문이다. 각 칸은 칸을 벗어날 때 저장된다.
-    st.markdown("### 2. 꼭 적어 주세요")
-    for key in ("reporter_info", "incident_description"):
-        field(key, True)
-    st.markdown("### 3. 아는 만큼 적어 주세요 (선택)")
-    st.caption("모르는 칸은 비워 두셔도 돼요. 초안에 '[확인 필요]'로 표시돼요.")
-    for _, key in CASE_FIELDS:
-        if key not in ("case_type", "reporter_info", "incident_description"):
+    if step == 1:
+        if assist_preview() and not ai_unavailable_for_current_user():
+            with st.container(key="case_start_choice"):
+                st.markdown("**어떻게 시작할까요?** 이야기로 시작하면 대화 내용을 이 칸에 옮길 수 있어요(옮기기 전에 확인해요).")
+                options = [("AI와 글로 이야기하기", ":material/chat:", False)]
+                if voice_chat_available():
+                    options.append(("AI와 말로 이야기하기", ":material/graphic_eq:", True))
+                cols = st.columns(len(options))
+                for col, (label, icon, voice) in zip(cols, options):
+                    with col:
+                        st.button(label, key=f"case_start_{'voice' if voice else 'text'}", icon=icon, width="stretch",
+                                  on_click=start_from_chat, args=(voice,))
+                st.caption("직접 적으려면 아래에서 피해 유형부터 골라 주세요.")
+        st.markdown("### 어떤 피해인가요?")
+        type_options = list(DAMAGE_TYPES) + [OTHER_TYPE]
+        case_type_choice = st.selectbox(
+            "피해 유형 (필수)", type_options, index=None, placeholder="눌러서 고르기", key="case_type_choice",
+            help="고르면 그 유형에 맞는 작성 예시가 입력칸에 나타나요. 맞는 유형이 없으면 '기타'를 고르세요.",
+        )
+        if case_type_choice == OTHER_TYPE:
+            st.text_input("피해 유형 직접 적기 (필수)", max_chars=CASE_FIELD_MAX_CHARS["case_type"],
+                          placeholder="예: 렌터카 보증금 미반환", key="case_type_custom")
+        if case_type_choice:
+            render_case_type_help(case_type_choice)
+    elif step == 2:
+        st.markdown("### 무슨 일이 있었나요?")
+        st.caption("일어난 순서대로 적어 주세요. 날짜·금액은 아는 만큼만 적고, 모르면 비워 두면 초안에 [확인 필요]로 남아요.")
+        if voice_input_available() and not ai_unavailable_for_current_user():
+            render_voice_input()
+        for key in FORM_STEP_FIELDS[2]:
+            field(key, key in FORM_REQUIRED)
+    elif step == 3:
+        st.markdown("### 상대방과 증거")
+        st.caption("아는 만큼만 적어 주세요. 모르는 칸은 비워 두셔도 돼요.")
+        for key in FORM_STEP_FIELDS[3]:
             field(key, False)
+    else:
+        render_case_form_confirm()
 
-    st.markdown("### 4. 저장 동의")
+    error = st.session_state.get("case_form_error")
+    if error:
+        st.error(error)
+    if any((st.session_state.get(f"case_field_{key}") or "").strip() for _, key in CASE_FIELDS):
+        # 적던 내용은 다른 화면에 다녀와도 남지만, 새로고침·탭 닫기 때는 사라지므로 브라우저 확인 창을 띄운다.
+        st.session_state["_unsaved_form"] = True
+        if step < len(FORM_STEPS):
+            st.caption("적은 내용은 마지막 ‘확인·저장’ 단계에서 저장해야 남아요. 새로고침하거나 탭을 닫으면 사라져요.")
+    if step < len(FORM_STEPS):
+        with st.container(key="case_form_nav", horizontal=True):
+            if step > 1:
+                st.button("이전", key="case_form_prev", on_click=form_go, args=(step - 1, False), width="stretch")
+            st.button(f"다음: {FORM_STEPS[step]}", key="case_form_next", type="primary", width="stretch",
+                      on_click=form_go, args=(step + 1, True), icon=":material/arrow_forward:")
+
+
+def render_case_form_confirm() -> None:
+    """4단계: 적은 내용 요약, 저장 동의, '입력한 내용 확인하기'(다음 화면에서 한 번 더 확인한 뒤 저장)."""
+    st.markdown("### 확인하고 저장하기")
+    values = current_case_values()
+    choice = st.session_state.get("case_type_choice")
+    case_type = (st.session_state.get("case_type_custom") or "").strip() if choice == OTHER_TYPE else (choice or "")
+    filled = [(field_label(key), (values.get(key) or "").strip()) for _, key in CASE_FIELDS if key != "case_type"]
+    with st.container(border=True):
+        st.markdown(f"**피해 유형** {md_escape(case_type) or '_(고르지 않음)_'}")
+        for label, value in filled:
+            st.markdown(f"**{label}** " + (md_escape(value[:80] + ("…" if len(value) > 80 else "")) if value else ":gray[비어 있음 — 초안에 [확인 필요]]"))
+        st.button("고치러 가기", key="case_form_edit", type="tertiary", icon=":material/edit:", on_click=form_go, args=(2, False))
+    st.markdown("#### 저장 동의")
     st.markdown(
         "입력한 내용은 내 계정에 비공개로 저장되고, 초안을 만들 때 Google Gemini로 전송돼요. "
         "주민등록번호·계좌 비밀번호·카드번호·인증번호는 적지 마세요."
@@ -4696,36 +4757,33 @@ def render_case_form() -> None:
             )
         )
     case_data_consent = st.checkbox("[필수] 위 내용을 확인했고, 사건 정보 저장·전송에 동의합니다.", key="case_data_consent")
-    if any((st.session_state.get(f"case_field_{key}") or "").strip() for _, key in CASE_FIELDS):
-        # 적던 내용은 다른 화면에 다녀와도 남지만, 새로고침·탭 닫기 때는 사라지므로 브라우저 확인 창을 띄운다.
-        st.session_state["_unsaved_form"] = True
-        st.caption("적은 내용은 '입력한 내용 확인하기' → '"
-                   + ("사건 저장하기" if ai_unavailable_for_current_user() else "저장하고 초안 만들기")
-                   + "'를 눌러야 저장돼요. 새로고침하거나 탭을 닫으면 사라져요.")
-    submitted = st.button("입력한 내용 확인하기", type="primary", key="case_form_submit", width="stretch",
-                          icon=":material/fact_check:")
-
-    if submitted:
-        field_values["case_type"] = case_type_custom.strip() if case_type_choice == OTHER_TYPE else (case_type_choice or "")
-        errors = []
-        if not case_type_choice:
-            errors.append("1번에서 피해 유형을 골라 주세요.")
-        elif case_type_choice == OTHER_TYPE and not field_values["case_type"]:
-            errors.append("'피해 유형 직접 적기' 칸에 피해 유형을 적어 주세요.")
-        # 피해 유형 누락은 위에서 더 구체적으로 안내했으므로 나머지 항목만 검사한다.
-        errors += validate_case_values({**field_values, "case_type": field_values["case_type"] or "-"})
-        if not privacy_config_ready():
-            st.error("지금은 서비스 운영 정보를 설정하는 중이라 사건을 저장할 수 없습니다. 잠시 후 다시 시도해 주세요." + contact_hint())
-        elif not case_data_consent:
-            st.error("저장하려면 '저장 동의'에 체크해 주세요.")
-        elif errors:
-            for message in dict.fromkeys(errors):
-                st.error(message)
-        else:
-            st.session_state.case_review = {"case_id": str(uuid.uuid4()), "values": normalize_case_values(field_values)}
-            st.session_state.case_notice = None
-            st.session_state.review_skipped = []
-            st.rerun()
+    st.caption("적은 내용은 '입력한 내용 확인하기' → '"
+               + ("사건 저장하기" if ai_unavailable_for_current_user() else "저장하고 초안 만들기")
+               + "'를 눌러야 저장돼요. 새로고침하거나 탭을 닫으면 사라져요.")
+    col_prev, col_go = st.columns([1, 2])
+    with col_prev:
+        st.button("이전", key="case_form_prev", on_click=form_go, args=(3, False), width="stretch")
+    with col_go:
+        submitted = st.button("입력한 내용 확인하기", type="primary", key="case_form_submit", width="stretch",
+                              icon=":material/fact_check:")
+    if not submitted:
+        return
+    field_values = {**values, "case_type": case_type}
+    errors = [p for p in (form_step_problem(1), form_step_problem(2)) if p]
+    # 피해 유형 누락은 위에서 더 구체적으로 안내했으므로 나머지 항목만 검사한다.
+    errors += validate_case_values({**field_values, "case_type": field_values["case_type"] or "-"})
+    if not privacy_config_ready():
+        st.error("지금은 서비스 운영 정보를 설정하는 중이라 사건을 저장할 수 없습니다. 잠시 후 다시 시도해 주세요." + contact_hint())
+    elif not case_data_consent:
+        st.error("저장하려면 '저장 동의'에 체크해 주세요.")
+    elif errors:
+        for message in dict.fromkeys(errors):
+            st.error(message)
+    else:
+        st.session_state.case_review = {"case_id": str(uuid.uuid4()), "values": normalize_case_values(field_values)}
+        st.session_state.case_notice = None
+        st.session_state.review_skipped = []
+        st.rerun()
 
 
 def review_answer(key: str, unknown: bool, value: str = "") -> None:

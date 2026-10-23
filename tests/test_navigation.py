@@ -53,18 +53,30 @@ class NavigationTest(unittest.TestCase):
 
     def test_typed_case_text_survives_page_switch(self):
         self.click("home_go_case")
+        self.at.selectbox(key="case_type_choice").select("중고거래 사기").run()
+        self.click("case_form_next")
         self.at.text_area(key="case_field_incident_description").input("9월 2일 45만 원 송금").run()
         self.at.text_area(key="case_field_reporter_info").input("홍길동").run()
         self.click("brand_home_btn")
         self.click("home_go_case")
+        self.assertEqual(self.at.session_state["case_form_step"], 2)          # 적던 단계로 돌아온다
         self.assertEqual(self.at.text_area(key="case_field_incident_description").value, "9월 2일 45만 원 송금")
         self.assertEqual(self.at.text_area(key="case_field_reporter_info").value, "홍길동")
 
     def test_case_flow_steps_review_and_back_keeps_text(self):
         self.click("home_go_case")
+        self.click("case_form_next")                                          # 피해 유형 없이 넘어갈 수 없다
+        self.assertIn("피해 유형을 골라 주세요.", [e.value for e in self.at.error])
+        self.assertEqual(self.at.session_state["case_form_step"], 1)
         self.at.selectbox(key="case_type_choice").select("중고거래 사기").run()
+        self.click("case_form_next")
+        self.click("case_form_next")                                          # 필수 칸이 비면 넘어갈 수 없다
+        self.assertTrue(any("필수 칸을 적어 주세요" in e.value for e in self.at.error))
         self.at.text_area(key="case_field_reporter_info").input("홍길동").run()
         self.at.text_area(key="case_field_incident_description").input("9월 2일 45만 원 송금").run()
+        self.click("case_form_next")
+        self.click("case_form_next")
+        self.assertEqual(self.at.session_state["case_form_step"], 4)
         self.click("case_form_submit")
         self.assertIn("저장 동의", " ".join(e.value for e in self.at.error))
         self.at.checkbox(key="case_data_consent").check().run()
@@ -72,7 +84,7 @@ class NavigationTest(unittest.TestCase):
         self.assertIsNotNone(self.at.session_state["case_review"])
         self.assertTrue(any('aria-current="step"><span>2' in m.value for m in self.at.markdown))
         self.click("case_review_cancel")
-        self.assertEqual(self.at.text_area(key="case_field_incident_description").value, "9월 2일 45만 원 송금")
+        self.assertEqual(self.at.session_state["case_field_incident_description"], "9월 2일 45만 원 송금")
 
     def test_cases_page_empty_state_offers_writing(self):
         self.at.session_state["nav_page"] = "cases"
@@ -117,7 +129,7 @@ class NavigationTest(unittest.TestCase):
     def test_scroll_to_top_only_when_view_changes(self):
         self.click("home_go_case")
         self.assertTrue(self.scroll_marks())        # 화면이 바뀐 실행에서만 맨 위로 올리는 부품을 그린다
-        self.at.text_area(key="case_field_reporter_info").input("홍길동").run()
+        self.at.selectbox(key="case_type_choice").select("중고거래 사기").run()
         self.assertFalse(self.scroll_marks())       # 같은 화면에서 입력할 때는 올리지 않는다
 
     def nav_keys(self):

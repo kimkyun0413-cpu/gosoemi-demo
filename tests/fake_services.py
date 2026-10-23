@@ -277,3 +277,21 @@ def contents_text(call) -> str:
         else:
             out.append(str(getattr(item, "text", "") or "[binary]"))
     return "\n".join(out)
+
+
+def fill_new_case(at, case_type="중고거래 사기", reporter="홍길동", story="9월 2일 45만 원 송금", consent=True, submit=True):
+    """새 사건 네 단계(피해 유형 → 무슨 일 → 상대방·증거 → 확인·저장)를 차례로 채운다."""
+    if case_type:
+        at.selectbox(key="case_type_choice").select(case_type).run()
+    at.button(key="case_form_next").click().run()
+    if reporter is not None:
+        at.text_area(key="case_field_reporter_info").input(reporter).run()
+    if story is not None:
+        at.text_area(key="case_field_incident_description").input(story).run()
+    at.button(key="case_form_next").click().run()
+    at.button(key="case_form_next").click().run()
+    if consent:
+        at.checkbox(key="case_data_consent").check().run()
+    if submit:
+        at.button(key="case_form_submit").click().run()
+    return at
