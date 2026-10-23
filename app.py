@@ -167,6 +167,8 @@ ASSIST_V2_ENABLED = os.environ.get("ASSIST_V2_ENABLED") == "true"
 # 사건 작업 공간 저장·저장한 사건 수정. DB 변경(20261012000000_case_workspace_and_case_edit) 적용 후에 켠다.
 # 켜면 관리자는 v3 시행 전에도 시험할 수 있고, 일반 이용자는 v3 시행 후에만 쓸 수 있다.
 CASE_WORKSPACE_SAVE_ENABLED = os.environ.get("CASE_WORKSPACE_SAVE_ENABLED") == "true"
+# 이전 초안 보관(supabase/migrations/20261023000000_case_draft_archive.sql, 운영 미적용). 적용 전에는 켜지 않는다.
+DRAFT_ARCHIVE_ENABLED = os.environ.get("DRAFT_ARCHIVE_ENABLED") == "true"
 # 법제처 국가법령정보 Open API 사용자 ID(OC). 사용 신청·서버 IP 등록 전에는 비워 둔다. 값은 화면·로그에 내지 않는다.
 LAW_OPEN_API_OC = (os.environ.get("LAW_OPEN_API_OC") or "").strip()
 # 관리자(운영자) 계정의 Supabase 사용자 ID 목록(쉼표로 구분). 공개 기능을 켜지 않고 음성 입력 시험과
@@ -176,6 +178,7 @@ ADMIN_USER_IDS = {
     i.strip().lower() for i in (os.environ.get("ADMIN_USER_IDS") or "").split(",") if i.strip()
 }
 CASE_DRAFTS_TABLE = "case_drafts"
+DRAFT_ARCHIVE_TABLE = "case_draft_archive"
 CASE_DRAFT_MAX_CHARS = 20000
 EVIDENCE_BUCKET = "case-evidence"
 EVIDENCE_MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -1330,6 +1333,11 @@ def draft_save_available() -> bool:
     return DRAFT_SAVE_ENABLED and (privacy_v3_in_effect() or is_admin())
 
 
+def draft_archive_available() -> bool:
+    """이전 초안을 DB에 보관할 수 있을 때만 '새로 만들기'를 연다(새로고침·재로그인 뒤에도 되돌릴 수 있어야 하므로)."""
+    return DRAFT_ARCHIVE_ENABLED and draft_save_available()
+
+
 def workspace_save_available() -> bool:
     """사건 작업 공간 저장과 저장한 사건 수정. 플래그가 꺼져 있으면 누구에게도 저장하지 않는 미리보기로 보인다."""
     return CASE_WORKSPACE_SAVE_ENABLED and (privacy_v3_in_effect() or is_admin())
@@ -1453,6 +1461,31 @@ def load_case_draft(case_id: str):
         .execute()
     )
     return (response.data or [None])[0]
+
+
+def load_draft_archive(case_id: str):
+    session = st.session_state.get("supabase_session") or {}
+    response = (
+        get_authed_client().table(DRAFT_ARCHIVE_TABLE).select("draft_text, archived_at")
+        .eq("user_id", session.get("user_id", "")).eq("case_id", str(case_id)).limit(1).execute()
+    )
+    return (response.data or [None])[0]
+
+
+def save_draft_archive(case_id: str, draft_text: str) -> str:
+    """이전 초안 1개를 보관한다(있으면 바꾼다). 표는 draft_text만 고칠 수 있어 upsert 대신 고치고, 없으면 새로 넣는다.
+    보관 시각은 서버가 정한다. 돌려주는 값은 보관 시각."""
+    session = ensure_active_session()
+    if not session or not session.get("user_id"):
+        raise RuntimeError("로그인이 만료되었습니다. 다시 로그인해 주세요.")
+    text = (draft_text or "").strip()[:CASE_DRAFT_MAX_CHARS]
+    if not text:
+        raise ValueError("보관할 초안이 비어 있어요.")
+    table = lambda: get_authed_client().table(DRAFT_ARCHIVE_TABLE)  # noqa: E731
+    rows = table().update({"draft_text": text}).eq("user_id", session["user_id"]).eq("case_id", str(case_id)).execute().data or []
+    if not rows:
+        rows = table().insert({"user_id": session["user_id"], "case_id": str(case_id), "draft_text": text}).execute().data or []
+    return (rows[0].get("archived_at") if rows else None) or datetime.datetime.now(KST).isoformat()
 
 
 class SaveConflict(RuntimeError):
@@ -1591,6 +1624,8 @@ def collect_my_data() -> dict:
                        .eq("user_id", user_id).execute(), optional_table=True)
     ws_rows = fetch("사건 정리 기록(경위·증거 설명·일정·체크)", lambda: client.table(WORKSPACE_TABLE).select("*")
                     .eq("user_id", user_id).execute(), optional_table=True)
+    archive_rows = fetch("보관한 이전 초안", lambda: client.table(DRAFT_ARCHIVE_TABLE).select("case_id, user_id, draft_text, archived_at")
+                         .eq("user_id", user_id).execute(), optional_table=True)
     consents = [{**row, "created_at": next((row[k] for k in CONSENT_TIME_KEYS if row.get(k)), row.get("created_at"))}
                 for row in fetch_consents()]
     evidence_items = []
@@ -1612,7 +1647,8 @@ def collect_my_data() -> dict:
     if AI_USAGE_DB_ENABLED:
         account["ai_usage"] = fetch("AI 사용량 기록", lambda: client.rpc("my_ai_usage").execute())
     result = build_text_part(user_id, account, cases, {r["case_id"]: r for r in draft_rows}, {r["case_id"]: r for r in ws_rows},
-                             consents, evidence_items, missing, datetime.datetime.now(KST), evidence_status=evidence)
+                             consents, evidence_items, missing, datetime.datetime.now(KST), evidence_status=evidence,
+                             archives={r["case_id"]: r for r in archive_rows})
     result["user_id"] = user_id
     return result
 
@@ -5344,6 +5380,70 @@ def render_ws_story(case_id: str, case: dict, ws: dict, file_names: list) -> Non
     st.button("다음: 초안", key=f"ws_to_draft_{case_id}", type="primary", on_click=ws_go, args=(case_id, "draft"))
 
 
+def render_ws_regenerate(case_id: str, case: dict, ws: dict, draft_key: str, editor_key: str, current: str) -> None:
+    """'새로 만들기': 저장한 사건 내용으로 처음부터 다시 쓴다. 그 전에 지금 초안(직접 고친 것 포함)을 DB에 보관한다.
+    되돌리기는 지금 초안과 보관 초안을 서로 바꿔 어느 쪽도 버리지 않는다. 초안 편집칸을 그리기 전에만 부른다."""
+    st.markdown("**새로 만들기** — 저장한 사건 내용으로 AI가 처음부터 다시 써요. 직접 고친 문장은 새 초안에 들어가지 않아요. "
+                "그래서 지금 초안(직접 고친 내용 포함)을 ‘이전 초안’으로 먼저 보관해요.")
+    archive = ws.get("archive")
+    if archive:
+        st.caption(f"보관한 이전 초안 1개 · {format_created_at(archive.get('at')) if archive.get('at') else '방금'}")
+        if st.button("이전 초안으로 되돌리기 (지금 초안은 보관)", key=f"ws_swap_{case_id}", icon=":material/undo:"):
+            try:
+                at = save_draft_archive(case_id, current)
+            except Exception as error:
+                log_auth_error(error)
+                st.error("지금 초안을 보관하지 못해 되돌리지 않았어요. 잠시 후 다시 눌러 주세요." + contact_hint())
+            else:
+                ws["archive"] = {"text": current, "at": at}
+                st.session_state[editor_key] = archive["text"]
+                ws["regen_notice"] = "이전 초안으로 되돌렸어요. 바꾸기 전 초안은 ‘이전 초안’으로 보관했어요. ‘작업 저장’을 눌러야 저장돼요."
+                st.rerun()
+    if not draft_archive_available():
+        st.caption("이전 초안 보관 기능을 준비 중이라 지금은 새로 만들 수 없어요. 직접 고치거나 ‘문장 다듬기’를 써 주세요.")
+        return
+    ask_key = f"ws_regen_ask_{case_id}"
+    if not st.session_state.get(ask_key):
+        st.button("새로 만들기", key=f"ws_regen_{case_id}", icon=":material/refresh:", disabled=ai_unavailable_for_current_user(),
+                  on_click=lambda: st.session_state.__setitem__(ask_key, True))
+        if ws.get("regen_notice"):
+            st.success(ws.pop("regen_notice"))
+        return
+    with st.container(border=True, key=f"ws_regen_box_{case_id}"):
+        st.markdown("**초안을 새로 만들까요?**")
+        st.markdown("- 지금 초안(직접 고친 내용 포함)은 **‘이전 초안’으로 보관**해요. 새로고침하거나 다시 로그인해도 남아요.\n"
+                    "- 새 초안이 마음에 들지 않으면 **‘이전 초안으로 되돌리기’**로 돌아갈 수 있어요.\n"
+                    "- ‘작업 저장’을 누르기 전에는 저장된 초안이 바뀌지 않아요."
+                    + ("\n- 이미 보관한 이전 초안이 있으면 지금 초안으로 바뀌어요." if archive else ""))
+        col_ok, col_cancel = st.columns(2)
+        with col_cancel:
+            st.button("취소", key=f"ws_regen_cancel_{case_id}", width="stretch",
+                      on_click=lambda: st.session_state.__setitem__(ask_key, False))
+        with col_ok:
+            go = st.button("보관하고 새로 만들기", key=f"ws_regen_ok_{case_id}", type="primary", width="stretch",
+                           disabled=ai_unavailable_for_current_user())
+    if not go:
+        return
+    try:
+        at = save_draft_archive(case_id, current)
+    except Exception as error:
+        log_auth_error(error)
+        st.error("지금 초안을 보관하지 못해 새로 만들지 않았어요. 잠시 후 다시 눌러 주세요." + contact_hint())
+        return
+    ws["archive"] = {"text": current, "at": at}
+    st.session_state[ask_key] = False
+    try:
+        with st.spinner("고소장 초안을 새로 만들고 있어요. 보통 10~30초 걸려요."):
+            new = generate_case_draft(case)
+    except Exception as error:
+        st.error(ai_error_message(error, "새 초안을 만들지 못했어요. 지금 초안은 그대로 있고, 보관도 해 두었어요."))
+        return
+    st.session_state[draft_key] = new
+    st.session_state[editor_key] = new
+    ws["regen_notice"] = "새 초안을 만들었어요. 이전 초안은 보관했어요. ‘작업 저장’을 눌러야 새 초안이 저장돼요."
+    st.rerun()
+
+
 def render_ws_draft(case_id: str, case: dict, ws: dict, draft_key: str, editor_key: str) -> None:
     ws_sync_saved_draft(ws, case_id, draft_key, editor_key)
     render_ws_draft_sync_notice(case_id, ws, draft_key, editor_key)
@@ -5396,6 +5496,7 @@ def render_ws_draft(case_id: str, case: dict, ws: dict, draft_key: str, editor_k
                   on_click=lambda: (st.session_state.__setitem__(editor_key, ws["history"].pop()), ws.pop("rewrite_notes", None)))
     for note in ws.get("rewrite_notes") or []:
         st.warning(note + " 바뀐 부분을 꼭 확인하거나 '바로 전 초안으로'를 눌러 주세요.")
+    render_ws_regenerate(case_id, case, ws, draft_key, editor_key, current)
     render_draft_panel(editor_key, draft, case, case_id, show_save=not workspace_save_available(), show_download=False,
                        show_missing=False)
     st.button("다음: 내려받기", key=f"ws_to_download_{case_id}", type="primary", icon=":material/arrow_forward:",
@@ -5552,6 +5653,13 @@ def ws_load(case: dict, case_id: str, ws: dict, draft_key: str, editor_key: str)
             st.session_state[draft_key] = draft_row["draft_text"]
             st.session_state[editor_key] = draft_row["draft_text"]
             st.session_state[f"{editor_key}_saved"] = {"text": draft_row["draft_text"].strip(), "at": draft_row.get("updated_at")}
+    if draft_archive_available():
+        try:
+            row = load_draft_archive(case_id)
+        except Exception as error:
+            log_auth_error(error)
+            row = None
+        ws["archive"] = {"text": row["draft_text"], "at": row.get("archived_at")} if row else None
 
 
 def ws_sync_saved_draft(ws: dict, case_id: str, draft_key: str, editor_key: str) -> None:

@@ -117,6 +117,19 @@ class BuildTest(unittest.TestCase):
         self.assertEqual({c["case_id"] for c in data["cases"]}, {C1, C2})
         self.assertNotIn("access_token", data["cases"][0])
 
+    def test_previous_draft_archive_and_done_marks_are_exported_for_own_cases_only(self):
+        archives = {C1: {"case_id": C1, "user_id": ME, "draft_text": "보관한 이전 초안(가상)", "archived_at": "2026-10-23"},
+                    CX: {"case_id": CX, "user_id": OTHER, "draft_text": "다른 사람 보관 초안"}}
+        workspaces = {C1: {"case_id": C1, "user_id": ME, "checklist": {"steps_done": ["story", "check", "x"]}}}
+        result = dx.build_text_part(ME, {"email": None, "method": ""}, cases(), {}, workspaces, [], [], [], NOW, archives=archives)
+        text = zip_read(result["text_part"], "보관한_이전초안.txt")
+        self.assertIn("보관한 이전 초안(가상)", text)
+        blob = b"".join(zipfile.ZipFile(io.BytesIO(result["text_part"])).read(n) for n in zip_names(result["text_part"]))
+        self.assertNotIn("다른 사람 보관 초안".encode(), blob)
+        ws = zip_read(result["text_part"], "사건정리_경위_증거_일정.txt")
+        self.assertIn("사건 내용, 증거", ws)                       # 단계 순서대로, 모르는 값은 버린다
+        self.assertIn("증거가 충분하다거나 제출 준비가 끝났다는 뜻이 아님", ws)
+
     def test_evidence_part_refuses_foreign_path(self):
         part = [{"case_id": CX, "path": f"{OTHER}/{CX}/x.png", "name": "남의파일.png", "zip_path": "r/x.png"}]
         built = dx.build_evidence_part(ME, "r", part, 2, 2, lambda p: b"NO", NOW)

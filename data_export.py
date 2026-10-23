@@ -172,7 +172,7 @@ def plan_parts(items: list, limit: int = None) -> list:
 
 def build_text_part(user_id: str, account: dict, cases: list, drafts: dict, workspaces: dict, consents: list,
                     evidence: list, missing: list, now: datetime.datetime, limit: int = None,
-                    evidence_status: dict = None) -> dict:
+                    evidence_status: dict = None, archives: dict = None) -> dict:
     """1번 묶음(글 자료 + 증거파일 목록)을 만들고, 증거파일 묶음 계획을 돌려준다. 증거파일 내용은 받지 않는다.
 
     evidence: [{"case_id", "path", "name", "size"}] (목록에서 읽은 것)
@@ -193,6 +193,8 @@ def build_text_part(user_id: str, account: dict, cases: list, drafts: dict, work
     workspaces = {str(k): _clean(v) for k, v in workspaces.items()
                   if str(k) in case_ids and str((v or {}).get("user_id", user_id)) == str(user_id)}
     consents = [_clean(r) for r in consents if str(r.get("user_id", user_id)) == str(user_id)]
+    archives = {str(k): _clean(v) for k, v in (archives or {}).items()
+                if str(k) in case_ids and str((v or {}).get("user_id", user_id)) == str(user_id)}
 
     folders = {}
     for i, case in enumerate(sorted(own_cases, key=lambda c: str(c.get("created_at") or "")), 1):
@@ -230,9 +232,12 @@ def build_text_part(user_id: str, account: dict, cases: list, drafts: dict, work
                            (drafts[cid].get("draft_text") or "") + f"\n\n(마지막 저장: {drafts[cid].get('updated_at', '')})\n")
             if cid in workspaces:
                 z.writestr(f"{folder}/사건정리_경위_증거_일정.txt", workspace_text(workspaces[cid]))
+            if cid in archives:
+                z.writestr(f"{folder}/보관한_이전초안.txt",
+                           (archives[cid].get("draft_text") or "") + f"\n\n(보관한 때: {archives[cid].get('archived_at', '')})\n")
         data = {
             "account": {"email": account.get("email"), "method": account.get("method")},
-            "consents": consents, "cases": own_cases, "drafts": drafts, "workspaces": workspaces,
+            "consents": consents, "cases": own_cases, "drafts": drafts, "workspaces": workspaces, "draft_archives": archives,
             "evidence_files": [{"case_id": f["case_id"], "name": f["name"], "bytes": f["size"], "zip_path": f["zip_path"],
                                 "part": no} for no, part in enumerate(parts, 2) for f in part],
             "missing": missing, "exported_at": now.isoformat(),

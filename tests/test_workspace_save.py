@@ -226,6 +226,43 @@ class WorkspaceSaveTest(unittest.TestCase):
         again.run()
         self.assertTrue(any("‘4단계 정리 표시’에 해당하는 사건이 없어요." in i.value for i in again.info))
 
+    def editor(self, at):
+        return at.text_area(key=f"list_draft_editor_{CID}")
+
+    def test_new_draft_archives_edited_draft_first_and_survives_reopen(self):
+        os.environ["DRAFT_ARCHIVE_ENABLED"] = "true"
+        self.seed_saved_draft("고소장\n범죄 사실\n처음 초안", "2026-10-17T03:26:00+00:00")
+        at = self.open(step="draft")
+        self.editor(at).input("고소장\n범죄 사실\n직접 고친 문장").run()           # 저장하지 않은 수정
+        at.button(key=f"ws_regen_{CID}").click().run()
+        self.assertTrue(any("‘이전 초안’으로 보관" in m.value for m in at.markdown))   # 바로 바꾸지 않고 먼저 묻는다
+        self.assertEqual(fake.CALLS, [])
+        fake.REPLIES[:] = ["고소장\n범죄 사실\nAI가 새로 쓴 문장"]
+        at.button(key=f"ws_regen_ok_{CID}").click().run()
+        self.assertEqual(fake.TABLES["case_draft_archive"][0]["draft_text"], "고소장\n범죄 사실\n직접 고친 문장")
+        self.assertIn("AI가 새로 쓴 문장", self.editor(at).value)
+        self.assertIn("처음 초안", fake.TABLES["case_drafts"][0]["draft_text"])  # 작업 저장 전에는 저장된 초안 그대로
+        again = self.open(step="draft")                                          # 새로고침·재로그인과 같다
+        self.assertTrue(any("보관한 이전 초안 1개" in c.value for c in again.caption))
+        again.button(key=f"ws_swap_{CID}").click().run()                         # 되돌리기 = 서로 바꾸기
+        self.assertEqual(self.editor(again).value, "고소장\n범죄 사실\n직접 고친 문장")
+        self.assertIn("처음 초안", fake.TABLES["case_draft_archive"][0]["draft_text"])
+
+    def test_new_draft_is_not_made_when_archive_fails_or_is_off(self):
+        os.environ["DRAFT_ARCHIVE_ENABLED"] = "true"
+        self.seed_saved_draft("고소장\n범죄 사실\n처음 초안", "2026-10-17T03:26:00+00:00")
+        at = self.open(step="draft")
+        at.button(key=f"ws_regen_{CID}").click().run()
+        fake.FAIL_NEXT.append(("case_draft_archive", "update"))
+        at.button(key=f"ws_regen_ok_{CID}").click().run()
+        self.assertTrue(any("보관하지 못해 새로 만들지 않았어요" in e.value for e in at.error))
+        self.assertEqual(fake.CALLS, [])
+        self.assertIn("처음 초안", self.editor(at).value)
+        os.environ["DRAFT_ARCHIVE_ENABLED"] = ""
+        off = self.open(step="draft")
+        self.assertFalse(any(b.key == f"ws_regen_{CID}" for b in off.button))
+        self.assertTrue(any("이전 초안 보관 기능을 준비 중" in c.value for c in off.caption))
+
     def test_partial_save_case_ok_workspace_failed_then_retry_only_rest(self):
         at = self.open(step="check")
         at.text_input(key=f"ws_edit_{CID}_witness").input("친구").run()

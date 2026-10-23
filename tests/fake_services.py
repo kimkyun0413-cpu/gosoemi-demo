@@ -30,7 +30,7 @@ def session_for(user_id: str, email: str) -> dict:
     }
 
 
-TABLES = {"cases": CASES, "case_workspace": [], "case_drafts": []}
+TABLES = {"cases": CASES, "case_workspace": [], "case_drafts": [], "case_draft_archive": []}
 FAIL_NEXT = []  # 다음 요청을 실패시킬 (표, 동작) 목록. 예: [("case_workspace", "update")]
 # 가짜 consent_records에 있는 열. 운영처럼 '동의한 때' 열이 없다고 두고, 없는 열을 고르면 PostgREST처럼 42703 오류를 낸다.
 CONSENT_COLUMNS = ("user_id", "terms_version", "privacy_version")
@@ -98,11 +98,13 @@ class FakeQuery:
             rows[:] = [r for r in rows if not self._match(r)]
             if self.table_name == "cases":  # 사건 삭제 트리거 흉내
                 for r in gone:
-                    for other in ("case_workspace", "case_drafts"):
+                    for other in ("case_workspace", "case_drafts", "case_draft_archive"):
                         TABLES[other][:] = [x for x in TABLES[other] if str(x.get("case_id")) != str(r.get("case_id"))]
             return SimpleNamespace(data=gone)
         if self.op == "insert":
             row = dict(self.payload)
+            if self.table_name == "case_draft_archive":
+                row["archived_at"] = _now_iso()
             if self.table_name == "case_workspace":
                 if any(r["user_id"] == row["user_id"] and r["case_id"] == row["case_id"] for r in rows):
                     raise RuntimeError('duplicate key value violates unique constraint "case_workspace_pkey" (23505)')
@@ -129,6 +131,8 @@ class FakeQuery:
                         r["updated_at"] = _now_iso()
                     if self.table_name == "cases":
                         r["edit_version"] = int(r.get("edit_version") or 1) + 1
+                    if self.table_name == "case_draft_archive":
+                        r["archived_at"] = _now_iso()
                     out.append(dict(r))
             return SimpleNamespace(data=out)
         return SimpleNamespace(data=[])
@@ -260,6 +264,7 @@ def reset():
     FILES.clear()
     TABLES["case_workspace"].clear()
     TABLES["case_drafts"].clear()
+    TABLES["case_draft_archive"].clear()
     FAIL_NEXT.clear()
 
 
